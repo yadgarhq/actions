@@ -1,0 +1,142 @@
+# Is this repository clean? One definition, called by ci-pr and usable alone.
+#
+# DETECTS what the repository is rather than being told (D62). The repositories
+# are not uniform — most are Rust services, but proto has no cargo at all, docs
+# is prose, deploy and argocd are manifests — and a flag per repository kind
+# would be a second configuration surface that drifts from the first.
+name: validation
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.d.outputs.rust }}
+      buf: ${{ steps.d.outputs.buf }}
+      chart: ${{ steps.d.outputs.chart }}
+      image: ${{ steps.d.outputs.image }}
+      precommit: ${{ steps.d.outputs.precommit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      # Detection NARRATES. Silent magic is unmaintainable; a repository whose
+      # CI mysteriously does nothing is the failure this design guards against,
+      # so every run says what it found and what it therefore skipped.
+      - id: d
+        name: Detect what this repository is
+        run: |
+          set -euo pipefail
+          detect() {
+            if [ -e "$2" ]; then
+              echo "$1=true" >> "$GITHUB_OUTPUT"
+              echo "- **$1**: \`$2\` present → running $1 stages" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "$1=false" >> "$GITHUB_OUTPUT"
+              echo "- $1: no \`$2\` → skipped" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+          echo "## Detected" >> "$GITHUB_STEP_SUMMARY"
+          detect rust      Cargo.toml
+          detect buf       buf.yaml
+          detect chart     chart
+          detect image     Dockerfile
+          detect precommit .pre-commit-config.yaml
+
+  # Server-side half of D59. The hooks make the check fast; this makes it true —
+  # it catches what a skipped local hook let through, which the no-bypass rule
+  # otherwise relies on goodwill for.
+  pre-commit:
+    needs: detect
+    if: needs.detect.outputs.precommit == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.x" }
+      - uses: pre-commit/action@v3.0.1
+
+  rust:
+    needs: detect
+    if: needs.detect.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: "rustfmt, clippy" }
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - name: clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  # D24 requires a permissive stack stay viable; O10 requires the audit be
+  # re-run before adding a dependency. Enforced rather than remembered.
+  licences:
+    needs: detect
+    if: needs.detect.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with: { command: check }
+
+  # D16's gate: additive-only evolution enforced structurally rather than by
+  # discipline, which is the reason protobuf was chosen over HTTP/JSON.
+  buf:
+    needs: detect
+    if: needs.detect.outputs.buf == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          # buf breaking compares against a tag, so history and tags must exist.
+          fetch-depth: 0
+      - uses: bufbuild/buf-setup-action@v1
+        with: { version: 1.72.0 }
+      - run: buf lint
+      - run: buf build -o /dev/null
+      - run: buf format --diff --exit-code
+      - name: breaking (against the major's FIRST tag)
+        run: |
+          set -euo pipefail
+          # Against the first tag of the major, not the latest. D15 makes changes
+          # additive-only WITHIN a major, so v1 must stay compatible with v1.0.0
+          # forever — comparing against the newest tag would let the contract
+          # drift away from it one compatible step at a time.
+          BASE=$(git tag --list 'v1.*' --sort=v:refname | head -n1)
+          if [ -z "$BASE" ]; then
+            echo "No v1 tag yet — nothing to compare against." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "Comparing against \`$BASE\`" >> "$GITHUB_STEP_SUMMARY"
+          buf breaking --against ".git#tag=$BASE"
+
+  manifests:
+    needs: detect
+    if: needs.detect.outputs.chart == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: azure/setup-helm@v4
+      - run: helm lint chart
+      - run: helm template chart >/dev/null

@@ -1,0 +1,44 @@
+# Shared hooks, so each repository stops copying a near-identical local config
+# (D59, D62). A repository references these instead of redefining them:
+#
+#   - repo: https://github.com/yadgarhq/actions
+#     rev: v1
+#     hooks:
+#       - id: cargo-fmt
+#       - id: cargo-clippy
+#       - id: gitleaks
+#
+# `language: system` throughout: these call tools the developer already has,
+# rather than pre-commit building an environment per repository.
+- id: cargo-fmt
+  name: cargo fmt
+  language: system
+  entry: cargo fmt --check
+  pass_filenames: false
+  files: \.rs$
+
+- id: cargo-clippy
+  name: cargo clippy
+  language: system
+  entry: cargo clippy --all-targets --all-features -- -D warnings
+  pass_filenames: false
+  files: \.(rs|toml)$
+
+# D24 requires a permissive stack stay viable and O10 requires the audit be
+# re-run before adding a dependency — an instruction that otherwise depends on
+# being remembered.
+- id: cargo-deny
+  name: cargo deny (licences, advisories, sources)
+  language: system
+  entry: cargo deny check
+  pass_filenames: false
+  files: (Cargo\.(toml|lock)|deny\.toml)$
+
+# Force-pushing does not scrub GitHub history — PR refs pin every commit and are
+# never collected — so a credential that lands in a repository means deleting and
+# recreating it. Prevention is the only cheap point on that timeline.
+- id: gitleaks
+  name: Detect secrets and credentials
+  language: system
+  entry: gitleaks git --pre-commit --staged --verbose
+  pass_filenames: false

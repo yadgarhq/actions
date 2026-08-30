@@ -1,0 +1,29 @@
+# This repository is workflows and hook definitions — YAML and nothing else.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+  - repo: local
+    hooks:
+      - id: gitleaks
+        name: Detect secrets and credentials
+        language: system
+        entry: gitleaks git --pre-commit --staged --verbose
+        pass_filenames: false
+      # Workflows reaching every repository deserve a linter. actionlint catches
+      # the expression and context errors that otherwise surface as a failed run
+      # in somebody else's repository.
+      - id: actionlint
+        name: actionlint
+        language: system
+        entry: bash -c 'command -v actionlint >/dev/null && actionlint || echo "actionlint not installed — skipping (CI enforces)"'
+        pass_filenames: false
+        files: ^\.github/workflows/.*\.ya?ml$
