@@ -64,9 +64,23 @@
   additional_dependencies: ["prettier@3.9.6"]
   entry: prettier --write --ignore-unknown
   types_or: [markdown, json, yaml]
-# NO buf hooks here, deliberately. bufbuild publishes official, maintained
-# pre-commit hooks that already pin by rev and include buf-breaking with its
-# --against argument. Wrapping them would add a version to maintain and nothing
-# else. Prettier is here for the opposite reason: its own mirror
-# (pre-commit/mirrors-prettier) is ARCHIVED, so there is no maintained upstream
-# to defer to.
+# WHEN TO WRAP A TOOL HERE, refined after getting it wrong once: the test is not
+# whether upstream maintains its own hooks, it is HOW MANY REPOSITORIES USE THE
+# TOOL. A directly referenced hook is a version pinned separately in every
+# repository that references it, and that is where drift comes from.
+#
+#   many repositories  -> wrap here, so one version exists
+#   exactly one        -> reference upstream directly, drift is impossible
+#
+# So prettier and hadolint are wrapped (every repository, and ~61 respectively),
+# while buf is NOT: only `proto` carries a .proto contract, so bufbuild's own
+# maintained hooks are referenced there and there is nothing to drift against.
+# Wrapping buf would add a version to maintain and buy nothing.
+
+# Dockerfiles. hadolint publishes its own hooks, but it is wrapped here anyway
+# — see the note below on when that is right.
+- id: hadolint
+  name: hadolint
+  language: system
+  types: [dockerfile]
+  entry: hadolint

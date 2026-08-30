@@ -131,6 +131,20 @@ jobs:
           echo "Comparing against \`$BASE\`" >> "$GITHUB_STEP_SUMMARY"
           buf breaking --against ".git#tag=$BASE"
 
+  # D62's detection already looks for a Dockerfile in order to publish an image.
+  # Without this it would build one that nothing had linted.
+  dockerfile:
+    needs: detect
+    if: needs.detect.outputs.image == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: Dockerfile
+
   manifests:
     needs: detect
     if: needs.detect.outputs.chart == 'true'
