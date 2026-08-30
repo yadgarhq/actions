@@ -7,7 +7,9 @@ on:
   workflow_call:
     inputs:
       version:
-        description: "Release version, without a leading v."
+        description: >-
+          The release version. A git tag name is fine: a leading `v` is stripped
+          here so every caller can pass `github.ref_name` unchanged.
         type: string
         required: true
 
@@ -27,6 +29,14 @@ jobs:
     outputs:
       image: ${{ steps.d.outputs.image }}
       chart: ${{ steps.d.outputs.chart }}
+      # Normalised ONCE, here, and read by every later job. Callers pass
+      # `github.ref_name`, which for the tag `v0.1.0` is `v0.1.0` — but a chart
+      # version and an image tag must both be bare SemVer, and D64 derives the
+      # number from the changelog with no `v` anywhere in it. Stripping in the
+      # callers instead would mean the same expression copied into ~61 repos,
+      # and GitHub expressions have no suffix-strip: `replace(x, 'v', '')` is
+      # the only inline option and it eats the `v` in `preview` too.
+      version: ${{ steps.d.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -36,6 +46,8 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
+          VERSION="${VERSION#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "## Release ${VERSION}" >> "$GITHUB_STEP_SUMMARY"
           for pair in "image:Containerfile" "chart:chart"; do
             k=${pair%%:*}; f=${pair#*:}
@@ -77,7 +89,7 @@ jobs:
           # Images at the top level; charts under charts/. They share a
           # namespace and would otherwise collide — `helm push` would claim
           # exactly the path the image wants (D61).
-          tags: ${{ env.REGISTRY }}/${{ github.repository }}:${{ inputs.version }}
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}:${{ needs.detect.outputs.version }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
@@ -127,7 +139,7 @@ jobs:
       # a silent wrong state is worse than a red build.
       - name: verify an adopter can actually pull this
         env:
-          REF: ${{ env.REGISTRY }}/${{ github.repository }}:${{ inputs.version }}
+          REF: ${{ env.REGISTRY }}/${{ github.repository }}:${{ needs.detect.outputs.version }}
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.repository }}
         run: |
@@ -185,7 +197,7 @@ jobs:
           yq -i ".image.digest = \"$DIGEST\" | del(.image.tag)" chart/values.yaml
       - name: package and push
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ needs.detect.outputs.version }}
           REGISTRY: ${{ env.REGISTRY }}
           OWNER: ${{ github.repository_owner }}
           ACTOR: ${{ github.actor }}
