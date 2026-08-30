@@ -264,10 +264,37 @@ jobs:
           sys.exit(1)
           PY
 
+  # A REAL ENGINE, not a mock. D69's capability probe establishes what an engine
+  # can do by executing against it, so a test suite with no engine cannot
+  # exercise the one thing that can be wrong. A `-db` repo's tests without a
+  # database pass in 0.00s and prove the logic around the gap, never the gap.
+  #
+  # The service runs for every Rust repo rather than only the ones that use it.
+  # Detecting "does this repo need a database" means a signal each repo has to
+  # set and keep correct, and the failure is silent: forget it, and the suite
+  # goes back to passing without an engine. ~20 seconds on a repo that ignores
+  # it is the cheaper side of that trade (D62 — the shared workflow detects what
+  # a repo IS, and every Rust repo here is a candidate).
+  #
+  # Pinned by digest, never by tag (D61). 11.8 is the first LTS carrying the
+  # VECTOR type the probe checks for.
   test:
     needs: detect
     if: github.event_name != 'push' && needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb@sha256:2439dcd7d14010ecd1ff7a4e1c5abe8e208c34fe35290744deeeaac3569043c3 # 11.8
+        env:
+          MARIADB_ROOT_PASSWORD: ci
+          MARIADB_DATABASE: ci
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=12
+    env:
+      YADGAR_TEST_DSN: mysql://root:ci@127.0.0.1:3306/ci
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
