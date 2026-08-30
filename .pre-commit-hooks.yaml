@@ -116,8 +116,14 @@
 #
 # The failure it prevents is silent: a module that quietly stops emitting looks
 # exactly like a module nobody called, which is the reading that would break D15.
+# `language: script`, NOT python. `language: python` makes pre-commit try to pip
+# install THIS repository, which has no pyproject.toml and is not a package —
+# the error is "Directory '.' is not installable", raised in the CONSUMING repo
+# where nothing explains it. Same shape as the earlier language: node failure.
+#
+# script runs the file directly; it carries a shebang and the executable bit.
 - id: observe-coverage
   name: every RPC handler is instrumented
-  language: python
-  entry: python3 hooks/observe_coverage.py
+  language: script
+  entry: hooks/observe_coverage.py
   files: \.rs$
