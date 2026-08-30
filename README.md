@@ -20,9 +20,11 @@ what the pull request had just passed, on code already merged, with nobody
 watching the result — and the ruleset makes direct pushes impossible, so there
 was no drift for it to catch.
 
-**The weekly schedule is what that leaves missing.** Callers track `@main`, so a
-repository never revalidates when a shared workflow changes or a new advisory
-lands. A push cannot notice that; a schedule can.
+**Nothing replaces it, deliberately.** A repository tracking `@main` does not
+revalidate when a shared workflow changes or a new advisory lands until its next
+pull request. A schedule would cover that and was tried and removed: it is
+machinery for a problem nobody has yet, on repositories that change often enough
+that the next pull request is rarely far away.
 
 **The version report is genuinely push-only.** It reads `main`'s history since
 the last tag, which a pull request cannot see.
