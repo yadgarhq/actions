@@ -124,7 +124,16 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends protobuf-compiler
+          # BOTH packages. protobuf-compiler ships only /usr/bin/protoc;
+          # libprotobuf-dev ships google/protobuf/*.proto under /usr/include —
+          # the well-known types `buf export` deliberately omits because protoc
+          # is expected to supply them. Verified in an ubuntu:24.04 container:
+          # after protobuf-compiler alone, timestamp.proto is ABSENT.
+          #
+          # Without the second package the build fails with
+          # "google/protobuf/timestamp.proto: File not found", which reads as a
+          # broken contract rather than a missing package.
+          sudo apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev
 
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         if: needs.detect.outputs.rust == 'true'
@@ -328,7 +337,16 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends protobuf-compiler
+          # BOTH packages. protobuf-compiler ships only /usr/bin/protoc;
+          # libprotobuf-dev ships google/protobuf/*.proto under /usr/include —
+          # the well-known types `buf export` deliberately omits because protoc
+          # is expected to supply them. Verified in an ubuntu:24.04 container:
+          # after protobuf-compiler alone, timestamp.proto is ABSENT.
+          #
+          # Without the second package the build fails with
+          # "google/protobuf/timestamp.proto: File not found", which reads as a
+          # broken contract rather than a missing package.
+          sudo apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev
 
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
