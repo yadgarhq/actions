@@ -20,9 +20,6 @@ permissions:
 # WHAT RUNS WHEN, and the push case is the interesting one.
 #
 #   pull_request  everything. This is the gate.
-#   schedule      everything, because a caller tracks @main and a repository
-#                 otherwise never revalidates when a shared workflow changes or
-#                 a new advisory lands.
 #   push to main  the version report ONLY.
 #
 # Validation on push to main would re-run exactly what the pull request just
