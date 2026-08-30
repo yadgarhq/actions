@@ -113,21 +113,50 @@ jobs:
 
       # See ci-release.yml for why this exists: a new package is private by
       # default, no API can change it, and nothing else would report it.
-      - name: verify an adopter can actually pull this
+      # ANONYMOUSLY, which is the whole point and is what this check got wrong.
+      #
+      # It used `docker manifest inspect`, which runs AFTER docker/login-action
+      # in this same job — so it inspected as an authenticated org member and
+      # succeeded against a private package. A check that cannot fail for the
+      # reason it exists is worse than no check: this one reported "anonymous
+      # pull works" for two images that were private, and the first real user of
+      # those images would have found out instead.
+      #
+      # GHCR issues a pull token to an anonymous client only for a public
+      # package, so requesting one with no credentials is the honest test. The
+      # manifest is then fetched with that token, because a token alone does not
+      # prove the manifest is readable.
+      - name: verify an adopter can actually pull this, anonymously
         env:
-          REF: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}:latest
           OWNER: ${{ github.repository_owner }}
           IMAGE_NAME: ${{ matrix.image }}
         run: |
-          set -euo pipefail
-          if docker manifest inspect "$REF" >/dev/null 2>&1; then
-            echo "Anonymous pull of \`$REF\` works." >> "$GITHUB_STEP_SUMMARY"
+          set -uo pipefail
+          REPO="${OWNER}/${IMAGE_NAME}"
+          TOKEN=$(curl -sf "https://ghcr.io/token?scope=repository:${REPO}:pull&service=ghcr.io" \
+                  | python3 -c 'import sys,json;print(json.load(sys.stdin).get("token",""))' 2>/dev/null || true)
+
+          CODE=000
+          if [ -n "$TOKEN" ]; then
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json' \
+              "https://ghcr.io/v2/${REPO}/manifests/latest")
+          fi
+
+          if [ "$CODE" = "200" ]; then
+            echo "Anonymous pull of \`ghcr.io/${REPO}:latest\` works." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+
           {
             echo "### Published, but NOT publicly pullable"
             echo ""
-            echo "One-time manual step, no API exists:"
+            echo "Anonymous manifest fetch returned \`${CODE}\` (000 = GHCR refused an anonymous token)."
+            echo ""
+            echo "One-time manual step — D61 records that no API exists for this;"
+            echo "\`PATCH /orgs/{org}/packages/container/{name}\` returns 404:"
+            echo ""
             echo "  https://github.com/orgs/${OWNER}/packages/container/${IMAGE_NAME}/settings"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::error::${IMAGE_NAME} is not publicly pullable. See the job summary."
