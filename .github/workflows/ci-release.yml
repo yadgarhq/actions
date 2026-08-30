@@ -89,7 +89,19 @@ jobs:
           # Images at the top level; charts under charts/. They share a
           # namespace and would otherwise collide — `helm push` would claim
           # exactly the path the image wants (D61).
-          tags: ${{ env.REGISTRY }}/${{ github.repository }}:${{ needs.detect.outputs.version }}
+          # TWO tags, and the moving one is required rather than a convenience.
+          #
+          # D65 splits them deliberately: the chart in GIT points at a moving tag
+          # so a development cluster picks up releases without a commit, while
+          # the PUBLISHED chart pins a digest for reproducibility. Publishing only
+          # the version tag left the git half pointing at an image that does not
+          # exist — every Argo-deployed pod sat in ImagePullBackOff, and the
+          # release itself looked entirely successful.
+          #
+          # Found when the D54 ApplicationSet first deployed anything.
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository }}:${{ needs.detect.outputs.version }}
+            ${{ env.REGISTRY }}/${{ github.repository }}:latest
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
