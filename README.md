@@ -70,16 +70,32 @@ repository with `packages: write` and an OIDC identity — the injection and
 over-permission mistakes it finds are the ones that only surface when somebody
 exploits them.
 
-## `language: system` hooks are skipped in CI
+## One definition of "clean": the hooks
 
-`gitleaks`, `cargo-fmt`, `cargo-clippy`, `cargo-deny` and `hadolint` are declared
-`language: system`: they call a tool the developer already has, which is the
-point locally and false on a runner. The first CI run failed exactly there —
-`Executable gitleaks not found`, `Executable nix not found`.
+CI installs what the hooks need and runs **all of them**. There is no `SKIP`
+list and no per-tool job duplicating a hook.
 
-They are therefore skipped in the pre-commit job and run as **dedicated jobs**
-that install the tool properly. No coverage is lost, and a class of failure that
-said nothing about the code is removed.
+An earlier design had both — hooks locally, dedicated jobs in CI, and a `SKIP`
+list holding them apart. That is two definitions of the same thing kept in
+agreement by hand, and both failure modes arrived within an hour: removing a job
+would silently drop coverage while CI stayed green, and adding a hook broke CI
+with `Executable not found`, which says nothing about the code.
+
+It also makes D55's argument true one level up. **What a developer runs is
+exactly what CI runs**, rather than something that resembles it.
+
+Two jobs are _not_ hook-covered, and that is the line — pre-commit owns what
+pre-commit can define:
+
+| Job                       | Why not a hook                                                         |
+| ------------------------- | ---------------------------------------------------------------------- |
+| `workflows` (zizmor)      | audits the workflows themselves; needs the repository, not a file list |
+| `vulnerabilities` (trivy) | needs a vulnerability database and network                             |
+
+**`fetch-depth: 0` is required, not incidental.** gitleaks scans history and
+`buf breaking` compares against a tag. At the default depth there is neither, and
+the failure looks like a leaked secret or a broken contract rather than a shallow
+clone — which is exactly how it presented the first time.
 
 ## They detect what a repository is
 
