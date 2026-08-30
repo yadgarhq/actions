@@ -163,9 +163,21 @@ jobs:
           ref: ${{ inputs.ref }}
           # gitleaks scans history, not just the tip.
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+      # The BINARY, not gitleaks-action. The action refuses to run for an
+      # organisation without a paid licence key —
+      #   "[org] is an organization. License key is required."
+      # — while gitleaks itself is MIT and free. Only the wrapper is commercial,
+      # which is easy to miss because the failure names the org rather than the
+      # action.
+      - name: gitleaks
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          set -euo pipefail
+          curl -sSfL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          ./gitleaks git --no-banner --redact --verbose .
 
   # Workflows are code, and these run in every repository with packages: write
   # and an OIDC identity. zizmor finds the injection and permission mistakes
@@ -180,12 +192,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
-      - uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
-        with:
-          # Findings go to the job log rather than the security tab: uploading
-          # SARIF needs security-events: write, which a called workflow cannot
-          # ask for. A red job with the finding in it is enough.
-          advanced-security: false
+      # The CLI rather than the action, for the same reason as gitleaks: fewer
+      # moving parts and the output is visible in the log. Uploading SARIF would
+      # need security-events: write, which a called workflow cannot request.
+      - name: zizmor
+        env:
+          ZIZMOR_VERSION: "1.29.0"
+        run: |
+          set -euo pipefail
+          pipx run "zizmor==${ZIZMOR_VERSION}" --no-online-audits --persona=regular .
 
   # Filesystem scan: dependency CVEs, misconfiguration and secrets, before
   # anything is built. The image itself is scanned at release (ci-release.yml),
