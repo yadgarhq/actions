@@ -1,0 +1,11 @@
+# Findings accepted with a reason, rather than a severity threshold quietly
+# raised until nothing reports.
+misconfigurations:
+  - id: DS-0002
+    paths:
+      - containers/rust-build/Containerfile
+    statement: >-
+      "Specify at least 1 USER command" on a BUILD image. This is a build stage,
+      discarded once the binary is copied out (D63), and it never runs anywhere.
+      Installing a toolchain needs root. The runtime image carries the non-root
+      guarantee and states USER explicitly.

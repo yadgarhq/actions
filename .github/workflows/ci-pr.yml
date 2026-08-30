@@ -90,6 +90,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Nothing here pushes, so the checkout credential has no reason to
+          # persist in .git afterwards where a later step could read it.
+          persist-credentials: false
           ref: ${{ inputs.ref }}
       - id: d
         run: |
@@ -109,6 +112,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Nothing here pushes, so the checkout credential has no reason to
+          # persist in .git afterwards where a later step could read it.
+          persist-credentials: false
           ref: ${{ inputs.ref }}
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with: { toolchain: stable }

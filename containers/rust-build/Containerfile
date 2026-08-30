@@ -27,4 +27,8 @@ RUN apt-get update \
 RUN rustup target add x86_64-unknown-linux-musl \
     && cargo install cargo-chef --locked --version 0.1.71
 
+# NO `USER` HERE, deliberately, and trivy DS-0002 will flag it. This image is a
+# BUILD STAGE that is discarded once the binary is copied out (D63) — it never
+# runs anywhere. A build that cannot install a toolchain is not more secure, it
+# is broken, and the runtime image is where the non-root guarantee belongs.
 WORKDIR /app
