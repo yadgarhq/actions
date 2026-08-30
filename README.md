@@ -11,7 +11,6 @@ D59 (pre-commit everywhere), D61 (images and digests), D15 (additive-only).
 | Event                | Runs                          |
 | -------------------- | ----------------------------- |
 | `pull_request`       | everything — this is the gate |
-| `schedule`, weekly   | everything                    |
 | `push` to `main`     | the version report **only**   |
 | `push` of a `v*` tag | release                       |
 
