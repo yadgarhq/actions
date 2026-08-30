@@ -80,6 +80,37 @@ jobs:
           cosign sign --yes \
             "${{ env.REGISTRY }}/${{ github.repository }}@${{ steps.push.outputs.digest }}"
 
+      # A published package is PRIVATE by default, even from a public
+      # repository, and there is no API to change that — visibility lives on the
+      # package's own settings page and nowhere else. Publishing therefore
+      # succeeds, this workflow goes green, and only an adopter discovers the
+      # problem, as `unauthorized` rendered by most clients as "not found".
+      #
+      # So the workflow checks what an adopter experiences rather than what it
+      # just did. Same instinct as the detection step narrating what it skipped:
+      # a silent wrong state is worse than a red build.
+      - name: verify an adopter can actually pull this
+        run: |
+          set -euo pipefail
+          REF="${{ env.REGISTRY }}/${{ github.repository }}:${{ inputs.version }}"
+          if docker manifest inspect "$REF" >/dev/null 2>&1; then
+            echo "Anonymous pull of $REF works." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "### Published, but NOT publicly pullable"
+            echo ""
+            echo "\`$REF\` was pushed and signed, but an anonymous pull is refused."
+            echo "A new GitHub package is private by default and **no API can change it** —"
+            echo "it is a one-time manual step per package:"
+            echo ""
+            echo "  https://github.com/orgs/${{ github.repository_owner }}/packages/container/$(basename ${{ github.repository }})/settings"
+            echo ""
+            echo "Danger Zone -> Change visibility -> Public."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::Package is not publicly pullable. See the job summary."
+          exit 1
+
   chart:
     needs: [detect, image]
     # always(): a repository may ship a chart and no image. Without this the

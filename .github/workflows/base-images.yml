@@ -67,6 +67,25 @@ jobs:
           cosign sign --yes \
             "${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}@${{ steps.push.outputs.digest }}"
 
+      # See ci-release.yml for why this exists: a new package is private by
+      # default, no API can change it, and nothing else would report it.
+      - name: verify an adopter can actually pull this
+        run: |
+          set -euo pipefail
+          REF="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}:latest"
+          if docker manifest inspect "$REF" >/dev/null 2>&1; then
+            echo "Anonymous pull of \`$REF\` works." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "### Published, but NOT publicly pullable"
+            echo ""
+            echo "One-time manual step, no API exists:"
+            echo "  https://github.com/orgs/${{ github.repository_owner }}/packages/container/${{ matrix.image }}/settings"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::${{ matrix.image }} is not publicly pullable. See the job summary."
+          exit 1
+
       - name: summary
         run: |
           {
