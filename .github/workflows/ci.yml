@@ -17,6 +17,19 @@ on:
 permissions:
   contents: read
 
+# WHAT RUNS WHEN, and the push case is the interesting one.
+#
+#   pull_request  everything. This is the gate.
+#   schedule      everything, because a caller tracks @main and a repository
+#                 otherwise never revalidates when a shared workflow changes or
+#                 a new advisory lands.
+#   push to main  the version report ONLY.
+#
+# Validation on push to main would re-run exactly what the pull request just
+# passed, on code already merged, with nobody watching the result. The ruleset
+# makes direct pushes impossible, so there is no drift for it to catch. The
+# version report is different: it reads main's history since the last tag, which
+# a pull request cannot see.
 jobs:
   # ONE detection for every job below. It lived in two files before and that is
   # two places for the same logic to drift.
@@ -25,6 +38,7 @@ jobs:
   # unmaintainable; a repository whose CI mysteriously does nothing is the
   # failure being guarded against.
   detect:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     outputs:
       rust: ${{ steps.d.outputs.rust }}
@@ -60,6 +74,7 @@ jobs:
   # exactly what CI runs, not something resembling it.
   precommit:
     needs: detect
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -120,6 +135,7 @@ jobs:
   # NOT hook-covered, and that is the line: pre-commit owns what pre-commit can
   # define. These need a runner and network, so they are jobs.
   workflows:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -147,6 +163,7 @@ jobs:
             --no-online-audits --persona=regular --config /tmp/zizmor.yml .
 
   vulnerabilities:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -252,7 +269,7 @@ jobs:
 
   test:
     needs: detect
-    if: needs.detect.outputs.rust == 'true'
+    if: github.event_name != 'push' && needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
