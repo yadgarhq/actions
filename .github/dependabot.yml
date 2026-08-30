@@ -11,10 +11,10 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    # A version published minutes ago has been exercised by nobody. Waiting a
-    # few days costs nothing and skips the releases that get yanked.
+    # A version published minutes ago has been exercised by nobody. A week
+    # costs nothing and skips the releases that get yanked.
     cooldown:
-      default-days: 3
+      default-days: 7
     groups:
       # One PR rather than a dozen. These move together and reviewing them
       # together is how the version-and-SHA pair stays legible.
@@ -28,7 +28,7 @@ updates:
     directories: ["/containers/rust-build", "/containers/runtime"]
     schedule:
       interval: weekly
-    # A version published minutes ago has been exercised by nobody. Waiting a
-    # few days costs nothing and skips the releases that get yanked.
+    # A version published minutes ago has been exercised by nobody. A week
+    # costs nothing and skips the releases that get yanked.
     cooldown:
-      default-days: 3
+      default-days: 7
