@@ -1,8 +1,34 @@
 <!--
-  These sections are CHECKED BY CI, not suggested. `ci / passed` fails when one
-  is missing or empty, so a template nobody fills in cannot merge.
+  INSTRUCTIONS — for whoever or whatever fills this in, human or agent.
 
-  Delete nothing. Two lines each is usually enough.
+  These sections are ENFORCED by the `ci / passed` check, not suggested. A
+  missing or empty section fails the pull request.
+
+  Everything inside an HTML comment is stripped before the emptiness test, so
+  guidance never counts as an answer. Write outside the comments. You may delete
+  the comments; you may not delete the headings.
+
+  RULES THE CHECK APPLIES, exactly:
+    1. All five `##` headings must be present: What, Why, Changelog,
+       Verification, Risk.
+    2. Each must contain at least one non-comment, non-blank line.
+    3. EVERY line under `## Changelog` must be a Conventional Commits bullet:
+         - <type>[optional (scope)][optional !]: <description>
+       Types: build, chore, ci, docs, feat, fix, perf, refactor, revert, style,
+       test. Nothing else parses. Prose, blank-line-separated paragraphs, or a
+       bullet without a type will fail.
+
+  WHY THE CHANGELOG FORMAT IS STRICT: this repository squash-merges with the
+  pull request body as the commit message, so these bullets become the
+  repository's permanent history, and the version bump is derived from them. A
+  bullet nobody can parse is a release nobody can version.
+
+  BE SPECIFIC IN THE DESCRIPTION. "fix: bug" is parseable and useless. Name what
+  was wrong and where: "fix: a metadata leak in the audit relay that logged full
+  request bodies".
+
+  ONE BULLET PER USER-VISIBLE CHANGE. Refactors nobody can observe do not need
+  one; use `chore:` or `refactor:` if you want them recorded.
 -->
 
 ## What
@@ -20,16 +46,14 @@
 ## Changelog
 
 <!--
-  One bullet per user-visible change, each in Conventional Commits form. These
-  survive as the squash commit body, so they become the repository's history —
-  and the version bump is derived from them, which is why the format is checked.
+  Conventional Commits bullets, one per user-visible change. Examples:
 
     - fix: a metadata leak in the audit relay that logged full request bodies
     - feat(recall): return partial results when one provider is unhealthy
     - feat!: drop the by-name arm of GetWikiPage
 
-  `!` marks a breaking change. Types: build, chore, ci, docs, feat, fix, perf,
-  refactor, revert, style, test.
+  `!` marks a breaking change and implies a major bump. `feat:` implies minor,
+  everything else patch. The highest bullet wins.
 -->
 
 ## Verification
