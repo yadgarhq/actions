@@ -161,17 +161,28 @@ jobs:
         with:
           persist-credentials: false
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
-      - name: Pin the image by digest
+      # D65: the chart IN GIT points at a moving tag, because our own cluster
+      # deploys it from git at HEAD and development follows HEAD by design. The
+      # PUBLISHED chart pins a digest, because a release must name exactly what
+      # runs (D61).
+      #
+      # This rewrite happens in the workspace and is NEVER committed. Committing
+      # it would mean a bot pull request against a protected main for every
+      # release, changing one line — noise that trains people to merge without
+      # reading.
+      #
+      # A chart published without this step would ship a floating tag. The
+      # release workflow is the only thing that publishes a chart, which is what
+      # keeps that from happening.
+      - name: pin the image by digest, for the published chart only
         if: needs.image.result == 'success'
         env:
           DIGEST: ${{ needs.image.outputs.digest }}
         run: |
           set -euo pipefail
-          # A tag is a pointer and can be moved; a digest is the artifact. The
-          # Valkey chart pinned 6.2.13 while running :latest, so the pin
-          # described the packaging and not what ran (D61).
-          echo "digest: $DIGEST" >> "$GITHUB_STEP_SUMMARY"
-          yq -i ".image.digest = \"$DIGEST\"" chart/values.yaml
+          echo "Publishing with image digest \`$DIGEST\` (git keeps its tag)." \
+            >> "$GITHUB_STEP_SUMMARY"
+          yq -i ".image.digest = \"$DIGEST\" | del(.image.tag)" chart/values.yaml
       - name: package and push
         env:
           VERSION: ${{ inputs.version }}
