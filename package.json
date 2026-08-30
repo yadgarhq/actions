@@ -1,0 +1,6 @@
+{
+  "name": "yadgarhq-actions-hooks",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Exists so pre-commit can install node-language hooks from this repository. pre-commit's node language asserts package.json is present in the hooks repo (languages/node.py: assert prefix.exists('package.json')) and fails with a bare AssertionError otherwise, which says nothing about the cause. The prettier version itself is pinned in .pre-commit-hooks.yaml under additional_dependencies, not here."
+}

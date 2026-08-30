@@ -109,6 +109,11 @@ tag and bump with `pre-commit autoupdate`.
 
 ## Shared hooks
 
+`package.json` is not decoration. pre-commit's `node` language asserts a
+`package.json` exists in the hooks repository and fails with a bare
+`AssertionError` if it does not — no message, no mention of the file. Deleting it
+breaks every repository's prettier hook with an error that names nothing.
+
 `.pre-commit-hooks.yaml` publishes the hooks each repository was otherwise
 copying:
 
