@@ -8,11 +8,11 @@ D59 (pre-commit everywhere), D61 (images and digests), D15 (additive-only).
 
 ## The workflows
 
-| Workflow | Runs on | Does |
-|---|---|---|
-| `ci-validation.yml` | called | pre-commit, detected linters, licences |
-| `ci-pr.yml` | pull request | calls `ci-validation`, then tests |
-| `ci-release.yml` | tag | image → digest → chart → sign → publish |
+| Workflow            | Runs on      | Does                                    |
+| ------------------- | ------------ | --------------------------------------- |
+| `ci-validation.yml` | called       | pre-commit, detected linters, licences  |
+| `ci-pr.yml`         | pull request | calls `ci-validation`, then tests       |
+| `ci-release.yml`    | tag          | image → digest → chart → sign → publish |
 
 `ci-pr` **calls** `ci-validation` rather than repeating it. A pull request needs
 both linting and tests, so two independent workflows would be two definitions of
@@ -101,8 +101,8 @@ different trust decision: those tags belong to somebody else and can move withou
 warning, while `main` here is ours and gated.
 
 **pre-commit is the exception, and it has to be.** `rev:` is cached at first
-install and never re-resolved — *"mutable references are never updated after
-first install and are not supported"* — so a moving ref there silently freezes
+install and never re-resolved — _"mutable references are never updated after
+first install and are not supported"_ — so a moving ref there silently freezes
 each machine at whatever it meant the day it first ran, with two developers on
 different hook versions while both files read the same. Hooks pin an immutable
 tag and bump with `pre-commit autoupdate`.
@@ -114,7 +114,7 @@ copying:
 
 ```yaml
 - repo: https://github.com/yadgarhq/actions
-  rev: v1.0.0        # immutable — see "Callers track @main" on why hooks differ
+  rev: v1.0.0 # immutable — see "Callers track @main" on why hooks differ
   hooks:
     - id: cargo-fmt
     - id: cargo-clippy
@@ -125,7 +125,7 @@ copying:
 ## Why org rulesets are not used
 
 They require GitHub Team. Verified 2026-08-30: `orgs/yadgarhq/rulesets` returns
-403, *"Upgrade to GitHub Team to enable this feature"*, while repository rulesets
+403, _"Upgrade to GitHub Team to enable this feature"_, while repository rulesets
 work on public repositories. Reusable workflows are free and carry the larger
 half; **requiring** the check is a per-repository ruleset, scripted from here
 rather than applied by hand. D38 originally claimed both and has been corrected.
