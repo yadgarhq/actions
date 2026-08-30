@@ -51,7 +51,7 @@ jobs:
           detect rust      Cargo.toml
           detect buf       buf.yaml
           detect chart     chart
-          detect image     Dockerfile
+          detect image     Containerfile
           detect precommit .pre-commit-config.yaml
 
   # Server-side half of D59. The hooks make the check fast; this makes it true —
@@ -131,7 +131,7 @@ jobs:
           echo "Comparing against \`$BASE\`" >> "$GITHUB_STEP_SUMMARY"
           buf breaking --against ".git#tag=$BASE"
 
-  # D62's detection already looks for a Dockerfile in order to publish an image.
+  # D62's detection already looks for a Containerfile in order to publish an image.
   # Without this it would build one that nothing had linted.
   dockerfile:
     needs: detect
@@ -143,7 +143,8 @@ jobs:
           ref: ${{ inputs.ref }}
       - uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
         with:
-          dockerfile: Dockerfile
+          # Containerfile, not Dockerfile — see the note in ci-release.yml.
+          dockerfile: Containerfile
 
   manifests:
     needs: detect

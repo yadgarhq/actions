@@ -19,10 +19,20 @@ both linting and tests, so two independent workflows would be two definitions of
 "is this repository clean", and the one that drifts is whichever gets edited
 second.
 
+## Containerfile, not Dockerfile
+
+This project builds with podman, whose native name that is, and every builder
+worth using understands both. One convention rather than two — a repository
+writing `Dockerfile` gets no image, and the detection step says so rather than
+skipping quietly.
+
+`buildkit` in CI still defaults to `Dockerfile`, so the release workflow names
+the file explicitly.
+
 ## They detect what a repository is
 
 Nothing is configured per repository. `Cargo.toml` means the cargo stages run,
-`buf.yaml` means buf, `chart/` means a chart is published, `Dockerfile` means an
+`buf.yaml` means buf, `chart/` means a chart is published, `Containerfile` means an
 image is.
 
 The repositories are not uniform — most are Rust services, but `proto` has no
