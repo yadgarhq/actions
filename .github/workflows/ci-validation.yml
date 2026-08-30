@@ -73,14 +73,22 @@ jobs:
           ref: ${{ inputs.ref }}
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with: { python-version: "3.x" }
-      # SKIP the `language: system` hooks. They call a tool the DEVELOPER has —
-      # that is the point of them locally — and a runner has neither gitleaks
-      # nor nix nor cargo-deny. Each has its own job below or above, which
-      # installs the tool properly, so skipping here loses no coverage and
-      # removes a class of failure that says nothing about the code.
+      # SKIP the hooks that a dedicated job below already owns.
+      #
+      # The `language: system` ones call a tool the DEVELOPER has — the point of
+      # them locally — and a runner has neither gitleaks nor nix nor cargo-deny.
+      #
+      # The buf ones fail for a different reason worth naming: `buf breaking`
+      # compares against a TAG, and this job checks out at the default depth
+      # where no tags exist. The dedicated `buf` job sets fetch-depth: 0 for
+      # exactly that. Running it here fails on a missing tag rather than on a
+      # broken contract, which is the worst kind of red.
+      #
+      # Skipping loses no coverage: every one of these runs in its own job with
+      # the tool installed and the checkout it needs.
       - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
         env:
-          SKIP: gitleaks,cargo-fmt,cargo-clippy,cargo-deny,hadolint
+          SKIP: gitleaks,cargo-fmt,cargo-clippy,cargo-deny,hadolint,buf-format,buf-lint,buf-breaking
 
   rust:
     needs: detect
