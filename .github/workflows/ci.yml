@@ -1,0 +1,26 @@
+name: ci
+
+# This repository calls its own workflows by LOCAL PATH, not @main, and that is
+# the whole point: a change to a shared workflow must be tested by the version in
+# the pull request rather than by the one already merged. Referencing @main here
+# would test the old copy and merge the new one unexamined — for a repository
+# whose contents run in every other repository.
+#
+# This is also D62's requirement that this repository carry tests of its own. A
+# bug here reaches everywhere and nothing else would catch it.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  pr:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/ci-pr.yml
+
+  validation:
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/ci-validation.yml

@@ -37,6 +37,8 @@ jobs:
         image: [rust-build, runtime]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: version from the date
         id: v
@@ -80,16 +82,20 @@ jobs:
 
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       - name: sign
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}@${{ steps.push.outputs.digest }}
         run: |
-          cosign sign --yes \
-            "${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}@${{ steps.push.outputs.digest }}"
+          cosign sign --yes "$IMAGE"
 
       # See ci-release.yml for why this exists: a new package is private by
       # default, no API can change it, and nothing else would report it.
       - name: verify an adopter can actually pull this
+        env:
+          REF: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}:latest
+          OWNER: ${{ github.repository_owner }}
+          IMAGE_NAME: ${{ matrix.image }}
         run: |
           set -euo pipefail
-          REF="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}:latest"
           if docker manifest inspect "$REF" >/dev/null 2>&1; then
             echo "Anonymous pull of \`$REF\` works." >> "$GITHUB_STEP_SUMMARY"
             exit 0
@@ -98,15 +104,19 @@ jobs:
             echo "### Published, but NOT publicly pullable"
             echo ""
             echo "One-time manual step, no API exists:"
-            echo "  https://github.com/orgs/${{ github.repository_owner }}/packages/container/${{ matrix.image }}/settings"
+            echo "  https://github.com/orgs/${OWNER}/packages/container/${IMAGE_NAME}/settings"
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "::error::${{ matrix.image }} is not publicly pullable. See the job summary."
+          echo "::error::${IMAGE_NAME} is not publicly pullable. See the job summary."
           exit 1
 
       - name: summary
+        env:
+          IMAGE_NAME: ${{ matrix.image }}
+          VERSION: ${{ steps.v.outputs.version }}
+          DIGEST: ${{ steps.push.outputs.digest }}
         run: |
           {
-            echo "### ${{ matrix.image }}"
-            echo "- \`:latest\` and \`:${{ steps.v.outputs.version }}\`"
-            echo "- digest \`${{ steps.push.outputs.digest }}\`"
+            echo "### ${IMAGE_NAME}"
+            echo "- \`:latest\` and \`:${VERSION}\`"
+            echo "- digest \`${DIGEST}\`"
           } >> "$GITHUB_STEP_SUMMARY"

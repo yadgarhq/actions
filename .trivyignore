@@ -1,0 +1,11 @@
+# Accepted with a reason, rather than a severity threshold quietly raised until
+# nothing reports.
+#
+# DS-0002 — "Specify at least 1 USER command". The only Containerfile this now
+# reaches is containers/rust-build, a BUILD STAGE discarded once the binary is
+# copied out (D63); it never runs anywhere, and installing a toolchain needs
+# root. A build that cannot install a toolchain is not more secure, it is broken.
+#
+# containers/runtime declares `USER 65532:65532` explicitly, so it does not rely
+# on this line — remove the ignore and only the build image reappears.
+DS-0002

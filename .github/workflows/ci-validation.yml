@@ -29,6 +29,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Nothing here pushes, so the checkout credential has no reason to
+          # persist in .git afterwards where a later step could read it.
+          persist-credentials: false
           ref: ${{ inputs.ref }}
 
       # Detection NARRATES. Silent magic is unmaintainable; a repository whose
@@ -64,6 +67,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Nothing here pushes, so the checkout credential has no reason to
+          # persist in .git afterwards where a later step could read it.
+          persist-credentials: false
           ref: ${{ inputs.ref }}
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with: { python-version: "3.x" }
@@ -83,6 +89,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Nothing here pushes, so the checkout credential has no reason to
+          # persist in .git afterwards where a later step could read it.
+          persist-credentials: false
           ref: ${{ inputs.ref }}
       # Pinned by SHA like everything else, which means the toolchain can no
       # longer come from the ref name — it has to be passed.
@@ -102,6 +111,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Nothing here pushes, so the checkout credential has no reason to
+          # persist in .git afterwards where a later step could read it.
+          persist-credentials: false
           ref: ${{ inputs.ref }}
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with: { command: check }
@@ -115,6 +127,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Nothing here pushes, so the checkout credential has no reason to
+          # persist in .git afterwards where a later step could read it.
+          persist-credentials: false
           ref: ${{ inputs.ref }}
           # buf breaking compares against a tag, so history and tags must exist.
           fetch-depth: 0
@@ -147,6 +162,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Nothing here pushes, so the checkout credential has no reason to
+          # persist in .git afterwards where a later step could read it.
+          persist-credentials: false
           ref: ${{ inputs.ref }}
       - uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
         with:
@@ -160,6 +178,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Nothing here pushes, so the checkout credential has no reason to
+          # persist in .git afterwards where a later step could read it.
+          persist-credentials: false
           ref: ${{ inputs.ref }}
           # gitleaks scans history, not just the tip.
           fetch-depth: 0
@@ -191,6 +212,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Nothing here pushes, so the checkout credential has no reason to
+          # persist in .git afterwards where a later step could read it.
+          persist-credentials: false
           ref: ${{ inputs.ref }}
       # The CLI rather than the action, for the same reason as gitleaks: fewer
       # moving parts and the output is visible in the log. Uploading SARIF would
@@ -232,6 +256,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Nothing here pushes, so the checkout credential has no reason to
+          # persist in .git afterwards where a later step could read it.
+          persist-credentials: false
           ref: ${{ inputs.ref }}
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -240,6 +267,10 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: "1"
           ignore-unfixed: true
+          # Accepted findings live in a file with their reasoning, rather than a
+          # severity threshold quietly raised until nothing reports. Absent in
+          # most repositories, which is fine.
+          trivyignores: .trivyignore
 
   manifests:
     needs: detect
@@ -248,6 +279,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Nothing here pushes, so the checkout credential has no reason to
+          # persist in .git afterwards where a later step could read it.
+          persist-credentials: false
           ref: ${{ inputs.ref }}
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
       - run: helm lint chart

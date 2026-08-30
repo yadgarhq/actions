@@ -23,6 +23,66 @@ jobs:
     with:
       ref: ${{ inputs.ref }}
 
+  # The template is checked, not suggested. A template nobody fills in is a
+  # template that does not exist, and this is the only mechanism that notices.
+  template:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: the pull request body must follow the template
+        env:
+          # Through the environment, never interpolated into the script. A PR
+          # body is attacker-controlled text and `${{ }}` inside a run block is
+          # a shell injection — the exact class zizmor audits for.
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+
+          REQUIRED = ["What", "Why", "Verification", "Risk"]
+          body = os.environ.get("BODY") or ""
+
+          # HTML comments are the template's own guidance. Content that is only
+          # guidance is an unfilled section, so they are stripped before the
+          # emptiness test rather than counted as an answer.
+          stripped = re.sub(r"<!--.*?-->", "", body, flags=re.S)
+
+          sections, current = {}, None
+          for line in stripped.splitlines():
+              heading = re.match(r"^\s*#{1,6}\s+(.+?)\s*$", line)
+              if heading:
+                  current = heading.group(1).strip()
+                  sections[current] = []
+              elif current:
+                  sections[current].append(line)
+
+          missing = [h for h in REQUIRED if h not in sections]
+          empty = [
+              h for h in REQUIRED
+              if h in sections and not any(l.strip() for l in sections[h])
+          ]
+
+          if not missing and not empty:
+              print("Pull request body follows the template.")
+              sys.exit(0)
+
+          out = ["### Pull request body does not follow the template", ""]
+          if missing:
+              out += ["Missing sections:", ""] + [f"- `## {h}`" for h in missing] + [""]
+          if empty:
+              out += ["Present but empty (comments do not count as an answer):", ""] \
+                     + [f"- `## {h}`" for h in empty] + [""]
+          out += ["The template is in `.github/pull_request_template.md`."]
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+              fh.write("\n".join(out) + "\n")
+          print("::error::" + "; ".join(
+              [f"missing: {', '.join(missing)}"] if missing else []
+              + [f"empty: {', '.join(empty)}"] if empty else []
+          ))
+          sys.exit(1)
+          PY
+
   detect:
     runs-on: ubuntu-latest
     outputs:
@@ -30,6 +90,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Nothing here pushes, so the checkout credential has no reason to
+          # persist in .git afterwards where a later step could read it.
+          persist-credentials: false
           ref: ${{ inputs.ref }}
       - id: d
         run: |
@@ -49,6 +112,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Nothing here pushes, so the checkout credential has no reason to
+          # persist in .git afterwards where a later step could read it.
+          persist-credentials: false
           ref: ${{ inputs.ref }}
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with: { toolchain: stable }
@@ -61,13 +127,13 @@ jobs:
   # reports, and its pull requests would block forever.
   ci-pr:
     if: always()
-    needs: [validation, test]
+    needs: [validation, test, template]
     runs-on: ubuntu-latest
     steps:
       - name: Verify no upstream job failed
         run: |
           set -euo pipefail
-          for r in "${{ needs.validation.result }}" "${{ needs.test.result }}"; do
+          for r in "${{ needs.validation.result }}" "${{ needs.test.result }}" "${{ needs.template.result }}"; do
             case "$r" in
               success|skipped) ;;
               *) echo "upstream job result: $r"; exit 1 ;;
