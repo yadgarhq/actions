@@ -62,6 +62,25 @@ that reports for every repository regardless of which stages actually ran —
 without it, a repository with no `Cargo.toml` would have a required check that
 never reports and pull requests that block forever.
 
+## Third-party actions are pinned by SHA
+
+Every `uses:` of an action outside this organisation names a **commit SHA**, with
+the human-readable version in a trailing comment. A tag is a pointer the upstream
+owner can move, so `@v4` is a promise about intent rather than about bytes — and
+these workflows run in every repository in the organisation with `packages:
+write` and an OIDC identity. That is the wrong place to accept a moving target.
+
+The same reasoning D61 applies to container images, applied to CI: **the pin must
+name what runs, not what it was called.**
+
+One consequence worth knowing: `dtolnay/rust-toolchain` normally selects its
+toolchain from the ref name (`@stable`). Pinned by SHA that information is gone,
+so the toolchain is passed explicitly. Silently losing it would have meant CI
+running whatever toolchain the action defaults to.
+
+Upgrades are deliberate: resolve the new release to a SHA, update the pin and the
+comment together.
+
 ## Versioning
 
 **Callers pin `@v1`, and `v1` is additive-only.** A moving tag that accepts
