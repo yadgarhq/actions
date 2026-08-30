@@ -74,6 +74,32 @@ jobs:
           tags: ${{ env.REGISTRY }}/${{ github.repository }}:${{ inputs.version }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+      # Scan the ARTIFACT, not the source tree. ci-validation scans the
+      # filesystem before anything is built; this is the thing an adopter
+      # actually runs, including whatever the base image contributed.
+      #
+      # ignore-unfixed: an unfixable CVE in a base is not something this build
+      # can act on, and a gate nobody can satisfy gets disabled rather than
+      # fixed. The weekly base rebuild is what picks up fixes when they land.
+      - name: scan the published image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: "${{ env.REGISTRY }}/${{ github.repository }}@${{ steps.push.outputs.digest }}"
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+
+      # D63: lean and secure are measured, not asserted. A claim about an
+      # image's contents that nothing verifies is a claim about the
+      # Containerfile.
+      - name: SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: "${{ env.REGISTRY }}/${{ github.repository }}@${{ steps.push.outputs.digest }}"
+          upload-artifact: true
+
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       - name: sign
         run: |

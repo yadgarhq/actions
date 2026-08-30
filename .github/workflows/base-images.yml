@@ -61,6 +61,23 @@ jobs:
 
       # D61: signed with the workflow's own OIDC identity, so there is no key
       # material to hold or rotate.
+      # The base images are scanned hardest, because every service inherits
+      # whatever they carry. A CVE here is a CVE in sixty-one images.
+      - name: scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: "${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}@${{ steps.push.outputs.digest }}"
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+
+      - name: SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: "${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}@${{ steps.push.outputs.digest }}"
+          upload-artifact: true
+
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       - name: sign
         run: |

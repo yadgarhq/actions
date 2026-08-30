@@ -29,6 +29,39 @@ skipping quietly.
 `buildkit` in CI still defaults to `Dockerfile`, so the release workflow names
 the file explicitly.
 
+## Security scanning
+
+| Where               | What                                                                                                                             |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| every PR            | `gitleaks` (full history), `zizmor` (workflow audit), `trivy fs` (deps, misconfig, secrets), `cargo-deny` (advisories, licences) |
+| every release       | `trivy image` on the published digest, plus an SBOM                                                                              |
+| base images, weekly | the same, scanned hardest — a CVE there is a CVE in sixty-one images                                                             |
+
+**The image scan targets the digest that was just pushed**, not the source tree.
+The filesystem scan on a PR catches dependency problems early; only the artifact
+scan sees what the base image contributed, and the artifact is what an adopter
+runs.
+
+**`ignore-unfixed` is set deliberately.** An unfixable CVE in a base image is not
+something a service build can act on, and a gate nobody can satisfy gets disabled
+rather than fixed. The weekly base rebuild is what picks fixes up when they land.
+
+**`zizmor` audits the workflows themselves**, because these run in every
+repository with `packages: write` and an OIDC identity — the injection and
+over-permission mistakes it finds are the ones that only surface when somebody
+exploits them.
+
+## `language: system` hooks are skipped in CI
+
+`gitleaks`, `cargo-fmt`, `cargo-clippy`, `cargo-deny` and `hadolint` are declared
+`language: system`: they call a tool the developer already has, which is the
+point locally and false on a runner. The first CI run failed exactly there —
+`Executable gitleaks not found`, `Executable nix not found`.
+
+They are therefore skipped in the pre-commit job and run as **dedicated jobs**
+that install the tool properly. No coverage is lost, and a class of failure that
+said nothing about the code is removed.
+
 ## They detect what a repository is
 
 Nothing is configured per repository. `Cargo.toml` means the cargo stages run,
