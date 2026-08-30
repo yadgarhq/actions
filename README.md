@@ -29,6 +29,25 @@ skipping quietly.
 `buildkit` in CI still defaults to `Dockerfile`, so the release workflow names
 the file explicitly.
 
+## The pull request template is enforced
+
+`pull_request_template.md` here is canonical; every repository carries a copy at
+`.github/pull_request_template.md`, because GitHub only reads it from there.
+
+**`ci-pr` fails when a section is missing or empty**, and HTML comments do not
+count as an answer — an unfilled template is exactly a body consisting only of
+its own guidance. A template nobody fills in is a template that does not exist,
+and this is the only mechanism that would notice.
+
+Sections: **What**, **Why**, **Verification**, **Risk**. `Why` asks for the
+reason rather than the mechanism, and naming a decision or open item (`D42`,
+`O19`) is what makes the record worth keeping. `Risk` accepts "None" — writing it
+is the point, leaving it blank is not.
+
+The body is read through an environment variable rather than interpolated into
+the script. A pull request body is attacker-controlled text, and `${{ }}` inside
+a `run:` block is a shell injection — the exact class `zizmor` audits for.
+
 ## Security scanning
 
 | Where               | What                                                                                                                             |

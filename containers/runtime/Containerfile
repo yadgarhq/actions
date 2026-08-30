@@ -20,3 +20,9 @@ FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c
 
 LABEL org.opencontainers.image.source="https://github.com/yadgarhq/actions"
 LABEL org.opencontainers.image.description="Runtime base: upstream distroless/static mirrored so no adopter depends on a registry we do not control."
+
+# The :nonroot base already runs as 65532, so this changes nothing at runtime.
+# It is here because a scanner cannot see through a base image tag — trivy
+# DS-0002 flags exactly this — and because inherited security properties are the
+# ones that quietly disappear when somebody changes a base.
+USER 65532:65532
