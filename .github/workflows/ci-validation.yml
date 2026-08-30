@@ -267,10 +267,11 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: "1"
           ignore-unfixed: true
-          # Accepted findings live in a file with their reasoning, rather than a
-          # severity threshold quietly raised until nothing reports. Absent in
-          # most repositories, which is fine.
-          trivyignores: .trivyignore
+          # NO `trivyignores:` input. Trivy picks up a .trivyignore from the
+          # working directory on its own, and naming the path here made the step
+          # fail in every repository that does not have one — which is all of
+          # them but `actions`. A shared workflow cannot assume a file that only
+          # one repository needs.
 
   manifests:
     needs: detect
