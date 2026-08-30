@@ -6,12 +6,6 @@
 # folding it in here would grant both on every pull request.
 name: ci
 
-# DEPRECATED NAME — use `ci-pr.yml`. This file is an identical copy kept alive
-# only until every caller has moved, because callers pin `@main` and a rename
-# lands in this repository before the pull requests that follow it. Deleting it
-# in the same change would break CI in five repositories at once, which is the
-# ordering mistake this project has already made once.
-
 on:
   workflow_call:
     inputs:
