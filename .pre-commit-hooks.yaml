@@ -105,3 +105,19 @@
   entry: bash -c 'helm lint chart && helm template ci-render chart > /dev/null'
   pass_filenames: false
   files: ^chart/
+
+# D59 deferred this hook because the thing it checks did not exist yet. It does
+# now: yadgar-telemetry's observe::Call.
+#
+# A handler either opens a Call or it does not — a grep, not a judgement. What it
+# deliberately does NOT check is whether the outcome, class or row count are
+# right; a hook cannot know that, and pretending to would be the "two definitions
+# of clean" failure this project keeps refusing.
+#
+# The failure it prevents is silent: a module that quietly stops emitting looks
+# exactly like a module nobody called, which is the reading that would break D15.
+- id: observe-coverage
+  name: every RPC handler is instrumented
+  language: python
+  entry: python3 hooks/observe_coverage.py
+  files: \.rs$
