@@ -270,7 +270,7 @@ jobs:
           # Accepted findings live in a file with their reasoning, rather than a
           # severity threshold quietly raised until nothing reports. Absent in
           # most repositories, which is fine.
-          trivyignores: .trivyignore.yaml
+          trivyignores: .trivyignore
 
   manifests:
     needs: detect

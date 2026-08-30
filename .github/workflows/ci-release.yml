@@ -32,9 +32,11 @@ jobs:
         with:
           persist-credentials: false
       - id: d
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          echo "## Release ${{ inputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Release ${VERSION}" >> "$GITHUB_STEP_SUMMARY"
           for pair in "image:Containerfile" "chart:chart"; do
             k=${pair%%:*}; f=${pair#*:}
             if [ -e "$f" ]; then
