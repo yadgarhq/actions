@@ -48,11 +48,11 @@ on:
 jobs:
   pr:
     if: github.event_name == 'pull_request'
-    uses: yadgarhq/actions/.github/workflows/ci-pr.yml@v1
+    uses: yadgarhq/actions/.github/workflows/ci-pr.yml@main
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    uses: yadgarhq/actions/.github/workflows/ci-release.yml@v1
+    uses: yadgarhq/actions/.github/workflows/ci-release.yml@main
     with:
       version: ${{ github.ref_name }}
 ```
@@ -81,12 +81,31 @@ running whatever toolchain the action defaults to.
 Upgrades are deliberate: resolve the new release to a SHA, update the pin and the
 comment together.
 
-## Versioning
+## Callers track `@main`
 
-**Callers pin `@v1`, and `v1` is additive-only.** A moving tag that accepts
-breaking changes breaks every repository at once — D15's rule in a place with a
-wider blast radius. Breaking changes cut `v2` and repositories migrate
-deliberately.
+A fix to a shared workflow reaches every repository the moment it merges, with
+nothing to remember afterwards.
+
+A moving version tag was tried first and dropped. If the discipline is "move
+`v1` after every green merge" then the tag is ceremony rather than safety —
+`@main` with extra steps — and it carries its own failure: fix a bug, forget to
+move the tag, and the fix ships to nobody. The `@v1` form is worth its cost only
+when consumers genuinely need to stay behind, which none here do.
+
+**What makes this safe is not a tag.** It is that this repository tests its own
+workflows and protects `main`, so a broken change cannot merge. That is the
+handbrake; a version tag was only ever a proxy for it, and a worse one.
+
+Third-party actions inside these workflows stay pinned by SHA. That is a
+different trust decision: those tags belong to somebody else and can move without
+warning, while `main` here is ours and gated.
+
+**pre-commit is the exception, and it has to be.** `rev:` is cached at first
+install and never re-resolved — *"mutable references are never updated after
+first install and are not supported"* — so a moving ref there silently freezes
+each machine at whatever it meant the day it first ran, with two developers on
+different hook versions while both files read the same. Hooks pin an immutable
+tag and bump with `pre-commit autoupdate`.
 
 ## Shared hooks
 
@@ -95,7 +114,7 @@ copying:
 
 ```yaml
 - repo: https://github.com/yadgarhq/actions
-  rev: v1
+  rev: v1.0.0        # immutable — see "Callers track @main" on why hooks differ
   hooks:
     - id: cargo-fmt
     - id: cargo-clippy

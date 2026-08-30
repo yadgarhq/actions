@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   validation:
-    uses: yadgarhq/actions/.github/workflows/ci-validation.yml@v1
+    uses: yadgarhq/actions/.github/workflows/ci-validation.yml@main
     with:
       ref: ${{ inputs.ref }}
 
