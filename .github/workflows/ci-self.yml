@@ -1,0 +1,21 @@
+name: ci-self
+
+# This repository tests its own workflows, by LOCAL PATH rather than @main. A
+# change to a shared workflow must be tested by the version in the pull request,
+# not the one already merged — otherwise the old copy is tested and the new one
+# merges unexamined, for a repository whose contents run everywhere else.
+#
+# It is a separate file because a workflow cannot call itself. The job is named
+# `ci` so the reported check is `ci / passed`, identical to every other
+# repository, which is what lets one ruleset serve all of them.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml

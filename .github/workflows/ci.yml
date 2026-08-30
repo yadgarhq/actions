@@ -1,26 +1,392 @@
+# THE single entry point for non-release CI. A repository calls this and nothing
+# else; what runs is decided here from the event rather than wired up per repo.
+#
+# Releases are a separate call, and that is a PERMISSIONS BOUNDARY rather than a
+# style choice: publishing needs `packages: write` and `id-token: write`, and
+# folding it in here would grant both on every pull request.
 name: ci
 
-# This repository calls its own workflows by LOCAL PATH, not @main, and that is
-# the whole point: a change to a shared workflow must be tested by the version in
-# the pull request rather than by the one already merged. Referencing @main here
-# would test the old copy and merge the new one unexamined — for a repository
-# whose contents run in every other repository.
-#
-# This is also D62's requirement that this repository carry tests of its own. A
-# bug here reaches everywhere and nothing else would catch it.
 on:
-  pull_request:
-  push:
-    branches: [main]
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
 
+# WHAT RUNS WHEN, and the push case is the interesting one.
+#
+#   pull_request  everything. This is the gate.
+#   push to main  the version report ONLY.
+#
+# Validation on push to main would re-run exactly what the pull request just
+# passed, on code already merged, with nobody watching the result. The ruleset
+# makes direct pushes impossible, so there is no drift for it to catch. The
+# version report is different: it reads main's history since the last tag, which
+# a pull request cannot see.
 jobs:
-  pr:
-    if: github.event_name == 'pull_request'
-    uses: ./.github/workflows/ci-pr.yml
+  # ONE detection for every job below. It lived in two files before and that is
+  # two places for the same logic to drift.
+  #
+  # DETECTION NARRATES what it found and skipped. Silent magic is
+  # unmaintainable; a repository whose CI mysteriously does nothing is the
+  # failure being guarded against.
+  detect:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.d.outputs.rust }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+      - id: d
+        run: |
+          set -euo pipefail
+          echo "## Detected" >> "$GITHUB_STEP_SUMMARY"
+          for pair in "rust:Cargo.toml" "chart:chart" "image:Containerfile"; do
+            k=${pair%%:*}; f=${pair#*:}
+            if [ -e "$f" ]; then
+              echo "$k=true" >> "$GITHUB_OUTPUT"
+              echo "- **$k**: \`$f\` present" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "$k=false" >> "$GITHUB_OUTPUT"
+              echo "- $k: no \`$f\` → skipped" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
 
-  validation:
-    if: github.event_name == 'push'
-    uses: ./.github/workflows/ci-validation.yml
+  # ONE definition of "is this repository clean": the hooks. CI installs what
+  # they need and runs all of them.
+  #
+  # This replaced a SKIP list plus a job per tool — two mechanisms for the same
+  # checks, kept in agreement by hand. Removing a job silently dropped coverage
+  # while CI stayed green; adding a hook broke CI with "Executable not found",
+  # which says nothing about the code. Both happened within an hour.
+  #
+  # It also makes D55's argument true one level up: what a developer runs is
+  # exactly what CI runs, not something resembling it.
+  precommit:
+    needs: detect
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+          # gitleaks scans history and `buf breaking` compares against a tag. At
+          # the default depth there is neither, and the failure looks like a
+          # leaked secret or a broken contract rather than a shallow clone.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x"
+
+      # The binary, not gitleaks-action: the action refuses to run for an
+      # organisation without a paid licence key, while gitleaks itself is MIT.
+      # Only the wrapper is commercial, and the error names the org rather than
+      # the action, which makes it easy to misread.
+      - name: install gitleaks
+        env:
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          set -euo pipefail
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin gitleaks
+
+      - name: install hadolint
+        env:
+          HADOLINT_VERSION: 2.14.0
+        run: |
+          set -euo pipefail
+          sudo curl -sSfL -o /usr/local/bin/hadolint \
+            "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-linux-x86_64"
+          sudo chmod +x /usr/local/bin/hadolint
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        if: needs.detect.outputs.rust == 'true'
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: needs.detect.outputs.rust == 'true'
+
+      - name: install cargo-deny
+        if: needs.detect.outputs.rust == 'true'
+        env:
+          CARGO_DENY_VERSION: 0.20.2
+        run: |
+          set -euo pipefail
+          curl -sSfL "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+            | sudo tar -xz --strip-components=1 -C /usr/local/bin --wildcards '*/cargo-deny'
+
+      # No SKIP. Every hook the repository declares runs here.
+      - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+
+  # NOT hook-covered, and that is the line: pre-commit owns what pre-commit can
+  # define. These need a runner and network, so they are jobs.
+  workflows:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+      - name: zizmor
+        env:
+          ZIZMOR_VERSION: "1.29.0"
+        run: |
+          set -euo pipefail
+          # The policy IS the decision, written where a tool checks it. A tag
+          # somebody else owns can move without warning, so third-party actions
+          # are hash-pinned; @main here is ours and gated, which is what lets one
+          # fix reach every repository without editing each one.
+          cat > /tmp/zizmor.yml <<'ZIZ'
+          rules:
+            unpinned-uses:
+              config:
+                policies:
+                  "yadgarhq/*": ref-pin
+                  "*": hash-pin
+          ZIZ
+          pipx run "zizmor==${ZIZMOR_VERSION}" \
+            --no-online-audits --persona=regular --config /tmp/zizmor.yml .
+
+  vulnerabilities:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scanners: vuln,misconfig,secret
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+
+  # The template is checked, not suggested. A template nobody fills in is a
+  # template that does not exist, and nothing else would notice.
+  #
+  # BOTS ARE EXEMPT and must be. Dependabot writes its own body and cannot be
+  # taught this template; without the exemption every dependency update is
+  # blocked forever by a check it is structurally unable to satisfy, which turns
+  # the update mechanism off silently.
+  template:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    steps:
+      - name: the pull request body must follow the template
+        env:
+          # Through the environment, never interpolated into the script. A pull
+          # request body is attacker-controlled text and `${{ }}` inside a run
+          # block is a shell injection — the class zizmor audits for.
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+
+          REQUIRED = ["What", "Why", "Changelog", "Verification", "Risk"]
+
+          # Conventional Commits. The changelog bullets are what a version bump
+          # will eventually be derived from, so the format is load-bearing rather
+          # than cosmetic — a bullet nobody can parse is a release nobody can
+          # version.
+          TYPES = "build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test"
+          BULLET = re.compile(
+              rf"^\s*[-*]\s+(?P<type>{TYPES})(?P<scope>\([^)]+\))?(?P<bang>!)?:\s+(?P<desc>\S.*)$"
+          )
+
+          body = os.environ.get("BODY") or ""
+          stripped = re.sub(r"<!--.*?-->", "", body, flags=re.S)
+
+          sections, current = {}, None
+          for line in stripped.splitlines():
+              h = re.match(r"^\s*#{1,6}\s+(.+?)\s*$", line)
+              if h:
+                  current = h.group(1).strip()
+                  sections[current] = []
+              elif current:
+                  sections[current].append(line)
+
+          problems = []
+          for h in REQUIRED:
+              if h not in sections:
+                  problems.append(f"missing section `## {h}`")
+              elif not any(l.strip() for l in sections[h]):
+                  problems.append(f"`## {h}` is empty (comments are not an answer)")
+
+          if "Changelog" in sections and any(l.strip() for l in sections["Changelog"]):
+              lines = [l for l in sections["Changelog"] if l.strip()]
+              bad = [l.strip() for l in lines if not BULLET.match(l)]
+              if bad:
+                  problems.append(
+                      "every Changelog line must be a Conventional Commits bullet, "
+                      "e.g. `- fix: a metadata leak in the audit relay`. Offending: "
+                      + "; ".join(f"`{b[:60]}`" for b in bad[:4])
+                  )
+              else:
+                  bumps = []
+                  for l in lines:
+                      m = BULLET.match(l)
+                      if m.group("bang"):
+                          bumps.append("major")
+                      elif m.group("type") == "feat":
+                          bumps.append("minor")
+                      else:
+                          bumps.append("patch")
+                  bump = "major" if "major" in bumps else "minor" if "minor" in bumps else "patch"
+                  with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+                      fh.write(f"### Changelog parsed\n\n{len(lines)} entries, implying a **{bump}** bump.\n")
+
+          if not problems:
+              print("Pull request body follows the template.")
+              sys.exit(0)
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+              fh.write("### Pull request body does not follow the template\n\n")
+              for p in problems:
+                  fh.write(f"- {p}\n")
+              fh.write("\nThe template is in `.github/pull_request_template.md`.\n")
+          print("::error::" + "; ".join(problems))
+          sys.exit(1)
+          PY
+
+  test:
+    needs: detect
+    if: github.event_name != 'push' && needs.detect.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo test --all-features
+
+  # PHASE 2 OF VERSIONING: derive and REPORT, write nothing.
+  #
+  # The squash-merge decision already did the hard half — the pull request body
+  # becomes the commit message, so the Changelog bullets are in main's history,
+  # one commit per change. There is no separate state to maintain: the history
+  # IS the changelog.
+  #
+  # This reports what the next version WOULD be. It does not tag, does not edit
+  # Cargo.toml or Chart.yaml, and does not open a pull request. Automating the
+  # write before the derivation has been observed to be right on real history is
+  # how a wrong version gets published, and a published version cannot be
+  # withdrawn. The same reasoning that said not to build the base images before
+  # a service needed one.
+  version:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Needs tags and history to know what has happened since the last one.
+          fetch-depth: 0
+
+      - name: what the next version would be
+        run: |
+          python3 - <<'PY'
+          import os, re, subprocess
+
+          def sh(*a):
+              return subprocess.run(a, capture_output=True, text=True).stdout.strip()
+
+          TYPES = "build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test"
+          BULLET = re.compile(
+              rf"^\s*[-*]\s+(?P<type>{TYPES})(?P<scope>\([^)]+\))?(?P<bang>!)?:\s+(?P<desc>\S.*)$"
+          )
+
+          last = sh("git", "describe", "--tags", "--abbrev=0", "--match", "v*")
+          rng = f"{last}..HEAD" if last else "HEAD"
+          log = sh("git", "log", rng, "--format=%B%x00")
+
+          entries, bumps = [], []
+          for commit in [c for c in log.split("\0") if c.strip()]:
+              for line in commit.splitlines():
+                  m = BULLET.match(line)
+                  if not m:
+                      continue
+                  entries.append(line.strip())
+                  if m.group("bang"):
+                      bumps.append("major")
+                  elif m.group("type") == "feat":
+                      bumps.append("minor")
+                  else:
+                      bumps.append("patch")
+
+          out = ["## Next version (reported, not applied)", ""]
+          if not last:
+              out += ["No `v*` tag yet, so there is no baseline to compute from."]
+          elif not entries:
+              out += [f"No parseable Changelog entries since `{last}`. Nothing to release."]
+          else:
+              bump = "major" if "major" in bumps else "minor" if "minor" in bumps else "patch"
+              major, minor, patch = (int(x) for x in last.lstrip("v").split(".")[:3])
+
+              # PRE-1.0 IS NOT THE SAME RULE, and getting it wrong publishes a
+              # "compatible" version that is not. Under 0.x a breaking change
+              # bumps MINOR and a feature bumps PATCH.
+              if major == 0:
+                  nxt = f"0.{minor + 1}.0" if bump == "major" else f"0.{minor}.{patch + 1}"
+                  note = f"pre-1.0: a `{bump}` change bumps "
+                  note += "minor" if bump == "major" else "patch"
+              else:
+                  nxt = {"major": f"{major + 1}.0.0",
+                         "minor": f"{major}.{minor + 1}.0",
+                         "patch": f"{major}.{minor}.{patch + 1}"}[bump]
+                  note = f"{bump} bump"
+
+              out += [f"`{last}` → **`v{nxt}`**  ({note})", "",
+                      f"{len(entries)} entries since `{last}`:", ""]
+              out += [f"- {e.lstrip('-* ')}" for e in entries[:25]]
+              if len(entries) > 25:
+                  out += [f"", f"...and {len(entries) - 25} more."]
+
+          out += ["", "_Nothing was tagged or written. See D64._"]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+              fh.write("\n".join(out) + "\n")
+          print("\n".join(out))
+          PY
+
+  # ONE check name for every repository to require in its ruleset, reporting
+  # regardless of which stages ran. Without it a repository with no Cargo.toml
+  # would have a required check that never reports and pull requests that block
+  # forever.
+  passed:
+    if: always()
+    needs: [precommit, workflows, vulnerabilities, template, test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: no upstream job failed
+        run: |
+          set -euo pipefail
+          for r in "${{ needs.precommit.result }}" \
+                   "${{ needs.workflows.result }}" \
+                   "${{ needs.vulnerabilities.result }}" \
+                   "${{ needs.template.result }}" \
+                   "${{ needs.test.result }}"; do
+            case "$r" in
+              success|skipped) ;;
+              *) echo "upstream job result: $r"; exit 1 ;;
+            esac
+          done
+          echo "All stages passed or were legitimately skipped."

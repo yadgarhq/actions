@@ -6,6 +6,28 @@ in the organisation carries a caller of about eight lines and nothing else.
 Decisions: [`yadgarhq/docs`](https://github.com/yadgarhq/docs) — D62 (this repo),
 D59 (pre-commit everywhere), D61 (images and digests), D15 (additive-only).
 
+## What runs when
+
+| Event                | Runs                          |
+| -------------------- | ----------------------------- |
+| `pull_request`       | everything — this is the gate |
+| `push` to `main`     | the version report **only**   |
+| `push` of a `v*` tag | release                       |
+
+**Validation on push to `main` was removed, not forgotten.** It re-ran exactly
+what the pull request had just passed, on code already merged, with nobody
+watching the result — and the ruleset makes direct pushes impossible, so there
+was no drift for it to catch.
+
+**Nothing replaces it, deliberately.** A repository tracking `@main` does not
+revalidate when a shared workflow changes or a new advisory lands until its next
+pull request. A schedule would cover that and was tried and removed: it is
+machinery for a problem nobody has yet, on repositories that change often enough
+that the next pull request is rarely far away.
+
+**The version report is genuinely push-only.** It reads `main`'s history since
+the last tag, which a pull request cannot see.
+
 ## The workflows
 
 | Workflow            | Runs on      | Does                                    |
