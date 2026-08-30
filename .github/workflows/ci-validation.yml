@@ -200,7 +200,29 @@ jobs:
           ZIZMOR_VERSION: "1.29.0"
         run: |
           set -euo pipefail
-          pipx run "zizmor==${ZIZMOR_VERSION}" --no-online-audits --persona=regular .
+
+          # The policy IS the decision, written where a tool can check it rather
+          # than only in prose. Third-party actions must be hash-pinned: those
+          # tags belong to somebody else and can move without warning. Our own
+          # workflows may be referenced by ref, because @main here is gated —
+          # this repository tests its own workflows and protects main — and a
+          # moving reference is what lets one fix reach every repository without
+          # editing each one.
+          #
+          # Written inline rather than as a file in every repository: the policy
+          # is organisation-wide, so it belongs in the organisation-wide
+          # workflow. Sixty copies of a policy is sixty things to drift.
+          cat > /tmp/zizmor.yml <<'ZIZ'
+          rules:
+            unpinned-uses:
+              config:
+                policies:
+                  "yadgarhq/*": ref-pin
+                  "*": hash-pin
+          ZIZ
+          pipx run "zizmor==${ZIZMOR_VERSION}" \
+            --no-online-audits --persona=regular \
+            --config /tmp/zizmor.yml .
 
   # Filesystem scan: dependency CVEs, misconfiguration and secrets, before
   # anything is built. The image itself is scanned at release (ci-release.yml),
