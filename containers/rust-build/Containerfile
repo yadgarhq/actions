@@ -5,14 +5,26 @@ FROM docker.io/library/rust:1.98-bookworm@sha256:82150a52ec202c1b14d7817e14516c3
 LABEL org.opencontainers.image.source="https://github.com/yadgarhq/actions"
 LABEL org.opencontainers.image.description="Build base for Rust modules: pinned toolchain, musl target, cargo-chef, protoc."
 
-# musl-tools supplies musl-gcc, which the musl target needs to link. protobuf-compiler
-# is protoc, which prost's build script invokes — every module generates its types
-# from the shared contract, so no module can build without it.
+# musl-tools supplies musl-gcc, which the musl target needs to link.
+#
+# BOTH protobuf packages, and the second one is not optional. protobuf-compiler
+# ships only /usr/bin/protoc; libprotobuf-dev ships google/protobuf/*.proto under
+# /usr/include — the well-known types every module's contract imports.
+#
+# `buf export` deliberately omits them because protoc is expected to supply them
+# (D70), so without libprotobuf-dev the build fails with
+# "google/protobuf/timestamp.proto: File not found", which reads as a broken
+# contract rather than a missing package. Verified in an ubuntu container: after
+# protobuf-compiler alone, timestamp.proto is ABSENT.
+#
+# This is the same root cause that broke the CI jobs; it had to be fixed in both
+# places because the image and the runner install their own toolchains.
 # hadolint ignore=DL3008
 RUN apt-get update \
     && apt-get install --no-install-recommends -y \
         musl-tools \
         protobuf-compiler \
+        libprotobuf-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # One layer, both toolchain setup — hadolint DL3059 is right that splitting them
