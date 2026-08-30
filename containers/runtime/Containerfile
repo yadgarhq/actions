@@ -1,0 +1,22 @@
+# The runtime base for every finished image (D63).
+#
+# This file does nothing but re-publish upstream distroless under our own
+# registry, and that IS its purpose. D61 promises adopters that a digest a
+# release names is never deleted, and that promise cannot be kept while a link
+# in the chain belongs to somebody else — this project has already been on the
+# receiving end of exactly that, with a chart pinned to a version whose image had
+# been withdrawn.
+#
+# It also removes a second registry from every adopter's build. gcr.io is read
+# once, here. Nothing downstream touches it.
+#
+# distroless/static, not scratch: a service needs CA certificates for outbound
+# TLS, /etc/passwd for a non-root user, and tzdata. Scratch means re-adding
+# exactly those three by hand and owning them forever.
+#
+# nonroot: runs as uid 65532. Combined with rustls (D63) the result links no C
+# library at all, so there is nothing here for a CVE scanner to report on.
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
+
+LABEL org.opencontainers.image.source="https://github.com/yadgarhq/actions"
+LABEL org.opencontainers.image.description="Runtime base: upstream distroless/static mirrored so no adopter depends on a registry we do not control."

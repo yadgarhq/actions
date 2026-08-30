@@ -1,0 +1,30 @@
+# The build base for every Rust module (D63). Never ships — it is a build stage,
+# discarded once the binary is copied out — so its size is not a runtime concern.
+FROM docker.io/library/rust:1.95-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1
+
+LABEL org.opencontainers.image.source="https://github.com/yadgarhq/actions"
+LABEL org.opencontainers.image.description="Build base for Rust modules: pinned toolchain, musl target, cargo-chef, protoc."
+
+# musl-tools supplies musl-gcc, which the musl target needs to link. protobuf-compiler
+# is protoc, which prost's build script invokes — every module generates its types
+# from the shared contract, so no module can build without it.
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+        musl-tools \
+        protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+# One layer, both toolchain setup — hadolint DL3059 is right that splitting them
+# buys nothing here, since neither is re-run without the other.
+#
+# The musl target is what makes distroless/static viable as the runtime (D63): a
+# glibc-linked binary would need distroless/cc and a base ten times larger.
+#
+# cargo-chef separates dependency compilation from source compilation, so a
+# source-only change does not rebuild every dependency. With ~61 modules sharing
+# a dependency set that is the difference between a fast loop and a slow one.
+RUN rustup target add x86_64-unknown-linux-musl \
+    && cargo install cargo-chef --locked --version 0.1.71
+
+WORKDIR /app

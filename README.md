@@ -117,6 +117,44 @@ each machine at whatever it meant the day it first ran, with two developers on
 different hook versions while both files read the same. Hooks pin an immutable
 tag and bump with `pre-commit autoupdate`.
 
+## Base images
+
+Two, published from `containers/` (D63):
+
+| Image                         | Contains                                              | Ships?                                       |
+| ----------------------------- | ----------------------------------------------------- | -------------------------------------------- |
+| `ghcr.io/yadgarhq/rust-build` | pinned toolchain, musl target, `cargo-chef`, `protoc` | no — build stage only, ~1.9 GB and discarded |
+| `ghcr.io/yadgarhq/runtime`    | distroless static, non-root, CA certs                 | yes — **3.2 MB**                             |
+
+```containerfile
+FROM ghcr.io/yadgarhq/rust-build:latest AS build
+COPY . .
+RUN cargo build --release --target x86_64-unknown-linux-musl --bin <service>
+
+FROM ghcr.io/yadgarhq/runtime:latest
+COPY --from=build /app/target/x86_64-unknown-linux-musl/release/<service> /<service>
+ENTRYPOINT ["/<service>"]
+```
+
+**`:latest`, and that is deliberate.** A toolchain bump must not mean editing
+sixty-odd `Containerfile`s — the same reasoning that has workflow callers track
+`@main`. A dated `:YYYY.MM.DD` tag is published alongside for anyone who needs to
+reproduce an old build.
+
+What floats is the build _input_. The output stays pinned: D61 has the parent
+chart reference each service image by **digest**, so a release names exactly what
+runs regardless of which base produced it.
+
+**`runtime` exists to mirror upstream, and that is its whole job.** D61 promises
+adopters that a digest a release names is never deleted, and that promise cannot
+be kept while a link in the chain belongs to somebody else — this project has
+already been on the receiving end of exactly that. It also removes a second
+registry from every adopter's build: `gcr.io` is read once, here, and nothing
+downstream touches it.
+
+Rebuilt weekly. An image published once and never rebuilt accumulates every CVE
+fixed since.
+
 ## Shared hooks
 
 `package.json` is not decoration. pre-commit's `node` language asserts a
