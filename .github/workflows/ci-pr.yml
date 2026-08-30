@@ -25,8 +25,17 @@ jobs:
 
   # The template is checked, not suggested. A template nobody fills in is a
   # template that does not exist, and this is the only mechanism that notices.
+  #
+  # BOTS ARE EXEMPT, and must be. Dependabot writes its own body — a changelog
+  # and a compatibility score — and cannot be taught this template. Without the
+  # exemption every dependency update is blocked forever by a required check it
+  # is structurally unable to satisfy, which turns the whole update mechanism
+  # off silently. Checked on `user.type` rather than a login, so it covers the
+  # next bot too.
   template:
-    if: github.event_name == 'pull_request'
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.user.type != 'Bot'
     runs-on: ubuntu-latest
     steps:
       - name: the pull request body must follow the template
