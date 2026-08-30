@@ -114,6 +114,18 @@ jobs:
       # the wrong reason.
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
 
+      # protoc, for repositories that generate types from the contract (D16).
+      # Gated on the same PROTO_VERSION detection as the drift check, so a repo
+      # with no protos does not pay for it. Without this, build.rs fails with
+      # "Could not find `protoc`" — which reads as a broken build rather than a
+      # missing tool.
+      - name: install protoc
+        if: needs.detect.outputs.proto == 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
+
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         if: needs.detect.outputs.rust == 'true'
         with:
@@ -306,6 +318,18 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.ref }}
+      # protoc, for repositories that generate types from the contract (D16).
+      # Gated on the same PROTO_VERSION detection as the drift check, so a repo
+      # with no protos does not pay for it. Without this, build.rs fails with
+      # "Could not find `protoc`" — which reads as a broken build rather than a
+      # missing tool.
+      - name: install protoc
+        if: needs.detect.outputs.proto == 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
+
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
