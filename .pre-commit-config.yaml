@@ -27,17 +27,14 @@ repos:
         entry: bash -c 'command -v actionlint >/dev/null && actionlint || echo "actionlint not installed — skipping (CI enforces)"'
         pass_filenames: false
         files: ^\.github/workflows/.*\.ya?ml$
-
-  # JSON, YAML and Markdown. `proseWrap: preserve` in .prettierrc is doing real
-  # work: without it prettier reflows prose and every future diff to a
-  # hand-wrapped document becomes unreadable. With it, prose line breaks are left
-  # exactly as written and only markup is normalised — measured at 15% of lines
-  # on the largest document here, all of it emphasis characters and table
-  # alignment.
-  #
-  # pre-commit/mirrors-prettier is archived; rbubley's is the maintained fork.
-  - repo: https://github.com/rbubley/mirrors-prettier
-    rev: v3.9.6
-    hooks:
+      # Defined locally rather than pulled from this repository's own published
+      # hooks: a repository referencing its own rev cannot validate a change
+      # before that change is tagged. The version is kept identical to
+      # .pre-commit-hooks.yaml on purpose — if the two ever disagree, this file
+      # is the one that is wrong.
       - id: prettier
+        name: prettier
+        language: node
+        additional_dependencies: ["prettier@3.9.6"]
+        entry: prettier --write --ignore-unknown
         types_or: [markdown, json, yaml]

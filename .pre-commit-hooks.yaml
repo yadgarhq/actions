@@ -64,22 +64,9 @@
   additional_dependencies: ["prettier@3.9.6"]
   entry: prettier --write --ignore-unknown
   types_or: [markdown, json, yaml]
-
-# buf, for repositories carrying a .proto contract. D16 makes this gate the
-# reason protobuf was chosen over HTTP/JSON: additive-only evolution enforced
-# structurally rather than by discipline.
-- id: buf-format
-  name: buf format
-  language: golang
-  additional_dependencies: ["github.com/bufbuild/buf/cmd/buf@v1.50.0"]
-  entry: buf format -w
-  pass_filenames: false
-  files: \.proto$
-
-- id: buf-lint
-  name: buf lint
-  language: golang
-  additional_dependencies: ["github.com/bufbuild/buf/cmd/buf@v1.50.0"]
-  entry: buf lint
-  pass_filenames: false
-  files: \.proto$
+# NO buf hooks here, deliberately. bufbuild publishes official, maintained
+# pre-commit hooks that already pin by rev and include buf-breaking with its
+# --against argument. Wrapping them would add a version to maintain and nothing
+# else. Prettier is here for the opposite reason: its own mirror
+# (pre-commit/mirrors-prettier) is ARCHIVED, so there is no maintained upstream
+# to defer to.
