@@ -86,3 +86,22 @@
   language: system
   types: [dockerfile]
   entry: hadolint
+
+# A Helm chart is a Go template that HAPPENS to look like YAML, so check-yaml and
+# prettier cannot read it and every chart repo excludes chart/templates from them.
+# This hook is what makes that exclusion honest rather than a hole.
+#
+# It lives HERE, as a hook, rather than only as a CI job — because a check that
+# runs in CI and not locally is the same "two definitions of clean" that the SKIP
+# list was deleted for. The CI precommit job runs every hook with no SKIP list, so
+# putting it here runs it in both places from one definition.
+#
+# `helm template` as well as `helm lint`: lint checks the chart's structure,
+# rendering catches a template that parses and then produces invalid Kubernetes
+# YAML. They fail on different things.
+- id: helm-lint
+  name: helm lint and render
+  language: system
+  entry: bash -c 'helm lint chart && helm template ci-render chart > /dev/null'
+  pass_filenames: false
+  files: ^chart/
