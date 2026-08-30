@@ -40,6 +40,7 @@ jobs:
     outputs:
       rust: ${{ steps.d.outputs.rust }}
       proto: ${{ steps.d.outputs.proto }}
+      chart: ${{ steps.d.outputs.chart }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -365,6 +366,33 @@ jobs:
           echo "::error::proto/ has drifted from PROTO_VERSION. See the job summary."
           exit 1
 
+  # Charts are Go templates that HAPPEN to look like YAML, so a YAML parser
+  # cannot read them — `{{- toYaml . | nindent 12 }}` is a syntax error to any of
+  # them. Repositories therefore exclude chart/templates from check-yaml and
+  # prettier, and THIS JOB is what makes that exclusion honest rather than a
+  # hole: helm renders the templates and lints the result.
+  #
+  # Without it the exclusion would remove a check and replace it with nothing,
+  # which is the shape a reviewer should always refuse.
+  chart:
+    needs: detect
+    if: needs.detect.outputs.chart == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - name: helm lint
+        run: helm lint chart
+      # Rendering is the part that catches what lint does not: a template that
+      # parses but produces invalid Kubernetes YAML.
+      - name: helm template renders
+        run: helm template ci-render chart > /dev/null
+
   # PHASE 2 OF VERSIONING: derive and REPORT, write nothing.
   #
   # The squash-merge decision already did the hard half — the pull request body
@@ -459,7 +487,7 @@ jobs:
   # forever.
   passed:
     if: always()
-    needs: [precommit, workflows, vulnerabilities, template, test, proto]
+    needs: [precommit, workflows, vulnerabilities, template, test, proto, chart]
     runs-on: ubuntu-latest
     steps:
       - name: no upstream job failed
@@ -470,7 +498,8 @@ jobs:
                    "${{ needs.vulnerabilities.result }}" \
                    "${{ needs.template.result }}" \
                    "${{ needs.test.result }}" \
-                   "${{ needs.proto.result }}"; do
+                   "${{ needs.proto.result }}" \
+                   "${{ needs.chart.result }}"; do
             case "$r" in
               success|skipped) ;;
               *) echo "upstream job result: $r"; exit 1 ;;
