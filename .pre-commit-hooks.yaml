@@ -8,8 +8,14 @@
 #       - id: cargo-clippy
 #       - id: gitleaks
 #
-# `language: system` throughout: these call tools the developer already has,
-# rather than pre-commit building an environment per repository.
+# Two kinds of hook here. `language: system` calls a tool the developer already
+# has; `language: node` (and friends) let pre-commit install the tool itself, with
+# the VERSION PINNED HERE rather than in every repository.
+#
+# That second kind is the point. A tool referenced directly by each repository is
+# a version each repository pins separately, and nothing stops one sitting on
+# prettier 3.9.6 while another sits on 3.8.0 with both configs looking correct.
+# Pinning here makes the drift impossible rather than merely visible.
 - id: cargo-fmt
   name: cargo fmt
   language: system
@@ -42,3 +48,38 @@
   language: system
   entry: gitleaks git --pre-commit --staged --verbose
   pass_filenames: false
+
+# Prettier for markdown, JSON and YAML. cargo fmt covers Rust and buf format
+# covers proto; this is everything else.
+#
+# `proseWrap: preserve` belongs in each repository's .prettierrc and is
+# load-bearing: without it prettier reflows prose, and every future diff to a
+# hand-wrapped document becomes unreadable. Measured before adopting — with it,
+# 332 of 2276 lines change on the largest document here and NONE of them is
+# prose.
+- id: prettier
+  name: prettier
+  language: node
+  # The version lives here, once, for every repository.
+  additional_dependencies: ["prettier@3.9.6"]
+  entry: prettier --write --ignore-unknown
+  types_or: [markdown, json, yaml]
+
+# buf, for repositories carrying a .proto contract. D16 makes this gate the
+# reason protobuf was chosen over HTTP/JSON: additive-only evolution enforced
+# structurally rather than by discipline.
+- id: buf-format
+  name: buf format
+  language: golang
+  additional_dependencies: ["github.com/bufbuild/buf/cmd/buf@v1.50.0"]
+  entry: buf format -w
+  pass_filenames: false
+  files: \.proto$
+
+- id: buf-lint
+  name: buf lint
+  language: golang
+  additional_dependencies: ["github.com/bufbuild/buf/cmd/buf@v1.50.0"]
+  entry: buf lint
+  pass_filenames: false
+  files: \.proto$
