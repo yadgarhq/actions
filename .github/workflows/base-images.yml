@@ -65,6 +65,29 @@ jobs:
       # material to hold or rotate.
       # The base images are scanned hardest, because every service inherits
       # whatever they carry. A CVE here is a CVE in sixty-one images.
+      # SKIPPING THE CARGO REGISTRY IS NOT LOWERING THE BAR — it is excluding
+      # files that are not part of any build.
+      #
+      # `cargo install cargo-chef` extracts crate SOURCES into the registry
+      # cache, and a published crate ships its own `Cargo.lock` — the one its
+      # maintainers resolved for their own CI. Trivy reads each of those as a
+      # dependency manifest, so it reported HIGH findings against, for example,
+      # `globwalk-0.8.1/Cargo.lock` pinning `regex 1.4.2`.
+      #
+      # Nothing here ever resolves those lockfiles. Cargo resolves from the
+      # WORKSPACE lockfile of whatever is being built; a dependency's bundled
+      # lock is inert data sitting in a download cache. The finding is real about
+      # the file and says nothing about the image.
+      #
+      # What still gets scanned: the Debian layer, and the compiled binaries —
+      # including cargo-chef itself, whose real dependency set trivy reads from
+      # the binary. And the dependency set of anything we actually ship is gated
+      # twice over: `cargo deny` at commit time (D59) and trivy in each service
+      # repository's own pipeline.
+      #
+      # Suppressing the individual CVEs instead would have been wrong twice: it
+      # accepts findings that were never about us, and the list rots as the
+      # toolchain moves.
       - name: scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -73,6 +96,7 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: "1"
           ignore-unfixed: true
+          skip-dirs: /usr/local/cargo/registry
 
       - name: SBOM
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
