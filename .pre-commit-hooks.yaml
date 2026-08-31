@@ -33,6 +33,33 @@
 # D24 requires a permissive stack stay viable and O10 requires the audit be
 # re-run before adding a dependency — an instruction that otherwise depends on
 # being remembered.
+# MECHANICAL CEILINGS on file and function size, so complexity is a decision
+# someone makes rather than something that accumulates. Adopted early on purpose:
+# a repository that crosses a limit on its first day changes one file, while one
+# that crosses it after a year needs a refactor nobody scheduled — and adopting a
+# limit already breached means starting with an exemption list, which is how a
+# limit stops meaning anything.
+#
+# `language: script`, NOT `language: python`. A python-language hook pip-installs
+# this repository, and the failure surfaces in the consuming repo as an install
+# error rather than a hook error — learned in v1.4.0 and fixed in v1.4.1.
+- id: complexity
+  name: file and function size ceilings
+  language: script
+  entry: hooks/complexity.py
+  files: \.rs$
+
+# Clippy's complexity lints, which measure what a line count cannot: nesting and
+# branching. A 300-line function of flat match arms is fine; a 40-line one with
+# five levels of nesting is not. The two hooks are complementary, and neither
+# replaces reading the code.
+- id: cargo-clippy-complexity
+  name: cognitive complexity
+  language: system
+  entry: cargo clippy --all-targets --all-features -- -W clippy::cognitive_complexity -W clippy::too_many_arguments -D warnings
+  pass_filenames: false
+  files: \.(rs|toml)$
+
 - id: cargo-deny
   name: cargo deny (licences, advisories, sources)
   language: system
