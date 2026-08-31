@@ -2,11 +2,24 @@
 # (D59, D62). A repository references these instead of redefining them:
 #
 #   - repo: https://github.com/yadgarhq/actions
-#     rev: v1
+#     rev: v1.5.0   # an IMMUTABLE tag — never `v1`
 #     hooks:
 #       - id: cargo-fmt
 #       - id: cargo-clippy
 #       - id: gitleaks
+#
+# THE EXAMPLE ABOVE PINS AN EXACT VERSION, and that is the point rather than
+# pedantry. pre-commit caches a rev at first install and NEVER re-resolves it —
+# "mutable references are never updated after first install and are not
+# supported" — so a repository pinning `v1` freezes at whatever `v1` meant on that
+# machine's first run, and two developers sit on different hook versions with
+# byte-identical config.
+#
+# This example used to say `v1`, two lines above the comment explaining why that
+# fails. A moving `v1` tag also exists in this repository and could not be
+# deleted: the ruleset forbids deleting a tag while permitting a force-update,
+# which is the wrong way round for a project whose invariant is that a published
+# tag never moves.
 #
 # Two kinds of hook here. `language: system` calls a tool the developer already
 # has; `language: node` (and friends) let pre-commit install the tool itself, with
