@@ -54,7 +54,10 @@ version flagged every `async fn` in a file once a service impl appeared anywhere
 in it, so adding tests failed the check that exists to encourage tests. A check
 that cries wolf gets ignored, and then it protects nothing. That is why helpers
 (`reply`, `origin_ok`, `shape`), the 405 fallback, and every function the router
-never reaches are outside the rule entirely.
+never reaches are outside the rule entirely. So are `handle`'s own early returns
+for malformed JSON, a failed `validate` and a header cross-check: no bounded
+method label has been read yet at that point, so there is nothing to record
+under, which is the same D67 reason the catch-all is excluded.
 
 FITTED TO ONE SHAPE, DELIBERATELY. There is exactly one `Router::new()` in the
 organisation today. A rule fitted to the one HTTP dispatch shape that exists — and
@@ -203,6 +206,14 @@ METHOD_ROUTER = re.compile(
 # matched", so it has no bounded route label to record under — the same reason
 # the catch-all arm is excluded. Recording one would put the caller's URL into a
 # metric, which is D67's cardinality rule read backwards.
+# THE SCRUTINEE NAME IS LOAD-BEARING, and this is the one way this hook degrades
+# quietly. If the dispatch is ever rewritten as `match request.rpc_name.as_str()`
+# this stops matching, the file falls back to treating the route-registered
+# function as the unit, and `handle` passes on the strength of any ONE arm's
+# `Call::start` — three checked methods silently become one that cannot fail.
+# Left narrow anyway: matching every string `match` inside a handler would fire
+# on a content-type or a header check, and a check that cries wolf gets ignored.
+# So it is written down here instead, for whoever renames it.
 DISPATCH = re.compile(r"\bmatch\b[^{;]*\.method\b[^{;]*\{")
 # `const TOOLS_LIST: &str = "tools/list";` — so a failure can name the method an
 # operator recognises instead of the identifier the code happens to use.
