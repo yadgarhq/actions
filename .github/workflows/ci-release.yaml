@@ -1,7 +1,3 @@
-# TRANSITIONAL DUPLICATE of ci-release.yaml. Exists only so the twelve callers
-# still pinned to `ci-release.yml@main` keep working while they migrate to
-# `.yaml`. Delete once they have.
-#
 # Cutting a release. The stage order is forced by D61, not chosen: the chart
 # pins the image by DIGEST, so the digest must exist before the chart can be
 # packaged. Build, push, capture digest, package chart against it, push, sign.
