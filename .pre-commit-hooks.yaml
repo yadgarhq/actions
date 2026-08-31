@@ -156,6 +156,18 @@
 #
 # The failure it prevents is silent: a module that quietly stops emitting looks
 # exactly like a module nobody called, which is the reading that would break D15.
+#
+# BOTH TRANSPORTS. gRPC handlers come from the tonic server trait, which hands
+# over a closed named set. HTTP has no such trait, so for a while this hook found
+# ZERO handlers in `gateway` and checked nothing in the one service that can
+# measure what D67 exists for — bytes and words returned TO THE CALLER. On the
+# HTTP side the unit is finer than the function: a router registration says which
+# functions to read, and each bounded-label arm of a method dispatch inside one is
+# a handler. A catch-all arm is not, because its label would be the caller's own
+# string and D67 forbids a caller minting a Prometheus series.
+#
+# An omission that is deliberate is written above the arm or the function, with a
+# reason: `// observe-coverage: exempt — why`. In the code, so it is in the diff.
 # `language: script`, NOT python. `language: python` makes pre-commit try to pip
 # install THIS repository, which has no pyproject.toml and is not a package —
 # the error is "Directory '.' is not installable", raised in the CONSUMING repo
@@ -163,7 +175,7 @@
 #
 # script runs the file directly; it carries a shebang and the executable bit.
 - id: observe-coverage
-  name: every RPC handler is instrumented
+  name: every handler is instrumented
   language: script
   entry: hooks/observe_coverage.py
   files: \.rs$
