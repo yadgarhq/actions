@@ -29,12 +29,55 @@ HANDLER = re.compile(r"^\s*async fn (\w+)\s*\(\s*$|^\s*async fn (\w+)\s*\(&self"
 SERVICE_IMPL = re.compile(r"impl\s+\w*Service\s+for\s+\w+")
 
 
+# A test module defines FAKE services to test against, and its own test
+# functions are `async fn` too. Scanning them produced a hook that failed on a
+# repository for adding tests — the check firing on the thing it was meant to
+# encourage.
+def _is_test_source(path: str) -> bool:
+    """Test sources only, decided by PATH.
+
+    Deliberately not "the file contains `#[cfg(test)]`" — every production
+    service file here ends with `#[cfg(test)] mod tests;`, so that rule skips
+    exactly the files this hook exists to check. Caught by testing that the hook
+    still fails on a handler with its `Call::start` removed; it did not, and the
+    hook would have passed everything forever while looking like it worked.
+
+    Scoping `handlers_in` to the impl block is what makes the narrow rule safe:
+    a test module inside a production file is no longer scanned anyway.
+    """
+    return path.endswith("tests.rs") or "/tests/" in f"/{path}"
+
+
 def handlers_in(text: str):
-    """Yield (name, body) for each handler inside a service impl."""
-    if not SERVICE_IMPL.search(text):
+    """Yield (name, body) for each handler INSIDE a service impl.
+
+    Scoped to the impl block, not the file. The first version searched the whole
+    file once a service impl appeared anywhere in it, so an ordinary `async fn`
+    elsewhere — a helper, a constructor — was reported as an uninstrumented
+    handler. That is a check firing on something it was never about, which is
+    worse than one that misses: it teaches people the check is noise.
+    """
+    m = SERVICE_IMPL.search(text)
+    if not m:
         return
     lines = text.splitlines()
+
+    # Find the impl block's extent by brace depth from its opening line.
+    start = text[: m.start()].count("\n")
+    depth = 0
+    started = False
+    end = len(lines)
+    for i in range(start, len(lines)):
+        depth += lines[i].count("{") - lines[i].count("}")
+        if "{" in lines[i]:
+            started = True
+        if started and depth <= 0:
+            end = i + 1
+            break
+
     for i, line in enumerate(lines):
+        if not (start <= i < end):
+            continue
         m = re.match(r"\s*async fn (\w+)\(", line)
         if not m:
             continue
@@ -58,6 +101,8 @@ def main(paths):
         try:
             text = open(path, encoding="utf-8").read()
         except (OSError, UnicodeDecodeError):
+            continue
+        if _is_test_source(path):
             continue
         for name, body in handlers_in(text):
             if "Call::start" not in body:
