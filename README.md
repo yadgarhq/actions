@@ -33,8 +33,8 @@ the last tag, which a pull request cannot see.
 | Workflow            | Runs on      | Does                                    |
 | ------------------- | ------------ | --------------------------------------- |
 | `ci-validation.yml` | called       | pre-commit, detected linters, licences  |
-| `ci-pr.yml`         | pull request | calls `ci-validation`, then tests       |
-| `ci-release.yml`    | tag          | image → digest → chart → sign → publish |
+| `ci-pr.yaml`        | pull request | calls `ci-validation`, then tests       |
+| `ci-release.yaml`   | tag          | image → digest → chart → sign → publish |
 
 `ci-pr` **calls** `ci-validation` rather than repeating it. A pull request needs
 both linting and tests, so two independent workflows would be two definitions of
@@ -148,11 +148,11 @@ on:
 jobs:
   pr:
     if: github.event_name == 'pull_request'
-    uses: yadgarhq/actions/.github/workflows/ci-pr.yml@main
+    uses: yadgarhq/actions/.github/workflows/ci-pr.yaml@main
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    uses: yadgarhq/actions/.github/workflows/ci-release.yml@main
+    uses: yadgarhq/actions/.github/workflows/ci-release.yaml@main
     with:
       version: ${{ github.ref_name }}
 ```

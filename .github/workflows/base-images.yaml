@@ -14,7 +14,7 @@ name: base-images
 on:
   push:
     branches: [main]
-    paths: [containers/**, .github/workflows/base-images.yml]
+    paths: [containers/**, .github/workflows/base-images.yaml]
   # Rebuild weekly. The upstream bases receive security fixes, and an image
   # published once and never rebuilt accumulates every CVE fixed since.
   schedule:
