@@ -111,7 +111,7 @@ jobs:
         run: |
           cosign sign --yes "$IMAGE"
 
-      # See ci-release.yml for why this exists: a new package is private by
+      # See ci-release.yaml for why this exists: a new package is private by
       # default, no API can change it, and nothing else would report it.
       # ANONYMOUSLY, which is the whole point and is what this check got wrong.
       #
