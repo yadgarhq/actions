@@ -320,8 +320,31 @@ jobs:
         options: >-
           --health-cmd="healthcheck.sh --connect --innodb_initialized"
           --health-interval=5s --health-timeout=5s --health-retries=12
+      # THE SHARED CACHE (D21), for the same reason MariaDB is here: a test that
+      # can only run against a real server is a test that does not run.
+      #
+      # Unconditional, and NOT detected per repository. Detection is the signal
+      # that goes stale silently — a repository that gains a Valkey-backed test
+      # would go green having measured nothing until somebody remembered to
+      # update the detection, which is the failure this job exists to catch. A
+      # service container nobody connects to costs a couple of seconds and
+      # nothing else.
+      #
+      # gateway is the first consumer: D74's token buckets are read-compute-write
+      # against this cache, and the race they exist to prevent appears only under
+      # concurrent callers against a real server. Its suite FAILS on a runner when
+      # YADGAR_TEST_VALKEY is unset rather than skipping, so without this the one
+      # defect that module exists to prevent has no automated coverage at all.
+      valkey:
+        image: valkey/valkey@sha256:a91d34ab33975b1054e26f1bd9995b268f7e0c507b5ded7f3d181a1a25521630 # 9.1.2
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="valkey-cli ping"
+          --health-interval=5s --health-timeout=5s --health-retries=12
     env:
       YADGAR_TEST_DSN: mysql://root:ci@127.0.0.1:3306/ci
+      YADGAR_TEST_VALKEY: 127.0.0.1:6379
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

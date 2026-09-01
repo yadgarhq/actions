@@ -24,6 +24,20 @@ updates:
   # Base images are pinned by digest (D61), which is exactly the pin that goes
   # stale invisibly. The weekly rebuild picks up upstream fixes; this picks up
   # upstream RELEASES.
+  #
+  # THE SERVICE PINS IN `.github/workflows/ci-pr.yaml` ARE NOT COVERED, and no
+  # entry here can cover them. Dependabot's docker ecosystem fetches a directory
+  # non-recursively and keeps a YAML file only when it is a Helm chart or when
+  # the parsed root has BOTH `apiVersion` and `kind` — the Kubernetes-resource
+  # heuristic in `SharedFileFetcher#correctly_encoded_yamlfiles`. A workflow has
+  # neither key, so it is discarded before the parser ever looks for an image.
+  # Adding `/` or `/.github/workflows` here does not widen coverage; it adds a
+  # directory with no parseable manifest, which is a failing update job rather
+  # than a watcher. Updating `container:`/`services:` images in workflows is
+  # dependabot-core#5819, open and unimplemented.
+  #
+  # So the MariaDB and Valkey digests are checked by whoever reads them. Resolve
+  # them by hand when touching that job.
   - package-ecosystem: docker
     directories: ["/containers/rust-build", "/containers/runtime"]
     schedule:
