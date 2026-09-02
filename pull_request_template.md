@@ -68,4 +68,23 @@
 <!--
   What breaks if this is wrong, and how it is undone. "None" is a valid answer
   and worth writing rather than leaving blank.
+
+  AND ANSWER THE D80 QUESTION HERE, because no check can answer it for you:
+
+    If the operator ran a different ingress, a different cloud, or a different
+    set of operators, would this still be correct — and would it still be SECURE?
+
+  Two failures, not one. A component that merely stops working elsewhere is a
+  portability bug. A component whose SECURITY property quietly depends on the
+  environment is worse, because it keeps working and stops protecting.
+
+  The `portability` job checks the half a machine can check: that every resource
+  a module chart renders which needs a CRD can be switched off by a value, and
+  that no cloud or ingress-implementation name appears in the source. It cannot
+  check whether a control rests on an environment default nobody declared. The
+  audit source address is the worked example — making it trustworthy with an
+  Envoy `ClientTrafficPolicy` would have passed every automated check there is.
+
+  "This change touches no trust boundary" is a fine answer. Writing it is the
+  point; leaving it out is not.
 -->

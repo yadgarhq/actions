@@ -106,18 +106,102 @@ with `Executable not found`, which says nothing about the code.
 It also makes D55's argument true one level up. **What a developer runs is
 exactly what CI runs**, rather than something that resembles it.
 
-Two jobs are _not_ hook-covered, and that is the line — pre-commit owns what
+Three jobs are _not_ hook-covered, and that is the line — pre-commit owns what
 pre-commit can define:
 
 | Job                       | Why not a hook                                                         |
 | ------------------------- | ---------------------------------------------------------------------- |
 | `workflows` (zizmor)      | audits the workflows themselves; needs the repository, not a file list |
 | `vulnerabilities` (trivy) | needs a vulnerability database and network                             |
+| `portability` (D80)       | renders the chart twice and diffs the two, which is not a file check   |
 
 **`fetch-depth: 0` is required, not incidental.** gitleaks scans history and
 `buf breaking` compares against a tag. At the default depth there is neither, and
 the failure looks like a leaked secret or a broken contract rather than a shallow
 clone — which is exactly how it presented the first time.
+
+## D80 is a gate, not a habit
+
+D80 is an **invariant**: nothing shipped may depend on the environment it runs
+inside. yadgar must run on EKS, on AKS, on GKE, and behind NGINX, Traefik,
+HAProxy, an ALB or an Application Gateway. It used to be held by review, which is
+the weak form — an invariant enforced by attention decays exactly when attention
+is scarce.
+
+**The property the `portability` job enforces, in one sentence:** every resource
+a module chart renders that needs a CRD can be switched off by a value.
+
+**Not "the defaults emit no CRDs".** That was the first draft and it contradicts
+D80. Gateway API is a _specification_ with several conformant implementations
+rather than a product — D71 chose it for that reason and D80 names it as
+permitted — so failing `gateway` for rendering an `HTTPRoute` would enforce a
+rule nobody wrote. What an adopter needs is a chart that **installs on a bare
+cluster**, not a chart stripped of opinion.
+
+So the job renders the chart **twice**: once at its defaults, once with every
+values key named `enabled` set to `false`. The second render must contain nothing
+outside the built-in Kubernetes API groups. That is a real test with a real
+failure mode, rather than a substring search that passes vacuously the moment
+somebody uses a name it was never told about — this project already has two of
+those on record.
+
+**An allowlist of built-in groups, never a denylist of CRD groups.** An unknown
+API group is treated as CRD-bearing, so the unknown case fails safe.
+
+The job also reports what the **defaults** ask an adopter to install, and whether
+each name is a specification or a product:
+
+| Rendered by a module chart today        | List          | Default |
+| --------------------------------------- | ------------- | ------- |
+| `keda.sh` `ScaledObject`                | product       | off     |
+| `gateway.networking.k8s.io` `HTTPRoute` | specification | on      |
+
+Both satisfy the rule. Only the second is on by default, because an adopter on
+plain NGINX sets one value to `false` and points their own Ingress at the Service
+the chart already publishes.
+
+`deploy` is **exempt by name**, which is D80's own wording: reference deployments
+may require operators; a module's own chart may not.
+
+### What it deliberately does not check
+
+**Whether a security control rests on an undeclared environment default.** That is
+D80's highest-severity class — a component that keeps working and stops
+protecting — and no grep finds it. The audit source address is the worked example:
+making it trustworthy with an Envoy `ClientTrafficPolicy` would have compiled,
+rendered, and passed every automated check here.
+
+It is a question for a human, and it lives in the `## Risk` section of the pull
+request template. The job prints its own coverage gap on every run, because a
+gate that implies more than it checks is worse than no gate.
+
+The cloud-provider and ingress-implementation checks are **denylists** and the
+job's output says so. They are tripwires on the first introduction of a known
+name, never a proof of portability.
+
+## The proto pin is reported, never enforced
+
+The `proto` job answers "does the vendored copy match `PROTO_VERSION`". It cannot
+answer "is that pin still current", because the pin is its own baseline — so
+nothing flagged `task` sitting on `v1.2.0` while `proto` was tagged `v1.6.0`.
+
+A second step now compares the pin against the newest tag and reports the
+difference **in contents, not version strings**, split three ways:
+
+| Bucket         | Means                                                               |
+| -------------- | ------------------------------------------------------------------- |
+| contract drift | a file this module already vendors, whose text differs              |
+| closure growth | a file `buf export` reaches only at the newer tag, via a new import |
+| closure shrink | a file the newer closure no longer reaches                          |
+
+Only the first is drift. `buf export` follows the import graph, so a newer tag can
+reach a file the pin's closure never had — `gateway/PROTO_PATHS` documents exactly
+that at `v1.6.0` — and a flat `diff -r` would call it drift and read alarming.
+
+**It reports and never fails**, deliberately. Being behind is a choice until
+somebody bumps it: a newer tag adding an RPC a module does not call is not a
+defect in that module, and a hard failure would turn every repository red the
+moment `proto` is tagged. Derive and report; a human applies it (D64).
 
 ## They detect what a repository is
 
