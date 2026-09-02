@@ -60,6 +60,26 @@ jobs:
             fi
           done
 
+          # A DETECTION THAT ANSWERS "no" IS A CHECK SWITCHED OFF, so the "no"
+          # has to be true. `proto` is decided by PROTO_VERSION and by nothing
+          # else, so deleting or renaming that one file switches the
+          # vendored-drift check off while `passed` still reports green — and the
+          # vendored copies stay in the tree, matched against nothing. No
+          # repository here declares a buf hook, so that job is the whole of
+          # D70's enforcement and its absence is visible nowhere.
+          #
+          # `proto/` IS THE FACT THAT DISCRIMINATES. A repository that genuinely
+          # stops vendoring deletes the directory too and skips honestly; one
+          # that keeps the directory and loses the pin is the failure above.
+          # Swept across all 14 repositories on 2026-09-02: every `proto/` has a
+          # PROTO_VERSION beside it, and yadgarhq/proto — the contract itself —
+          # has neither, so this assertion needs no exemption list. Starting with
+          # one is how a limit stops meaning anything.
+          if [ -d proto ] && [ ! -e PROTO_VERSION ]; then
+            echo "::error::proto/ is present and PROTO_VERSION is not, so the vendored-drift check would skip and prove nothing. Restore the pin, or delete proto/ if this repository no longer vendors the contract."
+            exit 1
+          fi
+
   # ONE definition of "is this repository clean": the hooks. CI installs what
   # they need and runs all of them.
   #
@@ -885,6 +905,7 @@ jobs:
     if: always()
     needs:
       [
+        detect,
         precommit,
         workflows,
         vulnerabilities,
@@ -895,6 +916,54 @@ jobs:
       ]
     runs-on: ubuntu-latest
     steps:
+      # DETECT IS CHECKED HERE AND NOT BELOW, because the step below reads
+      # `skipped` as success and a skipped detect is the one skip that is never
+      # benign. Every gating job either needs detect or reads its outputs, so a
+      # detect that fails or is cancelled leaves precommit, test and proto all
+      # reporting `skipped` — the result GitHub gives a job whose dependency did
+      # not succeed — and the loop below waves all three through. That is a pull
+      # request merging with no hooks, no tests and no proto check having run at
+      # all, and detect was not in `needs` for any of it to be noticed.
+      #
+      # THE REQUIRED RESULT DEPENDS ON THE EVENT, and it has to. detect carries
+      # `if: github.event_name != 'push'`, so on push to main it is MEANT not to
+      # run; demanding success there would turn the post-merge run red in every
+      # repository at once. Callers trigger on `pull_request` and `push` and
+      # nothing else, so these two branches are the whole set rather than a case
+      # and a default.
+      - name: detect reached a conclusion of its own
+        env:
+          # Through the environment rather than interpolated into the script,
+          # for the reason the template job gives at length.
+          EVENT: ${{ github.event_name }}
+          RESULT: ${{ needs.detect.result }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = push ]; then required=skipped; else required=success; fi
+          if [ "$RESULT" != "$required" ]; then
+            echo "::error::detect reported '$RESULT' on a '$EVENT' event, and '$required' is required. Every other stage keys off its outputs, so this run proved nothing about the change."
+            exit 1
+          fi
+          echo "detect: $RESULT on $EVENT, as required."
+
+      # AND EVERY OTHER STAGE, where `skipped` is a real answer now that the one
+      # illegitimate skip is caught above. What remains, named rather than
+      # assumed, because this step's message asserted a distinction it could not
+      # make:
+      #
+      #   workflows, vulnerabilities, portability  skip on push and nowhere else.
+      #   template                                 skips on push, and for a bot,
+      #                                            which is the exemption it
+      #                                            documents at length.
+      #   test                                     skips when rust is false, which
+      #                                            takes deleting Cargo.toml — and
+      #                                            the cargo hooks match `.rs` and
+      #                                            `.toml` files rather than that
+      #                                            file, so they run anyway and
+      #                                            fail precommit instead.
+      #   proto                                    skips when proto is false, which
+      #                                            detect now refuses to report
+      #                                            while `proto/` is still there.
       - name: no upstream job failed
         run: |
           set -euo pipefail
