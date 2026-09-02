@@ -179,6 +179,34 @@ The cloud-provider and ingress-implementation checks are **denylists** and the
 job's output says so. They are tripwires on the first introduction of a known
 name, never a proof of portability.
 
+### The gate is a checked-in script, and that costs a second checkout
+
+`scripts/d80_portability.py`, not a heredoc. It was 20499 bytes inside a `run:`
+block, and **actionlint deadlocks above 8192**: it pipes every `run:` block to
+shellcheck without draining the pipe, so the write never returns and the job
+burns its whole timeout. No workflow here could be linted at all while the block
+lived there, which is how the `actionlint` hook came to report Passed having run
+nothing. `hooks/run_block_size.py` fails the commit before that can happen again.
+
+Getting a checked-in script onto the runner needs a **second checkout** in every
+repository but this one, because `ci-pr.yaml` is a reusable workflow and every
+checkout in it is the _calling_ repository. Three details are load-bearing:
+
+- **This repository stages the gate from its own checkout.** A change to a
+  shared workflow must be tested by the version in the pull request, which is
+  what `ci-self.yaml` exists for; taking the gate from `main` here would test
+  the merged copy instead. The test is the repository NAME, not whether the file
+  happens to be present, so no repository under review can supply its own gate.
+- **Everyone else gets `yadgarhq/actions@main`**, which is what every consumer
+  pins the workflow at, so the script and its caller move together. Asking for
+  the ref the workflow was _called_ at is not possible:
+  `github.job_workflow_ref` is an OIDC token claim and renders empty as an
+  expression. actionlint said so, and a run confirmed it.
+- The second checkout is **deleted before the gate runs**. The gate walks `.`
+  for source-tree tripwires, and `actions/checkout` can only write inside the
+  workspace — so leaving it would scan this repository as if it were the one
+  under review.
+
 ## The proto pin is reported, never enforced
 
 The `proto` job answers "does the vendored copy match `PROTO_VERSION`". It cannot
