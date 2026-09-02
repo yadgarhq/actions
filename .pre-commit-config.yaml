@@ -21,11 +21,31 @@ repos:
       # Workflows reaching every repository deserve a linter. actionlint catches
       # the expression and context errors that otherwise surface as a failed run
       # in somebody else's repository.
+      #
+      # THE SKIP IS REAL AND SO IS THE SENTENCE EXCUSING IT, but only since the
+      # precommit job installs actionlint. Before that it was installed nowhere,
+      # so this hook reported Passed having linted nothing and the message said
+      # CI would catch it. The skip stays — a developer without the binary
+      # should still be able to commit — and CI is now where the enforcement is.
       - id: actionlint
         name: actionlint
         language: system
         entry: bash -c 'command -v actionlint >/dev/null && actionlint || echo "actionlint not installed — skipping (CI enforces)"'
         pass_filenames: false
+        files: ^\.github/workflows/.*\.ya?ml$
+      # THE HOOK ABOVE CANNOT RUN AT ALL ABOVE A CERTAIN SIZE, so the size is
+      # checked too. actionlint pipes every `run:` block to shellcheck and does
+      # not drain the pipe while it writes; above 8192 bytes the write never
+      # returns, actionlint hangs and the job burns its whole timeout. Measured
+      # rather than guessed — the numbers are in the script.
+      #
+      # Local to this repository: a consumer's workflow is a twenty-line caller
+      # with nothing to measure, and publishing this would put a check in every
+      # repository for a mistake only this one can make.
+      - id: run-block-size
+        name: a run block must stay small enough to lint
+        language: system
+        entry: python3 hooks/run_block_size.py
         files: ^\.github/workflows/.*\.ya?ml$
       # Defined locally rather than pulled from this repository's own published
       # hooks: a repository referencing its own rev cannot validate a change
