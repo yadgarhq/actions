@@ -11,7 +11,7 @@ D59 (pre-commit everywhere), D61 (images and digests), D15 (additive-only).
 | Event                | Runs                          |
 | -------------------- | ----------------------------- |
 | `pull_request`       | everything — this is the gate |
-| `push` to `main`     | the version report **only**   |
+| `push` to `main`     | the version job **only**      |
 | `push` of a `v*` tag | release                       |
 
 **Validation on push to `main` was removed, not forgotten.** It re-ran exactly
@@ -25,8 +25,11 @@ pull request. A schedule would cover that and was tried and removed: it is
 machinery for a problem nobody has yet, on repositories that change often enough
 that the next pull request is rarely far away.
 
-**The version report is genuinely push-only.** It reads `main`'s history since
-the last tag, which a pull request cannot see.
+**The version job is genuinely push-only.** It reads `main`'s history since the
+last tag, which a pull request cannot see. It derives the next version from the
+`## Changelog` bullets that squash-merging left in that history, and — where the
+release App is configured — cuts the annotated `v*` tag for it, which is what
+starts `ci-release`. See [Cutting the release tag](#cutting-the-release-tag).
 
 ## The workflows
 
@@ -229,7 +232,69 @@ that at `v1.6.0` — and a flat `diff -r` would call it drift and read alarming.
 **It reports and never fails**, deliberately. Being behind is a choice until
 somebody bumps it: a newer tag adding an RPC a module does not call is not a
 defect in that module, and a hard failure would turn every repository red the
-moment `proto` is tagged. Derive and report; a human applies it (D64).
+moment `proto` is tagged. The version job derives and WRITES; this one only
+reports, and the difference is whose repository the answer is about. A version is
+a statement about this repository, settled by its own merged history. A proto pin
+being behind is a statement about `yadgarhq/proto`, which nothing here is
+entitled to act on.
+
+## Cutting the release tag
+
+The `version` job cuts the tag that `ci-release` runs from. It is **inert until a
+repository is wired up**, and stays inert on any answer it cannot be sure of.
+
+It writes no tag when any of these holds:
+
+| Condition                                              | Why                                                       |
+| ------------------------------------------------------ | --------------------------------------------------------- |
+| no `RELEASE_APP_CLIENT_ID` / `RELEASE_APP_PRIVATE_KEY` | the App is not configured here                            |
+| no `v*` tag yet                                        | no baseline; the first tag of a repository is cut by hand |
+| the last tag is not `vMAJOR.MINOR.PATCH`               | `v0.1.0a6` gives no number to count from                  |
+| no parseable `## Changelog` bullets since that tag     | nothing to release                                        |
+| `HEAD` already carries a `v*` tag                      | already released                                          |
+
+**Every one of those refuses rather than guesses, and that asymmetry is the whole
+design.** The `release-tags` ruleset blocks `deletion`, `update` and
+`non_fast_forward` on `refs/tags/v*` with no bypass actors, so a tag cannot be
+withdrawn or moved once written. 13 of the 14 repositories carry it; `docs` is
+private on a plan where rulesets are unavailable, so it is the only one where a
+mistake is recoverable. Writing none is always the cheaper mistake.
+
+**Pre-1.0 is not the 1.x rule.** Under `0.x` a `!` bullet bumps MINOR and a
+`feat` bumps PATCH. Automation applying the 1.x rule would publish a version
+claiming compatibility it does not have.
+
+### Switching it on
+
+1. Create a GitHub App in the `yadgarhq` organisation with the single repository
+   permission **Contents: Read and write**. No account permissions, no events, no
+   webhook.
+2. Install it on every repository that calls `ci-pr.yaml`.
+3. Set two **organisation** secrets: `RELEASE_APP_CLIENT_ID` (the App's Client
+   ID) and `RELEASE_APP_PRIVATE_KEY` (a generated private key, the whole PEM).
+4. Add the passthrough to each caller's `ci` job — a reusable workflow cannot
+   read a caller's secrets unless the caller hands them over:
+
+   ```yaml
+   jobs:
+     ci:
+       uses: yadgarhq/actions/.github/workflows/ci-pr.yaml@main
+       permissions:
+         contents: read
+       secrets:
+         RELEASE_APP_CLIENT_ID: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+         RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+   ```
+
+**Install the App before the secrets reach a repository.** Minting a token for a
+repository the App is not installed on FAILS, and the empty-secret guard cannot
+catch that — the secret is present, the installation is not. Either install
+everywhere first, or scope the organisation secrets to the installed set.
+
+**`contents: read` at the workflow level stays.** The App token is not
+`GITHUB_TOKEN`, so that block does not constrain it. That is the point rather
+than a loophole: a tag pushed with a `contents: write` `GITHUB_TOKEN` triggers no
+further workflow, so `ci-release` would never fire.
 
 ## They detect what a repository is
 

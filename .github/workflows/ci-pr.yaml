@@ -13,14 +13,34 @@ on:
         type: string
         required: false
         default: ""
+    # BOTH OPTIONAL, and that is what makes the release tag INERT until somebody
+    # switches it on. A reusable workflow cannot see a caller's secrets unless
+    # the caller passes them, so a repository that has not been wired up hands
+    # over two empty strings, the `version` job notices, and it reports exactly
+    # as it did before. No repository turns red waiting for the App to exist.
+    #
+    # A private key rather than a token: `actions/create-github-app-token` mints
+    # a short-lived installation token per run, so there is no long-lived
+    # credential with write access to every tag sitting in an organisation
+    # secret. Same argument D61 makes for signing with the workflow identity.
+    secrets:
+      RELEASE_APP_CLIENT_ID:
+        required: false
+      RELEASE_APP_PRIVATE_KEY:
+        required: false
 
+# CONTENTS: READ STAYS, and the tagging step below does not contradict it. The
+# App token is NOT `GITHUB_TOKEN`, so this block does not constrain it — which
+# is the point rather than a loophole: a tag pushed with a `contents: write`
+# `GITHUB_TOKEN` does not trigger another workflow, so the `release` job would
+# never fire and the release would silently not happen.
 permissions:
   contents: read
 
 # WHAT RUNS WHEN, and the push case is the interesting one.
 #
 #   pull_request  everything. This is the gate.
-#   push to main  the version report ONLY.
+#   push to main  the version job ONLY.
 #
 # Validation on push to main would re-run exactly what the pull request just
 # passed, on code already merged, with nobody watching the result. The ruleset
@@ -484,7 +504,8 @@ jobs:
       # and a hard failure would turn every repository here red the moment
       # `proto` is tagged. It also needs the network and a remote tag listing,
       # and a gate that fails when a third party is unreachable fails for reasons
-      # unrelated to the change under review. Derive and REPORT (D64).
+      # unrelated to the change under review. Derive and REPORT — unlike the
+      # version job below, which now writes the tag it derives.
       #
       # It compares CONTENTS, not version strings, and splits the answer three
       # ways. `buf export` follows the import graph, so a newer tag can reach a
@@ -512,7 +533,11 @@ jobs:
           #     a third party being reachable fails for reasons that have nothing to do
           #     with the change under review.
           #
-          # Same shape as the version job: derive and REPORT, write nothing (D64).
+          # The version job DERIVES AND WRITES now; this one still only reports,
+          # and the difference is whose repository the answer is about. A version
+          # is a statement about this repository, decided by this repository's
+          # own merged history. A proto pin being behind is a statement about
+          # `yadgarhq/proto`, and nothing here is entitled to act on that.
           # Please do not "fix" this into a hard failure without reading the above.
           #
           # "NEVER A FAILURE" IS MADE STRUCTURAL, not merely intended. Every enumerated
@@ -809,19 +834,38 @@ jobs:
           D80_REPO: ${{ github.repository }}
         run: python3 "$RUNNER_TEMP/d80_portability.py"
 
-  # PHASE 2 OF VERSIONING: derive and REPORT, write nothing.
+  # PHASE 3 OF VERSIONING: derive the next version AND cut the tag for it.
   #
   # The squash-merge decision already did the hard half — the pull request body
   # becomes the commit message, so the Changelog bullets are in main's history,
   # one commit per change. There is no separate state to maintain: the history
   # IS the changelog.
   #
-  # This reports what the next version WOULD be. It does not tag, does not edit
-  # Cargo.toml or Chart.yaml, and does not open a pull request. Automating the
-  # write before the derivation has been observed to be right on real history is
-  # how a wrong version gets published, and a published version cannot be
-  # withdrawn. The same reasoning that said not to build the base images before
-  # a service needed one.
+  # WHAT IS STILL NOT AUTOMATED, because D64's line is only half moved: nothing
+  # here edits `Cargo.toml` or `Chart.yaml` and nothing opens a pull request.
+  # The tag is the one write, and it is the write the `release` job keys on.
+  #
+  # WHY A TAG WRITTEN HERE RATHER THAN A MARKETPLACE ACTION. This organisation's
+  # parser reads N Changelog bullets in ONE squash commit as N changes and takes
+  # the highest. Every off-the-shelf Conventional Commits release tool reads one
+  # commit as one change, from a subject line nothing in this file validates —
+  # the pull request TITLE is checked nowhere. No configuration reconciles those
+  # two readings, so a second parser would derive a version from data that has
+  # passed no gate.
+  #
+  # WHY `gh api` RATHER THAN `git push`. Every checkout in this file sets
+  # `persist-credentials: false`, so there is no credential in the local git
+  # config to push with, and turning it back on to tag would defeat exactly what
+  # that setting is there for.
+  #
+  # THE TAG IS PERMANENT AND THE RULESET MAKES IT SO. `release-tags` blocks
+  # `deletion`, `update` and `non_fast_forward` on `refs/tags/v*` with no bypass
+  # actors, and has no `creation` rule — so this needs no exception to write a
+  # tag, and NOBODY can withdraw or move one it gets wrong. Swept 2026-09-03:
+  # 13 of the 14 repositories carry it. `docs` is private on a plan where
+  # rulesets are unavailable, so a mistake THERE is recoverable and nowhere else
+  # is. Every guard below is built for the other thirteen: writing NO tag is
+  # always the cheaper mistake, so each check refuses rather than guesses.
   version:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -832,7 +876,11 @@ jobs:
           # Needs tags and history to know what has happened since the last one.
           fetch-depth: 0
 
-      - name: what the next version would be
+      # THE DERIVATION, and its output is now a tag rather than a sentence, so
+      # every path that cannot be certain writes an EMPTY `next` and the tagging
+      # step below skips. There is no default and no best guess.
+      - name: what the next version is
+        id: v
         run: |
           python3 - <<'PY'
           import os, re, subprocess
@@ -844,6 +892,12 @@ jobs:
           BULLET = re.compile(
               rf"^\s*[-*]\s+(?P<type>{TYPES})(?P<scope>\([^)]+\))?(?P<bang>!)?:\s+(?P<desc>\S.*)$"
           )
+          # A BASELINE THIS REFUSES TO COUNT FROM, rather than one it mangles.
+          # `yadgarhq/yadgar` carries `v0.1.0a6` (ADR-0498's prerelease), and
+          # `int("0a6")` raised — which merely reddened a report before and would
+          # now stand between a merge and its release. Anything that is not a
+          # plain `vMAJOR.MINOR.PATCH` yields no version at all.
+          SEMVER = re.compile(r"^v([0-9]+)\.([0-9]+)\.([0-9]+)$")
 
           last = sh("git", "describe", "--tags", "--abbrev=0", "--match", "v*")
           rng = f"{last}..HEAD" if last else "HEAD"
@@ -863,14 +917,22 @@ jobs:
                   else:
                       bumps.append("patch")
 
-          out = ["## Next version (reported, not applied)", ""]
+          base = SEMVER.match(last) if last else None
+          nxt, note = "", ""
+          out = ["## Next version", ""]
           if not last:
-              out += ["No `v*` tag yet, so there is no baseline to compute from."]
+              out += ["No `v*` tag yet, so there is no baseline to compute from.",
+                      "The first tag of a repository is cut by hand; every one",
+                      "after it is derived from the Changelog."]
+          elif not base:
+              out += [f"`{last}` is not a plain `vMAJOR.MINOR.PATCH` tag, so there",
+                      "is no baseline this can count from and nothing was tagged.",
+                      "Cut a plain one by hand to start the sequence again."]
           elif not entries:
               out += [f"No parseable Changelog entries since `{last}`. Nothing to release."]
           else:
               bump = "major" if "major" in bumps else "minor" if "minor" in bumps else "patch"
-              major, minor, patch = (int(x) for x in last.lstrip("v").split(".")[:3])
+              major, minor, patch = (int(g) for g in base.groups())
 
               # PRE-1.0 IS NOT THE SAME RULE, and getting it wrong publishes a
               # "compatible" version that is not. Under 0.x a breaking change
@@ -891,11 +953,132 @@ jobs:
               if len(entries) > 25:
                   out += [f"", f"...and {len(entries) - 25} more."]
 
-          out += ["", "_Nothing was tagged or written. See D64._"]
+          tmp = os.environ["RUNNER_TEMP"]
+          if nxt:
+              # THE TAG MESSAGE IS WRITTEN HERE because this is the only step
+              # that knows what the number was derived FROM, and the ruleset
+              # makes an annotated tag's message the permanent record of it.
+              # Every entry, not the summary's first 25 — a truncated record of
+              # a release cannot be un-truncated later.
+              msg = [f"v{nxt}", "",
+                     f"{note.replace('`', '')}, from {len(entries)} Changelog "
+                     f"entries since {last}.", ""]
+              msg += [f"- {e.lstrip('-* ')}" for e in entries]
+              with open(f"{tmp}/tag_message.txt", "w") as fh:
+                  fh.write("\n".join(msg) + "\n")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"next={nxt}\n")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
               fh.write("\n".join(out) + "\n")
           print("\n".join(out))
           PY
+
+      # BELT AND BRACES rather than the primary defence. A HEAD that already
+      # carries a tag also has an empty `last..HEAD`, so the step above would
+      # already have produced no version — but a re-run of this job on a tagged
+      # commit is exactly the shape that writes a wrong tag, and the ruleset
+      # will not let one be withdrawn. Two independent reasons to skip is the
+      # right price.
+      #
+      # NOT VACUOUS: the checkout above is `fetch-depth: 0`, which
+      # `actions/checkout` fetches with `+refs/tags/*:refs/tags/*`, so the tags
+      # are on disk. With a shallow clone this guard would silently pass for
+      # every commit.
+      - name: is HEAD already released
+        id: g
+        run: |
+          set -euo pipefail
+          if git describe --tags --exact-match --match 'v*' HEAD >/dev/null 2>&1; then
+            echo "tagged=true" >> "$GITHUB_OUTPUT"
+            echo "_HEAD already carries a tag; nothing to cut._" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "tagged=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # THE OFF SWITCH, and it has to be a step output rather than a condition
+      # on the secret: the `secrets` context is not available in a step-level
+      # `if:`. A repository whose caller passes nothing gets two empty strings
+      # here, reports it, and skips — which is how this ships into every
+      # repository before the App behind it exists.
+      - name: is the release App configured here
+        id: cred
+        env:
+          CLIENT_ID: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          APP_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          # BOTH OR NEITHER. An id without a key fails inside the minting action
+          # instead of here, which is a red job in place of a skipped step.
+          if [ -n "$CLIENT_ID" ] && [ -n "$APP_KEY" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "_No release App is configured for this repository, so nothing was tagged. See the version job in \`yadgarhq/actions\`._" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # A SHORT-LIVED INSTALLATION TOKEN, minted per run and expiring in an
+      # hour. Hash-pinned with the version in a comment because it is somebody
+      # else's repository however first-party it is — the `"*": hash-pin` policy
+      # the `workflows` job enforces.
+      #
+      # `client-id` RATHER THAN `app-id`: the action carries a deprecationMessage
+      # on `app-id` at this pin, reading "Use 'client-id' instead."
+      #
+      # A CLIENT ID IS NOT SECRET and the action's own README passes it as a
+      # repository VARIABLE. It travels as a secret here because a reusable
+      # workflow has a passthrough for secrets and none for variables, so a
+      # variable set on a caller would arrive empty and silently switch the tag
+      # off. One mechanism for both values, and the guard above can then test
+      # both the same way.
+      - name: mint the token that cuts the tag
+        id: app
+        if: steps.cred.outputs.configured == 'true' && steps.g.outputs.tagged == 'false' && steps.v.outputs.next != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          # NARROWED TO THE ONE PERMISSION A TAG NEEDS, rather than inheriting
+          # whatever the installation happens to hold — zizmor's `github-app`
+          # audit fails the blanket form, and it is right to. The App may later
+          # be granted something else for another purpose; this token would pick
+          # that up silently. Scoped to THIS repository by the action's default.
+          permission-contents: write
+
+      # TWO CALLS, NOT ONE. `POST /git/refs` on its own makes a LIGHTWEIGHT tag:
+      # a name pointing at a commit, with no message, no tagger and no date of
+      # its own. The tag object is created first so the permanent record of what
+      # this version contains travels with the tag itself.
+      - name: tag it
+        if: steps.cred.outputs.configured == 'true' && steps.g.outputs.tagged == 'false' && steps.v.outputs.next != ''
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          VERSION: ${{ steps.v.outputs.next }}
+        run: |
+          set -euo pipefail
+          msg=$(cat "$RUNNER_TEMP/tag_message.txt")
+          obj=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags" \
+                  -f tag="v${VERSION}" -f message="$msg" \
+                  -f object="${GITHUB_SHA}" -f type=commit --jq .sha)
+          # A LOST RACE IS NOT A FAILURE. Two merges landing together both reach
+          # here; the second gets 422 `Reference already exists` ON STDERR —
+          # confirmed against the live API rather than assumed — and the tag it
+          # wanted is already there. Any OTHER error is real and reddens the job;
+          # matching on the status code alone would swallow a rejected sha.
+          #
+          # THE LOSER'S ENTRIES ARE NOT LOST, BUT THEY DO WAIT. The second run's
+          # range covered the first's bullets too, so the version it derived was
+          # the more complete one and the tag that exists is the first run's.
+          # The difference is picked up by the next merge.
+          err="$RUNNER_TEMP/tag_ref_error.txt"
+          if ! gh api "repos/${GITHUB_REPOSITORY}/git/refs" \
+                 -f ref="refs/tags/v${VERSION}" -f sha="$obj" >/dev/null 2>"$err"; then
+            grep -q "Reference already exists" "$err" || { cat "$err" >&2; exit 1; }
+            echo "::notice::v${VERSION} already exists; another run won the race."
+            echo "_\`v${VERSION}\` already existed; another run cut it first._" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "::notice::tagged v${VERSION}"
+          echo "Tagged **\`v${VERSION}\`**. The \`release\` job runs from that tag." >> "$GITHUB_STEP_SUMMARY"
 
   # ONE check name for every repository to require in its ruleset, reporting
   # regardless of which stages ran. Without it a repository with no Cargo.toml

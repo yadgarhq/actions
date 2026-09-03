@@ -16,6 +16,16 @@ on:
 permissions:
   contents: read
 
+# THE PASSTHROUGH EVERY OTHER REPOSITORY NEEDS TOO, written here first because
+# this repository is a caller like any other. A reusable workflow cannot read a
+# caller's secrets unless the caller hands them over, and an organisation secret
+# reaches the CALLER only. Named rather than `secrets: inherit`: inherit hands a
+# workflow that needs two secrets every secret this repository holds, and the
+# empty string an unconfigured repository passes is exactly what keeps the
+# tagging step inert.
 jobs:
   ci:
     uses: ./.github/workflows/ci-pr.yaml
+    secrets:
+      RELEASE_APP_CLIENT_ID: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
