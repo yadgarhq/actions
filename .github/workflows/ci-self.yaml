@@ -16,15 +16,43 @@ on:
 permissions:
   contents: read
 
-# THE PASSTHROUGH EVERY OTHER REPOSITORY NEEDS TOO, written here first because
-# this repository is a caller like any other. A reusable workflow cannot read a
-# caller's secrets unless the caller hands them over, and an organisation secret
-# reaches the CALLER only. Named rather than `secrets: inherit`: inherit hands a
-# workflow that needs two secrets every secret this repository holds, and the
-# empty string an unconfigured repository passes is exactly what keeps the
-# tagging step inert.
+# TWO CALLS RATHER THAN ONE, and the split is the whole security argument.
+# `ci-pr.yaml` serves both events, so a single job calling it for both handed the
+# release App's private key to every pull-request run — a run that builds and
+# tests the branch's own code, and these are branch pull requests rather than
+# fork ones, so GitHub does pass secrets to them. This repository is the one the
+# App can do the most damage from, because everything else in the organisation
+# runs what lands here.
+#
+# THE PULL REQUEST HAS NO USE FOR THE CREDENTIAL. `version` is the only job that
+# reads it, and its own condition is `github.event_name == 'push' && github.ref
+# == 'refs/heads/main'`. So the split costs nothing and removes the exposure.
+#
+# THE NAME `ci` IS LOAD-BEARING. The ruleset on `main` requires the check
+# `ci / passed`, which is `<caller job id> / <called job id>`, and one ruleset
+# serves every repository. Renaming this job breaks the merge gate rather than
+# reporting anything.
 jobs:
   ci:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/ci-pr.yaml
+
+  # THE PASSTHROUGH EVERY OTHER REPOSITORY NEEDS TOO, written here first because
+  # this repository is a caller like any other. A reusable workflow cannot read a
+  # caller's secrets unless the caller hands them over, and an organisation
+  # secret reaches the CALLER only.
+  #
+  # NAMED RATHER THAN `secrets: inherit`, and this repository is where that was
+  # settled empirically. `inherit` was tried across the estate on the argument
+  # that the callee is the same organisation under the same control; the
+  # `workflows` job in `ci-pr.yaml` runs zizmor, whose `secrets-inherit` audit
+  # fails the blanket form at High confidence, so every repository went red at
+  # once. The audit is right about why: inherit passes every organisation and
+  # repository secret the caller can see rather than the two the callee
+  # declares, and it grows silently as secrets are added. Naming the two is the
+  # fix the audit asks for; an ignore comment would have been a suppression.
+  main:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     uses: ./.github/workflows/ci-pr.yaml
     secrets:
       RELEASE_APP_CLIENT_ID: ${{ secrets.RELEASE_APP_CLIENT_ID }}
