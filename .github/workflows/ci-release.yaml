@@ -86,6 +86,33 @@ jobs:
           # file to satisfy two builders would be the drift, not the fix.
           file: Containerfile
           push: true
+          # THE BUILD IS TOLD ITS VERSION RATHER THAN LEFT TO DERIVE ONE, and
+          # this is the only place in the estate that knows the answer without
+          # guessing: `detect` normalised the tag once, and the image tag, the
+          # chart version and this argument are now the same string.
+          #
+          # It is passed BARE — `0.9.0`, not `v0.9.0` — because that is what
+          # `needs.detect.outputs.version` holds after the strip at the top of
+          # this file, and a consumer that wants the `v` back cannot get it from
+          # a value that never had one. A Containerfile may strip a leading `v`
+          # anyway for the local case; nothing here relies on that.
+          #
+          # WHY IT IS UNCONDITIONAL, for a workflow shared by ~61 repositories
+          # of which most declare no `VERSION` at all: an undeclared build
+          # argument is accepted and ignored by buildkit — verified against
+          # `moby/buildkit` directly, exit 0, no warning — so this costs the
+          # repositories that do not want it nothing. Making it conditional
+          # would mean a new input every caller has to set, which is the
+          # ~61-copies shape D19 exists to prevent.
+          #
+          # A Containerfile that declares `ARG VERSION` AFTER an expensive
+          # cached layer keeps that layer cached when this value changes; that
+          # is dockerfile semantics rather than a hope, and it was confirmed the
+          # same way — a pre-`ARG` step reported CACHED across two builds with
+          # different values. So a release does not rebuild a dependency graph
+          # to learn its own number.
+          build-args: |
+            VERSION=${{ needs.detect.outputs.version }}
           # Images at the top level; charts under charts/. They share a
           # namespace and would otherwise collide — `helm push` would claim
           # exactly the path the image wants (D61).
