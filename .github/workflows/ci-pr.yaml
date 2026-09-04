@@ -435,6 +435,64 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo test --all-features
 
+      # THE OTHER HALF OF THE FEATURE SPACE. `--all-features` turns everything
+      # on, so every feature-gated off-path is compiled by nothing — and the
+      # `cargo-clippy` hook is `--all-targets --all-features` too, so no gate in
+      # this estate looks at the off-build at all.
+      #
+      # THE FAILURE THIS EXISTS FOR IS CONCRETE, not a category. `yadgar-lifecycle`
+      # gates its rotation watcher behind a default-on `rotate` feature, and
+      # `iam-db` and `task-db` take `default-features = false` to shed the 38
+      # crates that feature carries. A change making the UNGATED `src/drain.rs`
+      # reach for `sha2` — a `rotate`-only dependency — passes `cargo test
+      # --all-features` AND `cargo clippy --all-targets --all-features -- -D
+      # warnings`, and breaks the first consumer that turns the watcher off.
+      # Reproduced in a scratch checkout of that repository: both gates exit 0,
+      # this step exits 101 with `error[E0432]: unresolved import `sha2``.
+      #
+      # `yadgar-telemetry` is the same hole pointing the other way. Its `grpc`
+      # feature is off by default, so `--all-features` builds the one
+      # configuration no plain consumer links and the DEFAULT build is the
+      # untested one. `--no-default-features` is that build, so one command
+      # covers both repositories.
+      #
+      # TWO COMMANDS ARE THE WHOLE POWERSET HERE rather than a corner of it:
+      # both crates declare exactly one feature, so {} and {everything} is every
+      # subset there is. `cargo hack --feature-powerset` would run these same two
+      # builds after installing a tool to work that out.
+      #
+      # CONDITIONAL, AND THAT IS THE COST ARGUMENT. Eight of the ten Rust
+      # repositories here declare no feature, where this recompiles nothing and
+      # merely RE-RUNS the whole suite against the MariaDB and Valkey above —
+      # runner minutes for no added coverage, and twice the flake surface.
+      # Measured where it does run: 3.6s at `-j 4` on top of a warm
+      # `--all-features` target. `cargo check --no-default-features
+      # --all-targets` is NOT the cheaper choice — in the same position it costs
+      # 19.5s of CPU against this step's 9.5s, because a check pipeline shares
+      # no artifacts with the test build it follows.
+      #
+      # The predicate reads `cargo metadata`, never a list of repositories: one
+      # that gains a feature is covered the day it gains it, with nothing to
+      # remember. `--no-deps` resolves nothing and compiles nothing, so it costs
+      # milliseconds and needs no network.
+      - name: cargo test --no-default-features (the feature-off build)
+        run: |
+          set -euo pipefail
+          # NOT `jq -e`. A jq that errors, a jq that is absent and a genuine
+          # "no features" would all read as false, which builds a check that
+          # cannot fail. `pipefail` plus `set -e` makes the first two abort
+          # loudly and leaves the third as the only way to skip.
+          feats=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '[.packages[].features | to_entries[]
+                      | select(.key != "default" or (.value | length > 0))
+                      | .key] | unique | join(", ")')
+          if [ -z "$feats" ]; then
+            echo "- no package declares a feature, so \`--no-default-features\` would rebuild exactly what \`--all-features\` just tested → skipped" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "- features declared (\`$feats\`) → running \`cargo test --no-default-features\`" >> "$GITHUB_STEP_SUMMARY"
+          cargo test --no-default-features
+
   # D70: a consumer VENDORS the protos it needs at a pinned tag. Vendoring is
   # normally skew waiting to happen, and it is defensible here ONLY because of
   # this check — re-export at the pin, diff, fail. Delete it and D70 becomes the
