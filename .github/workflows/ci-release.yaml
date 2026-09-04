@@ -12,6 +12,21 @@ on:
           here so every caller can pass `github.ref_name` unchanged.
         type: string
         required: true
+    # BOTH OPTIONAL, and that is what keeps the `deployment` job below INERT.
+    # A reusable workflow cannot see a caller's secrets unless the caller passes
+    # them, so a repository that has not been wired up hands over two empty
+    # strings, the job notices and reports, and the release is exactly what it
+    # was before. Same shape `ci-pr.yaml` uses for the release tag, and the same
+    # reason: this ships into every repository before the thing behind it exists.
+    #
+    # The App is the one ADR-0527 already mints per run for the tag. It is not a
+    # second credential and there is no new key to hold — what is new is the
+    # `repositories:` it is scoped to when the token is minted.
+    secrets:
+      RELEASE_APP_CLIENT_ID:
+        required: false
+      RELEASE_APP_PRIVATE_KEY:
+        required: false
 
 permissions:
   contents: read
@@ -246,3 +261,202 @@ jobs:
           helm package chart --version "$VERSION" --app-version "$VERSION"
           echo "$TOKEN" | helm registry login "$REGISTRY" -u "$ACTOR" --password-stdin
           helm push ./*-"$VERSION".tgz "oci://${REGISTRY}/${OWNER}/charts"
+
+  # PUBLISHING AN IMAGE DID NOT ROLL A POD, and this job is the whole fix. Every
+  # module Deployment renders `image: <repo>:latest` with `imagePullPolicy:
+  # Always`, because a chart in git points at a moving tag (D65). `Always` is
+  # evaluated when a container is CREATED and never itself causes one to be
+  # created, so a release moved the tag and nothing restarted — with Argo CD
+  # reporting Synced/Healthy throughout. Measured 2026-09-03: FOUR of the five
+  # deployed services were behind for a full day, `task-db` by four releases, and
+  # `kubectl rollout restart` by hand was the only thing that ever deployed them.
+  # The fifth was current only because an unrelated pod-spec change had restarted
+  # it, which is the same accident by another name.
+  #
+  # Writing the released version into the deployment repository changes the pod
+  # template, and a changed pod template is what makes a rollout happen.
+  #
+  # D55 IS NOT NARROWED BY THIS. The chart still comes from the module
+  # repository at HEAD — the ApplicationSet's source is still `repoURL: {{
+  # .url }}`, `targetRevision: {{ .branch }}`, `path: chart` — so a chart change
+  # still reaches the cluster with no release at all. Only the image tag is
+  # pinned. What changes is that a RELEASE now deploys, which is faster than the
+  # never it managed before.
+  #
+  # THIS IS INERT AS SHIPPED and needs two things done by hand, IN THIS ORDER:
+  #
+  #   1. the release App added to the `main` ruleset bypass in `yadgarhq/argocd`,
+  #      so this write lands as a direct push and no pull request is created;
+  #   2. each module's own `ci.yaml` release job passing the two secrets below,
+  #      the way its `main` job already passes them to `ci-pr.yaml`.
+  #
+  # In the other order every release turns red on a ruleset that refuses the
+  # push. ADR-0527 shipped into 13 repositories the same way, dark until the
+  # credential arrived.
+  #
+  # NOT A CONTRADICTION OF D66, which rejected "dispatch from each module on
+  # release" for `chart` — and rejected it on the ground that ~61 repositories
+  # would each need a credential with write access to another repository, to
+  # hold, rotate and audit. ADR-0527 replaced those with ONE org-owned App
+  # minting a short-lived token per run, so that objection has nothing left to
+  # bite on. Polling, D66's answer, is also not available here: it is the
+  # release that must deploy, not a schedule that eventually notices.
+  #
+  # NOT A REVIEW MANUFACTURED, which is ADR-0531's test. With the bypass in
+  # place the write is a direct push and there is no pull request whose approval
+  # would be a formality. It is precisely the third case that ADR's
+  # `revisit_trigger` anticipated — a write that reaches a protected branch
+  # WITHOUT a pull request — so it satisfies the cause the two stated cases were
+  # drawn from while falling outside their letter.
+  deployment:
+    needs: [detect, image]
+    # A repository with no `chart/` is not deployed by the ApplicationSet at all
+    # — its filter is `pathsExist: [chart]` — so there would be nothing to point
+    # at. A repository that has a chart but not the `yadgar-deployable` topic
+    # gets a file nothing reads, which is residue rather than a fault; detecting
+    # the topic would cost an API call to prevent an unused file.
+    if: needs.detect.outputs.chart == 'true' && needs.image.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      # THE OFF SWITCH, and it has to be a step output rather than a condition on
+      # the secret: the `secrets` context is not available in a step-level `if:`.
+      - name: is the release App configured here
+        id: cred
+        env:
+          CLIENT_ID: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          APP_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          # BOTH OR NEITHER. An id without a key fails inside the minting action
+          # instead of here, which is a red job in place of a skipped step.
+          if [ -n "$CLIENT_ID" ] && [ -n "$APP_KEY" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "_No release App is configured here, so \`yadgarhq/argocd\`"
+              echo "was not told about this version and no pod will roll. See the"
+              echo "\`deployment\` job in \`yadgarhq/actions\`._"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # SCOPED TO `argocd`, and both narrowings carry weight. With neither
+      # `owner:` nor `repositories:` the action scopes the token to the CURRENT
+      # repository — the one place this token must never be able to write. And
+      # `repositories:` alone does nothing: the action's own documentation makes
+      # it conditional on `owner`, so the two travel together or the default
+      # quietly stands.
+      #
+      # `permission-contents: write` rather than whatever the installation holds,
+      # for the reason `ci-pr.yaml` gives: zizmor's `github-app` audit fails the
+      # blanket form, and a later grant to this App would otherwise be picked up
+      # by this token silently.
+      - name: mint a token that can write to argocd and nowhere else
+        id: app
+        if: steps.cred.outputs.configured == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: argocd
+          permission-contents: write
+
+      # ONE FILE PER MODULE, NAMED AFTER THE MODULE, and never a map of modules.
+      # D54's generator enumerates repositories rather than listing them, so a
+      # per-module value has nowhere to live in the ApplicationSet without
+      # reintroducing the central list D54 exists to delete. A file whose PATH is
+      # templated from the generator is not a list: nothing enumerates it, a file
+      # exists because a module released, and a module that never releases is a
+      # file that never appears.
+      #
+      # BOTH THE DIGEST AND THE TAG, AND THE DIGEST IS WHAT GOVERNS. A module
+      # chart's template reads `image.digest` in preference to `image.tag`, so
+      # the pull is by digest — the estate's "pin by digest, SHA or revision"
+      # invariant — while the tag stays in the file for a person to read.
+      #
+      # THE TAG ALONE WOULD NOT DO, and the distinction it rests on is worth
+      # keeping straight. A GIT tag here is immutable: the `release-tags` ruleset
+      # forbids `deletion`, `update` and non-fast-forward. A GHCR IMAGE tag is
+      # NOT. Re-running the `image` job on an existing git tag rebuilds and
+      # overwrites `:<version>`, so a values file naming only the version can
+      # come to mean a different image without the file changing.
+      #
+      # ROLLING BACK IS AN EDIT, NEVER A DELETE. Deleting the file returns the
+      # module to `image.tag: latest` from the chart, and `latest` was moved to
+      # THIS release by the `image` job above — so a delete rolls the pod a
+      # second time onto the very build being rolled back from. To roll back,
+      # set both keys to the previous release's values; `:<previous>` is still
+      # in the registry, because only `latest` moves.
+      #
+      # THE FAILURE IS RED, NOT SILENT, and that is this workflow's own instinct
+      # rather than a new one: the "verify an adopter can actually pull this"
+      # step above already fails the job after a successful push, for a condition
+      # only a human can clear. Swallowing this one would leave the estate
+      # exactly where it started — a published image that never reaches a pod,
+      # with every check green.
+      - name: tell argocd which version to run
+        if: steps.cred.outputs.configured == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          VERSION: ${{ needs.detect.outputs.version }}
+          DIGEST: ${{ needs.image.outputs.digest }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          module="${REPO#*/}"
+          api="repos/${OWNER}/argocd/contents/versions/${module}.yaml"
+          file="$RUNNER_TEMP/version.yaml"
+          {
+            printf '# Written by ci-release in %s. Do not edit by hand.\n' "$REPO"
+            printf '# The digest governs the pull; the tag is here to be read.\n'
+            printf '# To roll back, set BOTH keys to the previous release.\n'
+            printf '# Deleting this file returns the module to the moving tag,\n'
+            printf '# which now points at THIS release.\n'
+            printf 'image:\n  digest: "%s"\n  tag: "%s"\n' "$DIGEST" "$VERSION"
+          } > "$file"
+          err="$RUNNER_TEMP/write_error.txt"
+          # THREE ATTEMPTS, RE-READING THE BLOB SHA EACH TIME. The Contents API
+          # refuses a write carrying a stale sha, and two modules releasing at
+          # once move the branch under each other even though they write
+          # different files. A retry is the whole remedy for that. Three
+          # releases landing at once can still exhaust three attempts, so a
+          # third failure is not proof that no retry could ever clear it — it is
+          # the point at which reporting beats guessing.
+          for attempt in 1 2 3; do
+            sha=$(gh api "$api" --jq .sha 2>/dev/null || true)
+            set -- -X PUT -f "message=ci: ${module} ${VERSION}" \
+                   -f "content=$(base64 -w0 < "$file")"
+            if [ -n "$sha" ]; then set -- "$@" -f "sha=$sha"; fi
+            if gh api "$api" "$@" >/dev/null 2>"$err"; then
+              echo "::notice::argocd now runs ${module} ${VERSION}"
+              echo "\`yadgarhq/argocd\` now pins **${module} ${VERSION}**." \
+                >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then sleep $((attempt * 5)); fi
+          done
+          cat "$err" >&2
+          {
+            echo "### Published, but NOT deployed"
+            echo ""
+            echo "\`${module} ${VERSION}\` was pushed and signed, but writing"
+            echo "\`versions/${module}.yaml\` to \`${OWNER}/argocd\` was refused."
+            echo "The cluster keeps running the previous image and Argo CD"
+            echo "reports Synced, which is the exact failure this job exists to"
+            echo "end — so this is a red build rather than a warning."
+            echo ""
+            echo "The usual cause is the \`main\` ruleset on \`${OWNER}/argocd\`:"
+            echo "the release App has to be a bypass actor there, or the write"
+            echo "needs a pull request that nothing opens."
+            echo ""
+            echo "RELEASING AGAIN IS NOT THE REPAIR. \`v${VERSION}\` is cut and"
+            echo "permanent — \`release-tags\` forbids deletion, update and"
+            echo "non-fast-forward — and \`:latest\` has already moved. Once the"
+            echo "write is permitted, either **Re-run failed jobs** on this run,"
+            echo "which reuses \`detect\` and \`image\` rather than rebuilding"
+            echo "them, or write \`versions/${module}.yaml\` by hand."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::Could not write the version to ${OWNER}/argocd. See the job summary."
+          exit 1
