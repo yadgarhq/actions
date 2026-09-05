@@ -139,7 +139,7 @@
 # sixteen — so fifteen repositories paid for a binary that nothing then ran.
 # Publishing it is what makes that install mean something (ledger 620).
 #
-# NO GUARD ON THE ENTRY, and that is a deliberate reversal of the local hook this
+# NO SKIP ON THE ENTRY, and that is a deliberate reversal of the local hook this
 # one replaces. That hook wrapped actionlint in `if command -v actionlint; then
 # ... else echo ...; fi`, so an absent binary printed a note and exited 0. The
 # argument for the skip was that a contributor without the binary should still be
@@ -151,24 +151,56 @@
 # checked nothing" is the defect being closed here, not a convenience to carry
 # forward. Every other system hook in this file — cargo-fmt, cargo-clippy,
 # cargo-deny, gitleaks, hadolint, helm-lint — is a bare entry that fails with
-# "Executable `X` not found" when the tool is absent. This one is the same shape
-# as those, so a missing binary is loud in the one direction that gets read.
+# "Executable `X` not found" when the tool is absent. THIS ONE IS A SCRIPT, for
+# the reason the paragraph below gives, and it prints that same sentence
+# verbatim for an absent actionlint — so the missing-binary direction reads
+# exactly as it did while this entry was bare.
 #
 # actionlint publishes its own hooks. It is wrapped here anyway, for the reason
 # the note above gives: sixteen repositories use it, so a direct reference would
 # be sixteen separately pinned versions.
-# ONE UNENFORCED DEPENDENCY, named because it is invisible. actionlint pipes
-# every `run:` block to shellcheck and SILENTLY DISABLES that whole rule class
-# when the binary is absent — exit 0, no message, visible only under `-verbose`
-# as `Rule "shellcheck" was disabled`. CI is covered: every job runs on
-# `ubuntu-latest`, whose runner image ships shellcheck. A developer without it
-# gets `actionlint...Passed` having skipped a rule class CI will run on the same
-# commit. actionlint's native rules — expression, context, unknown-key — still
-# fail without it, so this is a narrower check rather than no check.
+# ONE UNENFORCED DEPENDENCY, now enforced. actionlint pipes every `run:` block
+# to shellcheck and SILENTLY DISABLES that whole rule class when the binary is
+# absent — measured: a workflow whose only defect is SC2086 exits 0 and prints
+# nothing, and the skip is visible only under `-verbose` as
+# `Rule "shellcheck" was disabled`. No flag makes it fatal; an explicit
+# `-shellcheck=/nonexistent/shellcheck` is ignored just as quietly.
+#
+# WHERE THE GAP IS, checked rather than assumed. CI is covered: `ubuntu-latest`
+# is Ubuntu 24.04, whose runner image ships shellcheck 0.9.0-1 as an apt
+# package. The developer's machine is the uncovered side, and there
+# `actionlint...Passed` meant either "the workflows are clean" or "the workflows
+# are clean apart from a rule class nobody ran".
+#
+# So this entry refuses when that rule class would be skipped. It is the same
+# decision the paragraphs above record about actionlint's own absence, one level
+# down: a named check that sixteen repositories reference has to mean one thing.
+# The script asks actionlint for a FINDING rather than probing $PATH: it feeds a
+# stub whose only defect is SC2086 and requires SC2086 back. Probing $PATH is
+# wrong because nixpkgs wraps actionlint with shellcheck on an internal PATH, so
+# the probe would fail for the developers who do have the tool. Matching
+# actionlint's own skip message was the first attempt and is fail-OPEN — any
+# rewording of it silently restores "Passed, having checked nothing". Requiring
+# the finding fails CLOSED instead. See hooks/actionlint.sh.
+#
+# `pyflakes` HAS THE IDENTICAL DEFECT and is deliberately not guarded here. The
+# polarity is inverted: the runner image ships shellcheck but no pyflakes, while
+# the nixpkgs wrapper supplies both, so python `run:` blocks are checked locally
+# and skipped in CI. Exposure is zero today — no `shell: python` exists anywhere
+# in the estate — so this is a note for whoever adds the first one, not a guard.
+#
+# SHELLCHECK IS NOT ADDED TO THE SHARED `precommit` JOB, deliberately. That job
+# installs what the runner lacks, and the runner does not lack this. The image
+# ships 0.9.0 while a nixpkgs developer carries 0.11.0, so CI is the LOOSER
+# checker today and a local run catches strictly more. Pinning CI to the newer
+# one inverts that and manufactures the developer-green/CI-red loop these hooks
+# exist to shorten; pinning it to 0.9.0 is deliberately stale. If a future
+# runner image drops the package, this entry fails loudly in CI rather than
+# quietly narrowing — which is the whole point of the refusal.
 - id: actionlint
   name: actionlint
-  language: system
-  entry: actionlint
+  language: script
+  entry: hooks/actionlint.sh
   pass_filenames: false
   files: ^\.github/workflows/.*\.ya?ml$
 

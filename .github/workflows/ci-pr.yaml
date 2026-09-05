@@ -179,15 +179,31 @@ jobs:
       # hook with no SKIP list — so the tool has to be here or the hook fails for
       # the wrong reason.
       #
-      # THE VERSION IS WHATEVER THE NETWORK ANSWERS WITH, and that is measured
-      # rather than inferred: with no `version:` input this action resolves the
-      # latest release at run time and falls back to a hardcoded v3.18.4 when the
-      # fetch fails. In yadgarhq/iam run 33968099875 it installed v4.2.4 for this
-      # job and v3.18.4 for `portability` — two helm majors inside one CI run.
-      # The helm-lint hook's `--strict` was checked against BOTH versions on all
-      # six charts in the estate before it was added, so this variance does not
-      # decide that hook's result today. It could decide a future one.
+      # THE VERSION USED TO BE WHATEVER THE NETWORK ANSWERED WITH, and that was
+      # measured rather than inferred: with no `version:` input this action asks
+      # get.helm.sh for the latest release at run time and falls back to a
+      # hardcoded v3.18.4 when the fetch fails. In yadgarhq/iam run 33968099875
+      # it installed v4.2.4 for this job and v3.18.4 for `portability` — two helm
+      # majors inside one CI run, so any check whose result depends on helm was
+      # not reproducible. `--strict` was checked against BOTH majors on the
+      # estate's charts, so the variance did not decide that hook's result. It
+      # could have decided a future one.
+      #
+      # v3.18.4 IS ARGO'S HELM, and that is what picks the number rather than
+      # "newest" or "whatever the fallback happens to be". The estate runs Argo
+      # CD v3.1.8, whose hack/tool-versions.sh at that tag reads
+      # helm3_version=3.18.4 — so this pin makes the linter and the renderer the
+      # same program. The helm-lint hook exists to catch what Argo would reject,
+      # and grading a chart with a helm the cluster never runs answers a
+      # different question from the one being asked.
+      #
+      # MAINTENANCE TRIGGER, named so this does not quietly rot: when Argo CD's
+      # bundled helm changes, this pin follows it. The explicit version also
+      # removes the network from the decision — getLatestHelmVersion() is never
+      # called, so neither the fetch nor its hardcoded fallback can apply.
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.18.4
 
       # protoc, for repositories that generate types from the contract (D16).
       # Gated on the same PROTO_VERSION detection as the drift check, so a repo
@@ -842,9 +858,14 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.ref }}
-      # The same pin the precommit job uses, rather than a second one to keep in
-      # step with it.
+      # The same TWO pins the precommit job uses — the action's SHA and the helm
+      # version it installs — rather than a second pair to keep in step with it.
+      # This job renders every chart and reads the result, so it is the job the
+      # version divergence hit: run 33968099875 gave it v3.18.4 while precommit
+      # got v4.2.4. The reasoning for v3.18.4 is above the precommit copy.
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.18.4
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.x"

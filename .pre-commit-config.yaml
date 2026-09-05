@@ -35,10 +35,16 @@ repos:
       # new fact about this repository. The same hook is now published in
       # .pre-commit-hooks.yaml for all sixteen repositories (ledger 620), and a
       # named check that sixteen repositories reference has to mean one thing.
-      # "Passed, having checked nothing" is not a thing it can mean. The
-      # published entry is bare, every other published system hook is bare, and
-      # a contributor without actionlint now gets pre-commit's own
-      # "Executable `actionlint` not found" instead of a green tick.
+      # "Passed, having checked nothing" is not a thing it can mean. A
+      # contributor without actionlint gets "Executable `actionlint` not found"
+      # instead of a green tick.
+      #
+      # A FOURTH WAY IT COULD NOT FAIL, one level down: actionlint silently
+      # disables its whole shellcheck rule class when that binary is absent, so
+      # the same green tick meant either "clean" or "clean apart from a rule
+      # class nobody ran". The entry is now a script that refuses in that case.
+      # The reasoning, the measurement and why the guard asks actionlint rather
+      # than $PATH are all in .pre-commit-hooks.yaml above the published twin.
       #
       # THIS ENTRY IS KEPT BYTE-IDENTICAL TO THE PUBLISHED ONE, for the reason
       # the prettier entry below records: this repository cannot reference its
@@ -49,8 +55,8 @@ repos:
       # the defect being closed.
       - id: actionlint
         name: actionlint
-        language: system
-        entry: actionlint
+        language: script
+        entry: hooks/actionlint.sh
         pass_filenames: false
         files: ^\.github/workflows/.*\.ya?ml$
       # THE HOOK ABOVE CANNOT RUN AT ALL ABOVE A CERTAIN SIZE, so the size is
