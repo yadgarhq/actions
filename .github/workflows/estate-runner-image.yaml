@@ -196,18 +196,28 @@ jobs:
           # never print the instruction below, in exactly the private-package case
           # it was written for. `000` is the sentinel for "GHCR refused to issue
           # an anonymous token at all", which is itself the answer.
-          # EACH FAILURE CHANNEL GETS ITS OWN SENTINEL AND ITS OWN MESSAGE, because
-          # one sentinel for several causes is a message asserting a cause the
-          # check cannot know — the pattern this repository reverted in #44 and
-          # generalised in ADR-0578. A token endpoint that is unreachable and a
-          # token endpoint that REFUSES are different facts, and only the second
-          # one says anything about visibility.
+          # THREE FAILURE CHANNELS, THREE SENTINELS, because one sentinel for
+          # several causes is a message asserting a cause the check cannot know —
+          # the pattern this repository reverted in #44 and generalised in
+          # ADR-0578. Unreachable, unparseable and REFUSED are three different
+          # facts and only the third says anything about visibility.
+          #
+          # An earlier revision of this comment claimed EVERY channel had its own
+          # message. It did not: `curl -sS` has no `-f`, so a 502 or an HTML error
+          # page exits 0, and the parse failure was swallowed into the same `000`
+          # that means "GHCR refused" — sending an operator to a settings page
+          # over a proxy fault. Measured: a non-JSON body, `[]`, `null` and an
+          # empty body all reached the PRIVATE message.
           if ! body=$(curl -sS "https://ghcr.io/token?scope=repository:${OWNER}/estate-runner:pull" 2>/dev/null); then
             echo "::error::could not reach ghcr.io to ask for an anonymous pull token."
             echo "::error::That is a network fault and says NOTHING about this package's visibility."
             exit 1
           fi
-          token=$(printf '%s' "$body" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("token") or "")' 2>/dev/null || true)
+          if ! token=$(printf '%s' "$body" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("token") or "")'); then
+            echo "::error::ghcr.io answered the token endpoint with something that is not a JSON object."
+            echo "::error::That is a transport or proxy fault and says NOTHING about this package's visibility."
+            exit 1
+          fi
           code=000
           if [ -n "$token" ]; then
           # `|| true` IS WRONG HERE and a bare failure is wrong too. Inside an `if`
