@@ -175,9 +175,19 @@
 # So this entry refuses when that rule class would be skipped. It is the same
 # decision the paragraphs above record about actionlint's own absence, one level
 # down: a named check that sixteen repositories reference has to mean one thing.
-# The script asks actionlint what it disabled rather than probing $PATH, because
-# nixpkgs wraps actionlint with shellcheck on an internal PATH and a $PATH probe
-# would fail for the developers who do have the tool — see hooks/actionlint.sh.
+# The script asks actionlint for a FINDING rather than probing $PATH: it feeds a
+# stub whose only defect is SC2086 and requires SC2086 back. Probing $PATH is
+# wrong because nixpkgs wraps actionlint with shellcheck on an internal PATH, so
+# the probe would fail for the developers who do have the tool. Matching
+# actionlint's own skip message was the first attempt and is fail-OPEN — any
+# rewording of it silently restores "Passed, having checked nothing". Requiring
+# the finding fails CLOSED instead. See hooks/actionlint.sh.
+#
+# `pyflakes` HAS THE IDENTICAL DEFECT and is deliberately not guarded here. The
+# polarity is inverted: the runner image ships shellcheck but no pyflakes, while
+# the nixpkgs wrapper supplies both, so python `run:` blocks are checked locally
+# and skipped in CI. Exposure is zero today — no `shell: python` exists anywhere
+# in the estate — so this is a note for whoever adds the first one, not a guard.
 #
 # SHELLCHECK IS NOT ADDED TO THE SHARED `precommit` JOB, deliberately. That job
 # installs what the runner lacks, and the runner does not lack this. The image

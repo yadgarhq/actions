@@ -31,11 +31,34 @@
 # store path of that binary itself. A guard written against $PATH would fail
 # for the developers most likely to have the tool.
 #
-# The refusal prints the probe's own output, because fail-closed means this
-# hook also refuses for reasons that are not a missing shellcheck — a malformed
-# `.github/actionlint.yaml` in the consuming repository is the likely one, and
-# it exits non-zero without ever reaching the shellcheck rule. The captured
-# output is what tells those two apart, so it is not decoration.
+# THE PROBE NEUTRALISES `SHELLCHECK_OPTS`, and that is a correctness fix rather
+# than tidiness. SC2086 is emitted at severity `info`, the weakest class there
+# is, so a developer carrying `SHELLCHECK_OPTS=--severity=warning` in a profile
+# or direnv deletes the finding while the rule class is running perfectly well.
+# Measured: `--severity=warning`, `--severity=error` and `--exclude=SC2086` each
+# made this hook refuse a clean tree. Only the PROBE is neutralised; the real
+# `exec` below keeps honouring the setting, because the developer meant it for
+# their own workflows. Measured too, and the reason no wider scrubbing is
+# needed: file-based shellcheck config never reaches the probe at all — a
+# repository-root `.shellcheckrc`, `$HOME/.shellcheckrc`, `$HOME/.config/`
+# and `$XDG_CONFIG_HOME` were all inert. actionlint feeds the script to its
+# checker on stdin, and stdin has no directory to anchor an rc lookup to.
+# `SHELLCHECK_OPTS` is the single environmental surface that gets through.
+#
+# The refusal prints the probe's own output, because fail-closed means this hook
+# can refuse for a reason that is not a missing shellcheck, and the captured
+# output carries the discriminator. It is a one-line test: actionlint reports
+# `Rule "shellcheck" was disabled: exec: "shellcheck": executable file not
+# found in $PATH` when the BINARY is missing, and omits that line entirely when
+# the binary ran and the finding was merely suppressed.
+#
+# WHAT DOES NOT CAUSE A REFUSAL, measured rather than assumed, because an
+# earlier draft of this file asserted the opposite in the message it prints: a
+# consuming repository's `.github/actionlint.yaml` cannot affect the probe. Not
+# its `paths:`/`ignore:` rules, and not a syntactically malformed file — the
+# same config that hard-errors when actionlint lints a FILE leaves a stdin lint
+# untouched, because reading from `-` skips project-config discovery. The stub
+# is isolated from the repository it is protecting.
 #
 # BEFORE REWRAPPING THESE COMMENTS: a comment of the form `# shellcheck ...` is
 # read as one of shellcheck's own directives and fails to parse (SC1072/SC1073),
@@ -61,7 +84,7 @@ fi
 # reports SC2086 on it and actionlint reports nothing of its own. Measured
 # against actionlint 1.7.12 and shellcheck 0.11.0: with shellcheck the probe
 # exits 1 and names SC2086; without it the probe exits 0 and prints nothing.
-probe=$(actionlint -verbose -stdin-filename probe.yaml - 2>&1 <<'STUB'
+probe=$(SHELLCHECK_OPTS='' actionlint -verbose -stdin-filename probe.yaml - 2>&1 <<'STUB'
 on: push
 jobs:
   probe:
@@ -91,8 +114,12 @@ unknown-key) are unaffected, which is why nothing else looks wrong.
 
 https://github.com/koalaman/shellcheck#installing
 
-If shellcheck IS installed, the probe output below names the real cause — a
-malformed `.github/actionlint.yaml` stops actionlint before any rule runs.
+Read the probe output below to tell the two cases apart. A line reading
+`Rule "shellcheck" was disabled: exec: "shellcheck": executable file not found`
+means the binary is genuinely missing — install it. If that line is ABSENT, the
+binary ran and something suppressed the finding; the usual cause is a
+`SHELLCHECK_OPTS` severity floor or exclusion in your environment, since SC2086
+is reported at the weakest severity shellcheck has.
 
 --- probe output ---
 MSG
