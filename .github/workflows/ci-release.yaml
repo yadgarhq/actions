@@ -474,20 +474,33 @@ jobs:
           module="${REPO#*/}"
           api="repos/${OWNER}/argocd/contents/versions/${module}.yaml"
           file="$RUNNER_TEMP/version.yaml"
+          # NO BACKTICKS IN THE STRINGS BELOW, and that is not a style choice.
+          # A backtick inside a single-quoted string reads to SC2016 as a command
+          # substitution somebody meant to expand. actionlint pipes every run
+          # block through shellcheck, so the five markdown backticks that used to
+          # be here failed the workflow lint — found on the day the actionlint
+          # hook first became able to fail at all. The text lands in a YAML
+          # comment that nothing renders as markdown, so the emphasis bought
+          # nothing and the plain words read the same.
+          #
+          # NOR MAY A LINE HERE OPEN WITH THE WORD shellcheck. A comment of that
+          # shape is parsed as a shellcheck DIRECTIVE, and an unparseable one is
+          # SC1072/SC1073 — an error, not an info. The first draft of this very
+          # note tripped it.
           {
             printf '# Written by ci-release in %s. Do not edit by hand.\n' "$REPO"
             printf '# The digest governs the pull; the tag is here to be read.\n'
             printf '# To roll back, set BOTH keys to the previous release.\n'
             printf '# DO NOT DELETE THIS FILE. Deleting it hands helm no values,\n'
             printf '# so the module falls back to the moving tag with nothing\n'
-            printf '# reporting it — `ci / passed` refuses the deletion (ledger\n'
-            printf '# 608, `scripts/versions_pinned.py`).\n'
+            printf '# reporting it — ci / passed refuses the deletion (ledger\n'
+            printf '# 608, scripts/versions_pinned.py).\n'
             printf '# That is an EDIT of both keys and never a delete, because\n'
-            printf '# `:latest` already points at the release being rolled back\n'
+            printf '# :latest already points at the release being rolled back\n'
             printf '# from.\n'
             printf '# Retiring the module is not a reason to delete it either: a\n'
-            printf '# module leaves the cluster by losing its `yadgar-deployable`\n'
-            printf '# topic or its `chart/`, after which nothing reads this file\n'
+            printf '# module leaves the cluster by losing its yadgar-deployable\n'
+            printf '# topic or its chart/, after which nothing reads this file\n'
             printf '# and leaving it costs nothing.\n'
             printf 'image:\n  digest: "%s"\n  tag: "%s"\n' "$DIGEST" "$VERSION"
           } > "$file"

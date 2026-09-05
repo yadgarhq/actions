@@ -149,16 +149,20 @@ jobs:
             "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-linux-x86_64"
           sudo chmod +x /usr/local/bin/hadolint
 
-      # THE actionlint HOOK RAN NOTHING UNTIL THIS STEP EXISTED. Its entry is
-      # `command -v actionlint >/dev/null && actionlint || echo "... CI
-      # enforces"`, and actionlint was installed nowhere — so the hook reported
-      # Passed having linted no workflow in any repository, and the message
-      # excusing the skip was false. The skip stays, because a developer without
-      # the binary should still be able to commit; installing it here is what
-      # makes the sentence true.
+      # THE actionlint HOOK RAN NOTHING UNTIL THIS STEP EXISTED, and then could
+      # still not FAIL until its entry was fixed. Installing the binary closed
+      # the first half; the entry `A && B || C` swallowed a real finding as
+      # readily as a missing binary, so the hook exited 0 either way and this
+      # step had nothing to enforce. Both halves are closed now — the argument
+      # is written out on the hook in .pre-commit-config.yaml.
       #
-      # UNCONDITIONAL, unlike protoc or cargo-deny: every repository has
-      # workflows, so there is nothing to detect.
+      # UNCONDITIONAL, unlike protoc or cargo-deny — AND USED BY NO REPOSITORY
+      # BUT THIS ONE. Every repository has workflows, so there is nothing to
+      # detect; but the actionlint hook is declared in yadgarhq/actions alone and
+      # is NOT published in .pre-commit-hooks.yaml, so elsewhere this install is
+      # a no-op and no consumer's workflows are linted by actionlint at all. The
+      # step stays because the follow-up is to publish the hook, not to delete
+      # this (ledger 618).
       - name: install actionlint
         env:
           ACTIONLINT_VERSION: 1.7.12
