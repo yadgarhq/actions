@@ -370,6 +370,21 @@ jobs:
     # the topic would cost an API call to prevent an unused file.
     if: needs.detect.outputs.chart == 'true' && needs.image.result == 'success'
     runs-on: ubuntu-latest
+    # A BOUND, BECAUSE THIS JOB RUNS PAST THE POINT OF NO RETURN. No job in this
+    # file sets one, so every job here inherits GitHub's 360-minute default.
+    # That is merely wasteful for a job that can be re-run freely, and it is not
+    # tolerable for this one: by the time these steps run the tag is cut, the
+    # image is pushed and `:latest` has moved, and the steps below make roughly
+    # fourteen `gh api` calls, one of which polls. A wedged read would hold a
+    # runner for six hours on a release that already shipped.
+    #
+    # TEN, and the arithmetic is the argument rather than a round number. The
+    # worst path here is the three argocd write attempts with their 5s and 10s
+    # backoff, then the estate poll at 150s, plus two token mints and the reads
+    # between them — under four minutes. Ten leaves more than twice that as
+    # headroom, so raising the poll window again does not quietly arrive at the
+    # ceiling, while still cutting a hung job short by a factor of thirty-six.
+    timeout-minutes: 10
     steps:
       # THE OFF SWITCH, and it has to be a step output rather than a condition on
       # the secret: the `secrets` context is not available in a step-level `if:`.
@@ -641,6 +656,58 @@ jobs:
       # already the one gate this job needs. What this side CAN do is name the
       # created run, so the release says where the verdict will appear and one
       # link shows whether it ever ran.
+      #
+      # THE QUERY NAMES `smoke.yaml`, AND AN EARLIER REVISION OF THIS COMMENT
+      # CLAIMED MORE FOR THAT THAN IT DELIVERS. It said the scoping stops one
+      # module confirming on another's run. It does not, and the reason is
+      # measurable: `estate` holds exactly two workflows, and `ci.yaml` triggers
+      # only on `pull_request` and `push`, so `smoke.yaml` is the ONLY workflow
+      # there a `repository_dispatch` can reach. A repository-wide query
+      # filtered by `event=repository_dispatch` is therefore SET-EQUAL to this
+      # one, and naming the workflow separates nothing.
+      #
+      # THE CROSS-MODULE COLLISION IS STILL OPEN. Five modules POST the same
+      # event to the same workflow within seconds; each records the same
+      # `before`, each POSTs, and each confirms on whichever run appeared first.
+      # Module A can pass on module B's run and print B's URL into A's release
+      # summary. Nothing in the runs list identifies the payload, because
+      # `estate`'s `smoke.yaml` carries no `run-name:`, and `created_at` cannot
+      # separate dispatches seconds apart. The fix is two-repo and belongs
+      # there: give `smoke.yaml` a `run-name` carrying `client_payload.module`
+      # and `.tag`, then match on `display_title` here instead of on "newest id
+      # greater than baseline".
+      #
+      # WHAT THE SCOPING DOES BUY, stated at its real size: it excludes a future
+      # second `repository_dispatch` workflow in `estate`, and it turns an
+      # absent `smoke.yaml` into a named 404 rather than a silent timeout. The
+      # endpoint takes the `event` filter — verified read-only against
+      # `ci-self.yaml` in this repository, where 45 runs split 16 `push` + 29
+      # `pull_request` + 0 `repository_dispatch`.
+      #
+      # IT ALSO TURNS ONE GUESSED CAUSE INTO A NAMED ONE. This URL resolves a
+      # workflow by path in the DEFAULT BRANCH, so a `smoke.yaml` that is
+      # renamed or absent there answers 404 — and that lands on the strict read
+      # below, which reports it and does not send the dispatch, instead of being
+      # one of four possibilities offered after a silent timeout.
+      #
+      # 150s, NOT 60s, AND THE WAIT COSTS THE RELEASE NOTHING. This step is
+      # `continue-on-error` inside a job whose expensive work is already done,
+      # and it exits the moment a newer run id appears, so the happy path is
+      # unchanged at about five seconds. What the longer window buys is fewer
+      # false reds — and a false red here is expensive out of proportion to the
+      # wait, because both repairs it can prompt are harmful when a run does in
+      # fact exist. The interval stays at 5s; only the count rises.
+      #
+      # AND THE TIMEOUT NO LONGER ASSERTS A CAUSE IT CANNOT KNOW. `newest()`
+      # turns every read failure into 0, and the loop ends on elapsed time, so
+      # `run_id -eq 0` is reachable three ways: no run was created, which is the
+      # real case; every confirming read failed; or an eventually-consistent
+      # read answered with a lower id. The old text opened "The run list was
+      # readable a moment ago" and listed four causes with the read failing not
+      # among them — it asserted the one thing it could not check. It is a
+      # separate function now, with a separate heading, because the summary it
+      # shared claimed NO behavioural contract ran for this roll, which is false
+      # exactly when the check is wrong.
       - name: ask estate for a verdict on this roll
         id: estate_dispatch
         if: steps.cred.outputs.configured == 'true'
@@ -654,7 +721,10 @@ jobs:
         run: |
           set -euo pipefail
           module="${REPO#*/}"
-          runs="repos/${OWNER}/estate/actions/runs?event=repository_dispatch&per_page=1"
+          # SCOPED TO smoke.yaml, not to the event alone. See above: five
+          # modules rolling at once would otherwise confirm on each other.
+          w="actions/workflows/smoke.yaml/runs"
+          runs="repos/${OWNER}/estate/${w}?event=repository_dispatch&per_page=1"
 
           # Sanitised rather than trusted: a partial write followed by a non-zero
           # exit would otherwise put a non-number into a numeric comparison, and
@@ -682,6 +752,48 @@ jobs:
             exit 1
           }
 
+          # NOT THE FAILURE ABOVE, and it must not borrow those words: that one
+          # knows the dispatch was never sent, this one knows only that no newer
+          # run id was READ. The reasoning is on this step; the text is written
+          # for somebody who will act on it without reading either.
+          unconfirmed() {
+            {
+              echo "### Rolled, but the verdict was not confirmed"
+              echo ""
+              echo "\`${module} ${VERSION}\` is released and \`${OWNER}/argocd\` is"
+              echo "pinned to it, so the release is sound and the pods will roll."
+              echo "The dispatch was accepted, and then no new \`smoke\` run was"
+              echo "read in ${window}s. WHETHER ONE EXISTS IS NOT KNOWN FROM HERE."
+              echo ""
+              echo "The causes, in order: the event type no longer matches"
+              echo "\`smoke.yaml\`; that workflow is disabled in the Actions tab of"
+              echo "\`${OWNER}/estate\`; GitHub is behind and the run appeared after"
+              echo "this check stopped looking; or THE CONFIRMING READS THEMSELVES"
+              echo "FAILED — each one turns any error into 0, so a revoked token"
+              echo "or an Actions API blip longer than ${window}s reports exactly"
+              echo "like a missing run while a run sits queued."
+              echo ""
+              echo "SO OPEN THE ACTIONS TAB OF \`${OWNER}/estate\` FIRST. A smoke"
+              echo "run for **${module} v${VERSION}** there means this check was"
+              echo "wrong and there is nothing to repair. Only if none is there,"
+              echo "send one by hand — smoke takes \`module\` and \`tag\` on"
+              echo "\`workflow_dispatch\` — bearing in mind that it joins smoke's"
+              echo "\`estate-smoke\` group, which queues rather than running"
+              echo "alongside, so a blind send while a real run is already waiting"
+              echo "risks losing a verdict rather than gaining one."
+              echo ""
+              echo "Re-running is the heavier option and there is"
+              echo "no cheap form of it: this step is \`continue-on-error\`, so the"
+              echo "job concluded SUCCESS and **Re-run failed jobs** cannot reach"
+              echo "it. **Re-run all jobs** can, and that rebuilds and re-pushes"
+              echo "the image — moving \`:latest\` again and giving \`:${VERSION}\` a"
+              echo "digest \`argocd\` is not pinned to — as well as replaying the"
+              echo "\`argocd\` write. RELEASING AGAIN IS NOT THE REPAIR EITHER."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::${OWNER}/estate: no smoke run confirmed in ${window}s, but one may exist — open the Actions tab of ${OWNER}/estate before repairing anything. See the job summary."
+            exit 1
+          }
+
           if [ -z "${GH_TOKEN:-}" ]; then
             fail "the estate-scoped App token could not be minted; see the step above."
           fi
@@ -695,10 +807,11 @@ jobs:
           # dispatch is not sent: an event whose arrival cannot be confirmed is
           # worse than one not sent, because it reports as sent. A blip DURING
           # the poll is a different thing entirely — one missed sample of
-          # twelve, which the next sample covers.
+          # thirty, which the next sample covers. A blip lasting the WHOLE poll
+          # is neither, and unconfirmed() below is what says so.
           err="$RUNNER_TEMP/estate_error.txt"
           before=$(gh api "$runs" --jq '.workflow_runs[0].id // 0' 2>"$err") ||
-            fail "this token could not list workflow runs in ${OWNER}/estate ($(tr -d '\n' < "$err")). The dispatch was NOT sent: an arrival that cannot be confirmed would report as confirmed. The usual cause is the actions: read grant on the token minted above."
+            fail "this token could not list smoke.yaml runs in ${OWNER}/estate ($(tr -d '\n' < "$err")). The dispatch was NOT sent: an arrival that cannot be confirmed would report as confirmed. Two usual causes, and the error above tells them apart: the actions: read grant on the token minted above, or — on a 404 — smoke.yaml being renamed or absent on the default branch of ${OWNER}/estate, which is the only copy this event can run."
           case "$before" in '' | *[!0-9]*) before=0 ;; esac
 
           # One JSON document built by jq, rather than nested bracket keys on the
@@ -710,9 +823,15 @@ jobs:
             fail "the dispatch POST was refused."
           fi
 
-          # The POST answered 204. Now find out whether anything listened.
+          # The POST answered 204. Now find out whether anything listened. The
+          # count rises and the interval does not: a run that appears in five
+          # seconds is still confirmed in five seconds.
           run_id=0
-          for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+          tries=30
+          window=$((tries * 5))
+          i=0
+          while [ "$i" -lt "$tries" ]; do
+            i=$((i + 1))
             sleep 5
             now=$(newest)
             if [ "$now" -gt "$before" ]; then
@@ -722,7 +841,7 @@ jobs:
           done
 
           if [ "$run_id" -eq 0 ]; then
-            fail "the event was accepted but no run appeared within 60s. The run list was readable a moment ago, so the likely causes are, in order: the event type no longer matches smoke.yaml; smoke.yaml is not on the default branch of ${OWNER}/estate, which is the only copy this event can run; smoke.yaml is disabled in that repository's Actions tab; or GitHub is behind and the run appears later, in which case the run is there now and only this confirmation was lost."
+            unconfirmed
           fi
 
           url="https://github.com/${OWNER}/estate/actions/runs/${run_id}"
