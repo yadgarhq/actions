@@ -22,15 +22,39 @@ repos:
       # the expression and context errors that otherwise surface as a failed run
       # in somebody else's repository.
       #
-      # THE SKIP IS REAL AND SO IS THE SENTENCE EXCUSING IT, but only since the
-      # precommit job installs actionlint. Before that it was installed nowhere,
-      # so this hook reported Passed having linted nothing and the message said
-      # CI would catch it. The skip stays — a developer without the binary
-      # should still be able to commit — and CI is now where the enforcement is.
+      # THIS HOOK COULD NOT FAIL, TWICE OVER, and the second time is why the
+      # entry below is shaped the way it is. It read
+      # `command -v actionlint >/dev/null && actionlint || echo "..."`, and
+      # `A && B || C` runs C when B FAILS just as readily as when A does. So a
+      # real finding printed its error, printed the skip message, and exited 0.
+      # Reproduced with a stub binary that exits 1. The first generation of the
+      # same defect was the binary being installed nowhere; the sentence
+      # excusing the skip was false in both, and was rewritten once already.
+      #
+      # WHAT IS TRUE NOW, in three parts, because the claim that was wrong twice
+      # was wrong by being vague:
+      #
+      #   1. THE HOOK FAILS FOR ANYONE WHO HAS actionlint. `if/else` guards the
+      #      absent binary and nothing else, and actionlint is the last command
+      #      of the taken branch, so its exit status is the hook's. Verified
+      #      against all three states — absent, present and clean, present and
+      #      failing — rather than read off the shape.
+      #   2. IT FAILS IN CI ON EVERY PULL REQUEST. `ci / precommit` installs
+      #      actionlint unconditionally, runs every hook with no SKIP list, and
+      #      is in the `needs` of `passed` — and `ci / passed` is the required
+      #      check. So local and CI enforcement now come from this one line.
+      #   3. IT COVERS THIS REPOSITORY AND NO OTHER. The hook is declared here
+      #      and is NOT published in .pre-commit-hooks.yaml, so no other
+      #      repository in the organisation declares it and none has its
+      #      workflows linted by actionlint anywhere. Publishing it is the
+      #      follow-up, not this change (ledger 618).
+      #
+      # THE SKIP STAYS on purpose: a contributor without the binary should still
+      # be able to commit. Point 1 is now the whole of what it excuses.
       - id: actionlint
         name: actionlint
         language: system
-        entry: bash -c 'command -v actionlint >/dev/null && actionlint || echo "actionlint not installed — skipping (CI enforces)"'
+        entry: bash -c 'if command -v actionlint >/dev/null; then actionlint; else echo "actionlint not installed, so this hook checked nothing — ci / precommit lints this repository on every pull request"; fi'
         pass_filenames: false
         files: ^\.github/workflows/.*\.ya?ml$
       # THE HOOK ABOVE CANNOT RUN AT ALL ABOVE A CERTAIN SIZE, so the size is
