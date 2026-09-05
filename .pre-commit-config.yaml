@@ -22,39 +22,35 @@ repos:
       # the expression and context errors that otherwise surface as a failed run
       # in somebody else's repository.
       #
-      # THIS HOOK COULD NOT FAIL, TWICE OVER, and the second time is why the
-      # entry below is shaped the way it is. It read
-      # `command -v actionlint >/dev/null && actionlint || echo "..."`, and
-      # `A && B || C` runs C when B FAILS just as readily as when A does. So a
+      # THIS HOOK COULD NOT FAIL, THREE TIMES OVER, and the entry below is the
+      # third correction. Generation one was the binary being installed nowhere,
+      # so the hook reported Passed having linted nothing. Generation two was
+      # `command -v actionlint >/dev/null && actionlint || echo "..."`, where
+      # `A && B || C` runs C when B FAILS just as readily as when A does, so a
       # real finding printed its error, printed the skip message, and exited 0.
-      # Reproduced with a stub binary that exits 1. The first generation of the
-      # same defect was the binary being installed nowhere; the sentence
-      # excusing the skip was false in both, and was rewritten once already.
+      # Generation three is the `if`/`else` that replaced it: it failed for
+      # anyone who HAD actionlint, and still exited 0 for anyone who did not.
       #
-      # WHAT IS TRUE NOW, in three parts, because the claim that was wrong twice
-      # was wrong by being vague:
+      # THE SKIP IS GONE, and it is publication that removes it rather than a
+      # new fact about this repository. The same hook is now published in
+      # .pre-commit-hooks.yaml for all sixteen repositories (ledger 620), and a
+      # named check that sixteen repositories reference has to mean one thing.
+      # "Passed, having checked nothing" is not a thing it can mean. The
+      # published entry is bare, every other published system hook is bare, and
+      # a contributor without actionlint now gets pre-commit's own
+      # "Executable `actionlint` not found" instead of a green tick.
       #
-      #   1. THE HOOK FAILS FOR ANYONE WHO HAS actionlint. `if/else` guards the
-      #      absent binary and nothing else, and actionlint is the last command
-      #      of the taken branch, so its exit status is the hook's. Verified
-      #      against all three states — absent, present and clean, present and
-      #      failing — rather than read off the shape.
-      #   2. IT FAILS IN CI ON EVERY PULL REQUEST. `ci / precommit` installs
-      #      actionlint unconditionally, runs every hook with no SKIP list, and
-      #      is in the `needs` of `passed` — and `ci / passed` is the required
-      #      check. So local and CI enforcement now come from this one line.
-      #   3. IT COVERS THIS REPOSITORY AND NO OTHER. The hook is declared here
-      #      and is NOT published in .pre-commit-hooks.yaml, so no other
-      #      repository in the organisation declares it and none has its
-      #      workflows linted by actionlint anywhere. Publishing it is the
-      #      follow-up, not this change (ledger 618).
-      #
-      # THE SKIP STAYS on purpose: a contributor without the binary should still
-      # be able to commit. Point 1 is now the whole of what it excuses.
+      # THIS ENTRY IS KEPT BYTE-IDENTICAL TO THE PUBLISHED ONE, for the reason
+      # the prettier entry below records: this repository cannot reference its
+      # own rev before that rev is tagged, so the hook is declared twice and the
+      # two must not drift. If they ever disagree, this file is the one that is
+      # wrong. Divergence here would make yadgarhq/actions the single repository
+      # in the estate where actionlint can still no-op — the exact inverse of
+      # the defect being closed.
       - id: actionlint
         name: actionlint
         language: system
-        entry: bash -c 'if command -v actionlint >/dev/null; then actionlint; else echo "actionlint not installed, so this hook checked nothing — ci / precommit lints this repository on every pull request"; fi'
+        entry: actionlint
         pass_filenames: false
         files: ^\.github/workflows/.*\.ya?ml$
       # THE HOOK ABOVE CANNOT RUN AT ALL ABOVE A CERTAIN SIZE, so the size is
