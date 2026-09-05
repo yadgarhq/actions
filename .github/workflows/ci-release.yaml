@@ -388,7 +388,8 @@ jobs:
             echo "configured=false" >> "$GITHUB_OUTPUT"
             {
               echo "_No release App is configured here, so \`yadgarhq/argocd\`"
-              echo "was not told about this version and no pod will roll. See the"
+              echo "was not told about this version and no pod will roll, and"
+              echo "\`yadgarhq/estate\` was not asked for a verdict on it. See the"
               echo "\`deployment\` job in \`yadgarhq/actions\`._"
             } >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -548,3 +549,188 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::error::Could not write the version to ${OWNER}/argocd. See the job summary."
           exit 1
+
+      # ASKING THE ESTATE FOR A VERDICT, and this is the second half of a
+      # trigger whose first half has been waiting since the suite was written.
+      # `yadgarhq/estate`'s `smoke.yaml` fires on `repository_dispatch` type
+      # `module-rolled`; nothing in the organisation sent that event, so the
+      # behavioural contract suite had never executed once. This is the sender.
+      #
+      # A SECOND TOKEN RATHER THAN A WIDER FIRST ONE. The mint above narrows to
+      # `repositories: argocd` and says why. Adding `estate` to that list would
+      # hand the token that pins the cluster's images write access to a test
+      # repository, and hand the dispatch a token that can rewrite every
+      # `versions/*.yaml`. Two mints cost one extra API call and keep each token
+      # unable to do the other's job. Same action at the SAME pinned SHA — two
+      # pins for one action in one file would be a smell of its own.
+      #
+      # `contents: write` IS WHAT THE ENDPOINT ASKS FOR, read from GitHub's
+      # fine-grained permission reference rather than assumed: `POST
+      # /repos/{owner}/{repo}/dispatches` is listed under Contents at `write`.
+      # `actions: read` is for the verification below, which reads a run list.
+      # The App — `yadgarhq-bot`, app id 4814165 — holds `contents: write` and
+      # `actions: write` organisation-wide with `repository_selection: all`, so
+      # `estate` is already in reach. There is NO new credential, no new secret
+      # and no caller change: the five chart-carrying repositories that already
+      # pass `RELEASE_APP_*` to their `release:` job need no edit, and the
+      # `workflow_call` signature above is untouched.
+      - name: mint a token that can ask estate for a verdict and nothing else
+        id: estate_app
+        if: steps.cred.outputs.configured == 'true'
+        # NOT WORTH A RED RELEASE — the argument is on the step below. A failed
+        # mint arrives there as an empty token and is reported there, so the
+        # failure has one voice rather than two.
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: estate
+          permission-contents: write
+          permission-actions: read
+
+      # AFTER THE PIN IS WRITTEN, AND THAT ORDER IS WHY THIS IS A STEP RATHER
+      # THAN A JOB. The step that writes `versions/<module>.yaml` exits 1 when
+      # the write is refused, so everything after it is skipped: a roll that
+      # never reached argocd never asks for a verdict on itself. A separate job
+      # with `needs:` would state the same ordering at the cost of minting the
+      # credential a third time.
+      #
+      # THE DISPATCH IS NOT A PROMISE THAT THE NEW PODS ARE UP, and the
+      # receiving half already knows it. Argo CD syncs seconds to minutes after
+      # the pin lands, so a suite that wins that race measures the PREVIOUS pods
+      # and reports green for code that is not running. `estate`'s `await-roll`
+      # binary is the tolerance, and it reads exactly the payload sent below: for
+      # the gateway it polls `server/discover` for up to ten minutes until the
+      # served version equals the dispatched tag with the leading `v` stripped,
+      # and for the other four modules it prints on the run itself that the
+      # verdict may describe the previous pods. Stage 3's A-04 replaces both
+      # halves with digest parity — which is why `digest` is in the payload
+      # although nothing reads it yet.
+      #
+      # A FAILED DISPATCH MUST NOT REDDEN THE RELEASE. By the time this step
+      # runs the tag is cut and permanent, the image is pushed and signed, and
+      # argocd is pinned — the release SUCCEEDED and the pods will roll. Failing
+      # the job here would report a shipped release as broken and invite the one
+      # repair the step above spends four lines forbidding, which is releasing
+      # again.
+      #
+      # BUT IT IS NOT ALLOWED TO BE SILENT, because a dispatch that fails
+      # quietly is this estate's most repeated defect. So the step itself FAILS
+      # — a red cross in the step list, an error annotation on the run, and a
+      # named section in the job summary — and `continue-on-error` keeps that
+      # failure out of the release's own verdict. It is the shape `estate`'s
+      # `smoke.yaml` already uses for its C-18 row, for the same reason.
+      #
+      # A 204 IS NOT EVIDENCE THAT ANYTHING LISTENED, and checking only the exit
+      # status of the POST would be a sixth check that cannot fail. The endpoint
+      # answers 204 when the event type matches no workflow, and 204 when the
+      # workflow is missing from the default branch — GitHub runs the
+      # DEFAULT-BRANCH copy of a `repository_dispatch` workflow and no other. So
+      # this step records the newest dispatch run in `estate` before the POST and
+      # waits for a NEWER one to appear. That discriminates today, with no runner
+      # installed, because a QUEUED run is still a CREATED run.
+      #
+      # NOT GATED ON THE ESTATE BEING READY, argued rather than assumed. The ARC
+      # scale set is not installed — `estate` has zero registered runners — so a
+      # dispatched run queues, and `estate`'s own README says a queued run is
+      # easy to mistake for a passing one. This side cannot fix that, and a
+      # readiness gate is a switch somebody must remember to remove, which is
+      # how the first half came to sit unused. The credential check above is
+      # already the one gate this job needs. What this side CAN do is name the
+      # created run, so the release says where the verdict will appear and one
+      # link shows whether it ever ran.
+      - name: ask estate for a verdict on this roll
+        id: estate_dispatch
+        if: steps.cred.outputs.configured == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.estate_app.outputs.token }}
+          VERSION: ${{ needs.detect.outputs.version }}
+          DIGEST: ${{ needs.image.outputs.digest }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          module="${REPO#*/}"
+          runs="repos/${OWNER}/estate/actions/runs?event=repository_dispatch&per_page=1"
+
+          # Sanitised rather than trusted: a partial write followed by a non-zero
+          # exit would otherwise put a non-number into a numeric comparison, and
+          # the arithmetic error would read as a missing run.
+          newest() {
+            n=$(gh api "$runs" --jq '.workflow_runs[0].id // 0' 2>/dev/null || true)
+            case "$n" in '' | *[!0-9]*) n=0 ;; esac
+            printf '%s' "$n"
+          }
+
+          fail() {
+            {
+              echo "### Rolled, but the estate was not asked"
+              echo ""
+              echo "\`${module} ${VERSION}\` is released and \`${OWNER}/argocd\` is"
+              echo "pinned to it, so the release is sound and the pods will roll."
+              echo "What did not happen is the verdict: $1"
+              echo ""
+              echo "NO behavioural contract ran for this roll. Send it by hand from"
+              echo "the Actions tab of \`${OWNER}/estate\` — smoke has a"
+              echo "\`workflow_dispatch\` taking \`module\` and \`tag\` — or re-run this"
+              echo "job once the cause is cleared. RELEASING AGAIN IS NOT THE REPAIR."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::${OWNER}/estate was not asked for a verdict: $1"
+            exit 1
+          }
+
+          if [ -z "${GH_TOKEN:-}" ]; then
+            fail "the estate-scoped App token could not be minted; see the step above."
+          fi
+
+          # STRICT ON THIS FIRST READ, LENIENT ON THE POLL BELOW, and the split
+          # is the difference between naming a cause and guessing one. If this
+          # token cannot list runs at all, every later read returns 0 as well
+          # and the timeout below would blame the event type or the default
+          # branch — the wrong cause, stated confidently, which is the defect
+          # this whole step exists to end. So a refusal HERE says so, and the
+          # dispatch is not sent: an event whose arrival cannot be confirmed is
+          # worse than one not sent, because it reports as sent. A blip DURING
+          # the poll is a different thing entirely — one missed sample of
+          # twelve, which the next sample covers.
+          err="$RUNNER_TEMP/estate_error.txt"
+          before=$(gh api "$runs" --jq '.workflow_runs[0].id // 0' 2>"$err") ||
+            fail "this token could not list workflow runs in ${OWNER}/estate ($(tr -d '\n' < "$err")). The dispatch was NOT sent: an arrival that cannot be confirmed would report as confirmed. The usual cause is the actions: read grant on the token minted above."
+          case "$before" in '' | *[!0-9]*) before=0 ;; esac
+
+          # One JSON document built by jq, rather than nested bracket keys on the
+          # command line: this can only be tested by reading it, so it is written
+          # in the form that reads unambiguously.
+          if ! jq -n --arg m "$module" --arg t "v${VERSION}" --arg d "$DIGEST" \
+                 '{event_type:"module-rolled",client_payload:{module:$m,tag:$t,digest:$d}}' |
+            gh api -X POST "repos/${OWNER}/estate/dispatches" --input - >/dev/null; then
+            fail "the dispatch POST was refused."
+          fi
+
+          # The POST answered 204. Now find out whether anything listened.
+          run_id=0
+          for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            sleep 5
+            now=$(newest)
+            if [ "$now" -gt "$before" ]; then
+              run_id="$now"
+              break
+            fi
+          done
+
+          if [ "$run_id" -eq 0 ]; then
+            fail "the event was accepted but no run appeared within 60s. The run list was readable a moment ago, so the likely causes are, in order: the event type no longer matches smoke.yaml; smoke.yaml is not on the default branch of ${OWNER}/estate, which is the only copy this event can run; smoke.yaml is disabled in that repository's Actions tab; or GitHub is behind and the run appears later, in which case the run is there now and only this confirmation was lost."
+          fi
+
+          url="https://github.com/${OWNER}/estate/actions/runs/${run_id}"
+          echo "::notice::${OWNER}/estate accepted the roll: ${url}"
+          {
+            echo "### The estate was asked for a verdict"
+            echo ""
+            echo "\`${OWNER}/estate\` accepted \`module-rolled\` for"
+            echo "**${module} v${VERSION}** and created [run ${run_id}](${url})."
+            echo "Whether it finds a runner, and what it answers, shows on that run."
+          } >> "$GITHUB_STEP_SUMMARY"
