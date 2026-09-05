@@ -5,6 +5,25 @@ FROM docker.io/library/rust:1.98-bookworm@sha256:82150a52ec202c1b14d7817e14516c3
 LABEL org.opencontainers.image.source="https://github.com/yadgarhq/actions"
 LABEL org.opencontainers.image.description="Build base for Rust modules: pinned toolchain, musl target, cargo-chef, protoc."
 
+# libssh2-1 IS ALREADY IN THE BASE AND IS LISTED HERE ANYWAY, which is the point.
+# The base ships 1.10.0-3+b1, which carries CVE-2026-7598 and CVE-2026-58050 —
+# both fixed in Debian's 1.10.0-3+deb12u1. Naming the package on an apt line that
+# has already run `apt-get update` upgrades it to the security version; measured,
+# 1.10.0-3+b1 -> 1.10.0-3+deb12u1.
+#
+# A REBUILD ALONE DOES NOT FIX THIS, and that is why the package is named rather
+# than left to the base. The `FROM` above is digest-pinned, so every rebuild
+# resolves the identical bytes, and upstream has not republished the tag — the
+# `rust:1.98-bookworm` tag still resolves to exactly the digest pinned above
+# (measured 2026-09-05). Bumping the pin would gain nothing today.
+#
+# WHY IT MATTERS LESS THAN A SCAN FAILURE SUGGESTS, stated so nobody panics or
+# over-corrects: this image NEVER SHIPS. It is the build stage, discarded once
+# the binary is copied out; a service runs on `runtime`. So the exposure is a
+# vulnerable library inside a build container, not in anything serving traffic.
+# It is fixed here because it is one word and the gate should be green for real
+# reasons, not because a pod was at risk.
+
 # musl-tools supplies musl-gcc, which the musl target needs to link.
 #
 # BOTH protobuf packages, and the second one is not optional. protobuf-compiler
@@ -25,6 +44,7 @@ RUN apt-get update \
         musl-tools \
         protobuf-compiler \
         libprotobuf-dev \
+        libssh2-1 \
     && rm -rf /var/lib/apt/lists/*
 
 # One layer, both toolchain setup — hadolint DL3059 is right that splitting them
