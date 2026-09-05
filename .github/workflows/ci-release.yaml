@@ -279,7 +279,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # THE SAME TWO PINS `ci-pr.yaml` USES — the action's SHA and the helm
+      # version — and this is the call site where the version matters MOST. The
+      # two in `ci-pr.yaml` decide whether a check passes; this one packages the
+      # artefact an operator installs, so an unpinned helm here means the
+      # published chart was built by whichever major the network answered with.
+      # v3.18.4 is what Argo CD v3.1.8 bundles and therefore what renders these
+      # charts in the cluster, so packaging with it keeps the producer and the
+      # consumer the same program. The full reasoning is above the `precommit`
+      # copy in `ci-pr.yaml`; when Argo's bundled helm changes, all three follow.
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.18.4
       # D65: the chart IN GIT points at a moving tag, because our own cluster
       # deploys it from git at HEAD and development follows HEAD by design. The
       # PUBLISHED chart pins a digest, because a release must name exactly what
