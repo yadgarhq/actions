@@ -171,7 +171,7 @@ jobs:
           if [ -n "$TOKEN" ]; then
             CODE=$(curl -s -o /dev/null -w '%{http_code}' \
               -H "Authorization: Bearer ${TOKEN}" \
-              -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json' \
+              -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json' \
               "https://ghcr.io/v2/${REPO}/manifests/latest")
           fi
 

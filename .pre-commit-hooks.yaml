@@ -228,7 +228,7 @@
 #
 # `--strict` promotes warnings to failures, and that is the whole change: the
 # same run now exits 1. `[INFO]` findings are NOT promoted, which is why the
-# estate's six charts stay green — every one of them reports
+# estate's seven charts stay green — every one of them reports
 # `[INFO] icon is recommended` and nothing above it.
 - id: helm-lint
   name: helm lint and render
