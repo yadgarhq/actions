@@ -1,0 +1,71 @@
+# The self-hosted runner image for `yadgarhq/estate`'s contract suite.
+#
+# WHY THIS IS A BASE IMAGE RATHER THAN A MODULE IMAGE. It is built here, beside
+# `rust-build` and `runtime`, because the shared release workflow structurally
+# cannot produce it: `ci-release.yaml` tags `ghcr.io/${{ github.repository }}`,
+# so a Containerfile added to `yadgarhq/estate` would publish
+# `ghcr.io/yadgarhq/estate` — the module's name, not the runner's. This workflow
+# tags `${{ github.repository_owner }}/${{ matrix.image }}`, which is the shape
+# `estate-runner` needs. It was previously a fenced code block inside
+# `yadgarhq/deploy`'s MIGRATION_NOTES.md, built by hand: an image the estate
+# depends on, specified in prose, in another repository.
+#
+# WHY AN IMAGE RATHER THAN A JOB STEP. The runner pod holds the `estate`
+# environment's secrets. A `curl | sh` toolchain install at job time inside that
+# pod is the opposite of what D61 asks for everywhere else, so the toolchain is
+# baked and pinned instead.
+FROM ghcr.io/actions/actions-runner@sha256:e5496277be5d09bc968b3d64911b74e219ac4a3f2edce956a3ecf9271bea1ef4
+
+LABEL org.opencontainers.image.source="https://github.com/yadgarhq/actions"
+LABEL org.opencontainers.image.description="Self-hosted runner for yadgarhq/estate: pinned actions-runner plus the estate's Rust toolchain."
+
+# THE DIGEST IS THE INDEX, NOT THE amd64 CHILD, and the difference is easy to
+# get wrong: reading a digest out of a locally pulled image gives you the child
+# (`sha256:5036480998280bb2…`), which silently locks the build to one
+# architecture and does not match what the tag resolves to. Measured: the tag
+# `2.337.0` resolves to this index, whose four children include linux/amd64 and
+# linux/arm64. `rust-build` pins its own base the same way.
+#
+# GitHub DEPRECATES OLD RUNNER BINARIES and refuses registration for one far
+# enough behind, so the digest above is a maintenance obligation rather than a
+# set-and-forget pin. It is actions-runner v2.337.0. The weekly rebuild this
+# workflow already runs does NOT move it — a digest is immutable, which is the
+# point — so bumping it is a deliberate edit when upstream releases.
+# NUMERIC IDS, because hadolint DL3066 is right that a name need not resolve on
+# every host. 1001 is `runner` in the upstream image, confirmed by `id -u` in
+# the built image rather than assumed.
+USER 0
+
+# git is needed by actions/checkout; the rest are what a Rust build links
+# against. hadolint DL3008: the upstream image is Ubuntu and pinning apt
+# versions here would break on every base bump for no security gain, which is
+# the same trade `rust-build` makes one directory over.
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+        build-essential \
+        ca-certificates \
+        curl \
+        git \
+        libssl-dev \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+USER 1001
+
+# 1.98.0 IS `rust-toolchain.toml` IN yadgarhq/estate, and the two must agree.
+# A mismatch is not an error: rustup silently fetches the pinned channel on
+# first use and recompiles everything with it, so the only symptom is every job
+# paying a full toolchain download and a cold build.
+ENV RUSTUP_HOME=/home/runner/.rustup \
+    CARGO_HOME=/home/runner/.cargo \
+    PATH=/home/runner/.cargo/bin:$PATH
+
+# `sh.rustup.rs | sh` is a pipe, so without pipefail a failed DOWNLOAD is
+# swallowed by a successful `sh` and the image ships with no toolchain.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --default-toolchain 1.98.0 --profile minimal --component rustfmt --component clippy \
+    && rustc --version \
+    && cargo --version

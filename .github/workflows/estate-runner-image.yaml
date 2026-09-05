@@ -1,0 +1,265 @@
+# The self-hosted runner image for `yadgarhq/estate`'s contract suite.
+#
+# WHY THIS IS NOT A LEG OF `base-images.yaml`, which is where it started. Two
+# measured reasons, both from the review of PR #46:
+#
+# 1. IT CANNOT PASS THAT WORKFLOW'S SCAN GATE, and no honest tightening makes it.
+#    Its base is GitHub's own published runner, which carries 122 CRITICAL/HIGH
+#    fixed-available findings before this repository adds a line — all from
+#    bundled docker/containerd/buildx Go binaries and a Node.js tree the runner
+#    needs to execute `node20` actions. `base-images.yaml` gates `exit-code: 1`
+#    on exactly that severity pair, so this leg would publish a moving `:latest`
+#    (push runs before scan) and then go red on every run, forever.
+#
+# 2. A SHARED MATRIX MAKES THAT FAILURE EVERYONE'S. `strategy.matrix` defaults to
+#    `fail-fast: true`, so this leg failing its scan cancels `rust-build` and
+#    `runtime` at whatever step they have reached — possibly between `push` and
+#    `sign`, leaving an unsigned, unscanned base that every service does `FROM`
+#    on. That workflow now sets `fail-fast: false` regardless, but the cleaner
+#    fix is that an image with a different risk profile gets its own policy
+#    rather than diluting one written for images this estate builds from source.
+#
+# The gate here is `scripts/scan_delta.py`, which fails when OUR layers add a
+# finding the pinned base did not carry. Its header states what that does and
+# does not claim; read it before changing this.
+name: estate-runner image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      [containers/estate-runner/**, .github/workflows/estate-runner-image.yaml]
+  # Rebuild weekly. GitHub DEPRECATES old runner binaries and refuses
+  # registration for one far enough behind, and the base is digest-pinned, so
+  # this rebuild does NOT move the runner version — bumping that digest is a
+  # deliberate edit. What the rebuild does refresh is the apt and rustup layers.
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: version from the date
+        id: v
+        run: echo "version=$(date -u +%Y.%m.%d)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # THE BASE IS SCANNED BEFORE THE IMAGE IS BUILT, because the gate below is
+      # a comparison and needs both sides. The digest is read out of the
+      # Containerfile rather than restated here: two copies of a pin drift.
+      - name: the pinned base, for comparison
+        id: base
+        run: |
+          set -euo pipefail
+          ref=$(sed -n 's|^FROM \(.*\)$|\1|p' containers/estate-runner/Containerfile)
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: scan the base
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.base.outputs.ref }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "0"
+          format: json
+          output: base-scan.json
+
+      # BUILT LOCALLY FIRST, NOT PUSHED. The first draft of this workflow pushed
+      # here and scanned afterwards — reproducing, in the very file that
+      # condemns it, the defect that made `base-images.yaml` the wrong home for
+      # this image. A gate that runs after the publish does not gate anything:
+      # it leaves `:latest` and the dated tag on the registry, unsigned, with no
+      # SBOM, and reddens the job afterwards. `load: true` puts the image in the
+      # runner's local daemon so trivy can read it without anyone else being
+      # able to.
+      - id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: containers/estate-runner
+          file: containers/estate-runner/Containerfile
+          push: false
+          load: true
+          tags: estate-runner:candidate
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+      - name: scan the candidate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: estate-runner:candidate
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "0"
+          format: json
+          output: image-scan.json
+
+      # THE GATE, AND IT RUNS BEFORE ANYTHING IS PUBLISHED. Red only when our
+      # layers add a finding the base did not carry.
+      - name: our layers must add no new CRITICAL or HIGH
+        run: python3 scripts/scan_delta.py base-scan.json image-scan.json
+
+      # ONLY NOW. The layers are already in the build cache, so this re-uses
+      # them rather than rebuilding.
+      - id: push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: containers/estate-runner
+          file: containers/estate-runner/Containerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/estate-runner:latest
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/estate-runner:${{ steps.v.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+      # GUARD AT THE PRODUCER, NOT AT EACH CONSUMER. `steps.push.outputs.digest`
+      # feeds three of them below — the SBOM, the cosign signature and the step
+      # summary the operator copies into `estate-front-runner.yaml`. The first
+      # two build a reference ending in `@` and die on the malformed ref, by luck
+      # rather than design. The SUMMARY fails silently: it prints an image line
+      # with no digest and exits 0, so the operator pins nothing. This estate has
+      # already paid for that lesson once, in `ci-release.yaml`, where an empty
+      # digest published a chart with no tag at all.
+      #
+      # THE RIGHT-HAND SIDE OF `=~` STAYS UNQUOTED. Quoting turns the pattern
+      # into a literal string, so the guard would reject every valid digest — a
+      # red build on every release. A test that feeds only malformed input passes
+      # either way, so the valid case has to be a real 64-character hex digest.
+      - name: the digest must be a digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::the push step produced no usable digest: '${DIGEST}'"
+            exit 1
+          fi
+          echo "digest: $DIGEST"
+
+      - name: SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: "${{ env.REGISTRY }}/${{ github.repository_owner }}/estate-runner@${{ steps.push.outputs.digest }}"
+          upload-artifact: true
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: sign
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/estate-runner@${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "$IMAGE"
+
+      # A VISIBILITY FLIP IS OTHERWISE SILENT. The runner pod carries no
+      # `imagePullSecrets` by design, so the kubelet pulls anonymously; a
+      # package that goes private is an ImagePullBackOff nobody is told about.
+      #
+      # THE `Accept` HEADER LISTS THE PLAIN OCI IMAGE MANIFEST, WHICH THE COPY OF
+      # THIS CHECK IN `base-images.yaml` OMITS. Measured against this very image
+      # while it was genuinely public: that header returns 404, and the check
+      # reports "not publicly pullable" — a false alarm indistinguishable from a
+      # real one. GHCR answers 404, not 406, for a media type the request did not
+      # accept. The other two images pass there only because buildx pushes an
+      # index, whose type IS listed.
+      - name: verify an adopter can pull this, anonymously
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          # `.get`, NOT `["token"]`, AND THAT IS THE CASE THIS CHECK EXISTS FOR.
+          # GHCR answers the token endpoint with 403 and
+          # {"errors":[{"code":"DENIED",...}]} — no `token` key — for a package an
+          # anonymous client cannot reach. Subscripting dies with KeyError under
+          # `set -euo pipefail`, so the step would red with a Python traceback and
+          # never print the instruction below, in exactly the private-package case
+          # it was written for. `000` is the sentinel for "GHCR refused to issue
+          # an anonymous token at all", which is itself the answer.
+          # THREE FAILURE CHANNELS, THREE SENTINELS, because one sentinel for
+          # several causes is a message asserting a cause the check cannot know —
+          # the pattern this repository reverted in #44 and generalised in
+          # ADR-0578. Unreachable, unparseable and REFUSED are three different
+          # facts and only the third says anything about visibility.
+          #
+          # An earlier revision of this comment claimed EVERY channel had its own
+          # message. It did not: `curl -sS` has no `-f`, so a 502 or an HTML error
+          # page exits 0, and the parse failure was swallowed into the same `000`
+          # that means "GHCR refused" — sending an operator to a settings page
+          # over a proxy fault. Measured: a non-JSON body, `[]`, `null` and an
+          # empty body all reached the PRIVATE message.
+          if ! body=$(curl -sS "https://ghcr.io/token?scope=repository:${OWNER}/estate-runner:pull" 2>/dev/null); then
+            echo "::error::could not reach ghcr.io to ask for an anonymous pull token."
+            echo "::error::That is a network fault and says NOTHING about this package's visibility."
+            exit 1
+          fi
+          if ! token=$(printf '%s' "$body" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("token") or "")'); then
+            echo "::error::ghcr.io answered the token endpoint with something that is not a JSON object."
+            echo "::error::That is a transport or proxy fault and says NOTHING about this package's visibility."
+            exit 1
+          fi
+          code=000
+          if [ -n "$token" ]; then
+          # `|| true` IS WRONG HERE and a bare failure is wrong too. Inside an `if`
+          # BODY `set -e` is fully armed — it is relaxed only for the CONDITION —
+          # so an unquoted `curl` that fails at the network level kills the step
+          # with NO output at all, which is the silent-death class this check
+          # exists to close, moved one line down. `|| true` is not the fix either:
+          # it would fall through to the `000` branch and blame visibility for a
+          # dropped connection.
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+                   -H "Authorization: Bearer $token" \
+                   -H 'Accept: application/vnd.oci.image.index.v1+json' \
+                   -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+                   -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
+                   -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+                   "https://ghcr.io/v2/${OWNER}/estate-runner/manifests/latest") \
+            || { echo "::error::the manifest request failed at the network level, which says nothing about visibility."; exit 1; }
+          fi
+          if [ "$code" != "200" ]; then
+            if [ "$code" = "000" ]; then
+              echo "::error::GHCR refused to issue an anonymous pull token, which means the package is PRIVATE."
+            else
+              echo "::error::published, but an anonymous pull answered ${code}."
+            fi
+            echo "::error::Set the package public at https://github.com/orgs/${OWNER}/packages/container/estate-runner/settings"
+            exit 1
+          fi
+          echo "anonymous pull: 200"
+
+      - name: the digest the cluster should pin
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          {
+            echo "### estate-runner published"
+            echo
+            echo 'Pin this in yadgarhq/deploy, infra/estate-front-runner.yaml:'
+            echo
+            echo '```yaml'
+            echo "image: ghcr.io/${OWNER}/estate-runner@${DIGEST}"
+            echo '```'
+            echo
+            echo 'A tag is not enough. This workflow publishes a moving latest tag.'
+          } >> "$GITHUB_STEP_SUMMARY"
