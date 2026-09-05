@@ -58,15 +58,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - id: push
+      # BUILT LOCALLY FIRST, NOT PUSHED, so the scan below can refuse before
+      # anything reaches the registry. This used to push here and scan
+      # afterwards, and on 2026-09-05 that ordering did exactly what it always
+      # could: `rust-build` picked up a new libssh2 CVE from a refreshed
+      # vulnerability database, published `:latest` and the dated tag, and THEN
+      # went red. The moving tag every service does `FROM` on had already moved,
+      # unsigned and with no SBOM.
+      - id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: containers/${{ matrix.image }}
           file: containers/${{ matrix.image }}/Containerfile
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}:latest
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}:${{ steps.v.outputs.version }}
+          push: false
+          load: true
+          tags: ${{ matrix.image }}:candidate
 
       # D61: signed with the workflow's own OIDC identity, so there is no key
       # material to hold or rotate.
@@ -99,11 +105,22 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: image
-          image-ref: "${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}@${{ steps.push.outputs.digest }}"
+          image-ref: ${{ matrix.image }}:candidate
           severity: CRITICAL,HIGH
           exit-code: "1"
           ignore-unfixed: true
           skip-dirs: /usr/local/cargo/registry
+
+      # ONLY NOW. The layers are in the build cache, so this reuses them.
+      - id: push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: containers/${{ matrix.image }}
+          file: containers/${{ matrix.image }}/Containerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}:latest
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}:${{ steps.v.outputs.version }}
 
       - name: SBOM
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
