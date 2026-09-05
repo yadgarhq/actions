@@ -147,6 +147,59 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
+      # THE DIGEST IS ASSERTED ONCE, HERE, AND NOWHERE ELSE. Five things read it
+      # and not one of them checked it: the trivy scan below, the SBOM, the
+      # cosign signature, the `yq` rewrite of `chart/values.yaml` in the `chart`
+      # job, and the `versions/<module>.yaml` write in the `deployment` job. The
+      # first three build a reference ending in `@` and fail on a malformed ref,
+      # which is luck rather than a check. The last two fail SILENTLY, and that
+      # is what this step is for: an empty digest publishes a chart carrying
+      # `image.digest: ""` and NO TAG AT ALL, because the same `yq` expression
+      # deletes `image.tag`; and it pins the module to `:<version>`, a GHCR tag
+      # this file's own comment further down admits is mutable.
+      #
+      # AT THE PRODUCER RATHER THAN AT EACH CONSUMER. A guard in `deployment`
+      # protects one of those five writes. Here it protects all five, and the
+      # gating already carries the failure downstream: `chart` runs on
+      # `needs.image.result != 'failure'` and `deployment` on `== 'success'`, so
+      # a red guard skips both writes rather than letting them run on a value
+      # nobody vouched for. The sixth consumer, whenever it arrives, gets the
+      # guarantee without having to remember to ask for it.
+      #
+      # THE SHAPE IS NOT INVENTED HERE. `^sha256:[0-9a-f]{64}$` is what
+      # `scripts/versions_pinned.py` in `yadgarhq/argocd` enforces on the value
+      # this workflow writes there, so matching it turns a pod that will never
+      # pull into a build that will not pass.
+      #
+      # TESTED AS A VARIABLE, NEVER AS A PIPELINE. The `if ! cmd | grep -q ...`
+      # shape collapses a tool error, an absent tool and a genuine mismatch into
+      # one branch, which is a check that cannot fail — this estate has already
+      # shipped one. `set -euo pipefail` and a test of the captured value keep
+      # the three apart.
+      - name: the push must have reported a digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Image digest \`$DIGEST\`." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "### The image push reported no usable digest"
+            echo ""
+            echo "\`docker/build-push-action\` returned \`${DIGEST:-(empty)}\`, which"
+            echo "is not \`sha256:\` followed by 64 lowercase hex characters."
+            echo ""
+            echo "Nothing downstream would have said so. The published chart would"
+            echo "carry \`image.digest: \"\"\` and no \`image.tag\` at all, and"
+            echo "\`versions/<module>.yaml\` would pin \`:<version>\` — a GHCR tag that"
+            echo "any re-run of this job overwrites. Both look like a successful"
+            echo "release."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::The image push reported no usable digest. See the job summary."
+          exit 1
+
       # Scan the ARTIFACT, not the source tree. ci-validation scans the
       # filesystem before anything is built; this is the thing an adopter
       # actually runs, including whatever the base image contributed.
@@ -389,6 +442,19 @@ jobs:
       # set both keys to the previous release's values; `:<previous>` is still
       # in the registry, because only `latest` moves.
       #
+      # AND THE HEADER WRITTEN BELOW NOW SAYS SO. It used to end "Deleting this
+      # file returns the module to the moving tag, which now points at THIS
+      # release" — a description of the damage that reads as a documented way
+      # out. `yadgarhq/argocd` REFUSES that deletion now (`ci / passed`,
+      # `scripts/versions_pinned.py`, ledger 608) and its five existing files
+      # were corrected by hand; but this generator rewrites the header on every
+      # release, so the old invitation would have come back one module at a
+      # time. The replacement is lifted from those files and from the script's
+      # own failure message rather than phrased a third way, and it adds the
+      # retirement shape that script had to work out: a module leaves the
+      # cluster by losing its `yadgar-deployable` topic or its `chart/`, after
+      # which nothing reads the file and leaving it costs nothing.
+      #
       # THE FAILURE IS RED, NOT SILENT, and that is this workflow's own instinct
       # rather than a new one: the "verify an adopter can actually pull this"
       # step above already fails the job after a successful push, for a condition
@@ -412,8 +478,17 @@ jobs:
             printf '# Written by ci-release in %s. Do not edit by hand.\n' "$REPO"
             printf '# The digest governs the pull; the tag is here to be read.\n'
             printf '# To roll back, set BOTH keys to the previous release.\n'
-            printf '# Deleting this file returns the module to the moving tag,\n'
-            printf '# which now points at THIS release.\n'
+            printf '# DO NOT DELETE THIS FILE. Deleting it hands helm no values,\n'
+            printf '# so the module falls back to the moving tag with nothing\n'
+            printf '# reporting it — `ci / passed` refuses the deletion (ledger\n'
+            printf '# 608, `scripts/versions_pinned.py`).\n'
+            printf '# That is an EDIT of both keys and never a delete, because\n'
+            printf '# `:latest` already points at the release being rolled back\n'
+            printf '# from.\n'
+            printf '# Retiring the module is not a reason to delete it either: a\n'
+            printf '# module leaves the cluster by losing its `yadgar-deployable`\n'
+            printf '# topic or its `chart/`, after which nothing reads this file\n'
+            printf '# and leaving it costs nothing.\n'
             printf 'image:\n  digest: "%s"\n  tag: "%s"\n' "$DIGEST" "$VERSION"
           } > "$file"
           err="$RUNNER_TEMP/write_error.txt"
