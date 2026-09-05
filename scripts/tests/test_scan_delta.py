@@ -72,6 +72,10 @@ def test_an_empty_image_report_is_red(tmp_path):
         ("no-results", {"ArtifactName": "x", "Results": []}),
         ("no-key", {"ArtifactName": "x"}),
         ("null-vulns", {"ArtifactName": "x", "Results": [{"Vulnerabilities": None}]}),
+        # `Results: null` at the TOP level, which is a different coalesce from the
+        # one above. Without it, `report.get("Results") or []` can be weakened to
+        # `report.get("Results", [])` and nothing notices.
+        ("null-results", {"ArtifactName": "x", "Results": None}),
     ):
         path = tmp_path / f"{name}.json"
         path.write_text(json.dumps(doc))
@@ -89,10 +93,18 @@ def test_both_empty_is_green(tmp_path):
 
 
 # ONE COMPONENT PER TEST, AND THAT IS THE WHOLE POINT OF SPLITTING THEM. The
-# first version of this varied Type AND PkgName together, so it was killed by the
-# Type component alone and pinned PkgName not at all — a mutant that drops
-# PkgName from the key passed all seven tests. A test that moves two variables
-# proves only that at least one of them matters.
+# first version varied Type AND PkgName together, so EITHER component alone kept
+# it red and NEITHER was pinned: measured, a mutant dropping Type and a mutant
+# dropping PkgName each passed all seven pre-split tests. The split killed two
+# surviving mutants, not one.
+#
+# An earlier revision of this comment said the Type half was pinned and only
+# PkgName was not. That was wrong, and wrong in the instructive direction: only
+# the drop-PkgName mutant had been run, and "the assertion mentions Type, so Type
+# must be pinned" was an assumption rather than a measurement. A test that moves
+# two variables proves at most that their CONJUNCTION matters — the natural
+# reading that at least one of them is individually pinned does not follow, and
+# here neither was. Mutate each component separately or claim nothing.
 
 
 def test_same_id_same_type_different_package_is_red(tmp_path):
