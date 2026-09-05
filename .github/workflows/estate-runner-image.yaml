@@ -87,6 +87,43 @@ jobs:
           format: json
           output: base-scan.json
 
+      # BUILT LOCALLY FIRST, NOT PUSHED. The first draft of this workflow pushed
+      # here and scanned afterwards — reproducing, in the very file that
+      # condemns it, the defect that made `base-images.yaml` the wrong home for
+      # this image. A gate that runs after the publish does not gate anything:
+      # it leaves `:latest` and the dated tag on the registry, unsigned, with no
+      # SBOM, and reddens the job afterwards. `load: true` puts the image in the
+      # runner's local daemon so trivy can read it without anyone else being
+      # able to.
+      - id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: containers/estate-runner
+          file: containers/estate-runner/Containerfile
+          push: false
+          load: true
+          tags: estate-runner:candidate
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+      - name: scan the candidate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: estate-runner:candidate
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "0"
+          format: json
+          output: image-scan.json
+
+      # THE GATE, AND IT RUNS BEFORE ANYTHING IS PUBLISHED. Red only when our
+      # layers add a finding the base did not carry.
+      - name: our layers must add no new CRITICAL or HIGH
+        run: python3 scripts/scan_delta.py base-scan.json image-scan.json
+
+      # ONLY NOW. The layers are already in the build cache, so this re-uses
+      # them rather than rebuilding.
       - id: push
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -99,21 +136,6 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
-      - name: scan the built image
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          scan-type: image
-          image-ref: "${{ env.REGISTRY }}/${{ github.repository_owner }}/estate-runner@${{ steps.push.outputs.digest }}"
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          exit-code: "0"
-          format: json
-          output: image-scan.json
-
-      # THE GATE. Red only when our layers add a finding the base did not carry.
-      - name: our layers must add no new CRITICAL or HIGH
-        run: python3 scripts/scan_delta.py base-scan.json image-scan.json
-
       - name: SBOM
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
@@ -125,6 +147,38 @@ jobs:
         env:
           IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/estate-runner@${{ steps.push.outputs.digest }}
         run: cosign sign --yes "$IMAGE"
+
+      # A VISIBILITY FLIP IS OTHERWISE SILENT. The runner pod carries no
+      # `imagePullSecrets` by design, so the kubelet pulls anonymously; a
+      # package that goes private is an ImagePullBackOff nobody is told about.
+      #
+      # THE `Accept` HEADER LISTS THE PLAIN OCI IMAGE MANIFEST, WHICH THE COPY OF
+      # THIS CHECK IN `base-images.yaml` OMITS. Measured against this very image
+      # while it was genuinely public: that header returns 404, and the check
+      # reports "not publicly pullable" — a false alarm indistinguishable from a
+      # real one. GHCR answers 404, not 406, for a media type the request did not
+      # accept. The other two images pass there only because buildx pushes an
+      # index, whose type IS listed.
+      - name: verify an adopter can pull this, anonymously
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          token=$(curl -sS "https://ghcr.io/token?scope=repository:${OWNER}/estate-runner:pull" \
+                  | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+                   -H "Authorization: Bearer $token" \
+                   -H 'Accept: application/vnd.oci.image.index.v1+json' \
+                   -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+                   -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
+                   -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+                   "https://ghcr.io/v2/${OWNER}/estate-runner/manifests/latest")
+          if [ "$code" != "200" ]; then
+            echo "::error::published, but an anonymous pull answered ${code}."
+            echo "::error::Set the package public at https://github.com/orgs/${OWNER}/packages/container/estate-runner/settings"
+            exit 1
+          fi
+          echo "anonymous pull: 200"
 
       - name: the digest the cluster should pin
         env:

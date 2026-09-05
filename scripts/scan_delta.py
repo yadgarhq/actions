@@ -37,15 +37,31 @@ import json
 import sys
 
 
-def ids(path: str) -> dict[str, str]:
-    """Map vulnerability id -> the package it was found in."""
+def findings(path: str) -> dict[tuple[str, str, str], str]:
+    """Map (target type, package, vulnerability id) -> a human label.
+
+    KEYED ON THE TRIPLE, NOT THE ID ALONE. One CVE id can appear against several
+    packages — in the pinned base, two of its ids do — so keying on the id alone
+    lets our layers introduce that same id in a DIFFERENT package and have it
+    read as pre-existing. Measured: appending `CVE-2026-39821` against
+    `libssl-dev` to an image report went unnoticed while the base carried it only
+    in a Go binary.
+    """
     with open(path, encoding="utf-8") as handle:
         report = json.load(handle)
-    found: dict[str, str] = {}
+    found: dict[tuple[str, str, str], str] = {}
     for result in report.get("Results") or []:
+        kind = result.get("Type", "?")
         for vuln in result.get("Vulnerabilities") or []:
-            found[vuln["VulnerabilityID"]] = vuln.get("PkgName", "?")
+            pkg = vuln.get("PkgName", "?")
+            found[(kind, pkg, vuln["VulnerabilityID"])] = f"{vuln['VulnerabilityID']}  in  {pkg} ({kind})"
     return found
+
+
+def artifact(path: str) -> str:
+    """What the report says it scanned, so a scan aimed elsewhere is visible."""
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle).get("ArtifactName", "(no ArtifactName)")
 
 
 def main() -> int:
@@ -53,18 +69,41 @@ def main() -> int:
         print("usage: scan_delta.py <base-report.json> <image-report.json>", file=sys.stderr)
         return 2
 
-    base, image = ids(sys.argv[1]), ids(sys.argv[2])
-    added = sorted(set(image) - set(base))
+    base, image = findings(sys.argv[1]), findings(sys.argv[2])
 
-    print(f"base carries {len(base)} findings; the built image carries {len(image)}.")
+    print(f"base   {artifact(sys.argv[1])}: {len(base)} finding(s)")
+    print(f"image  {artifact(sys.argv[2])}: {len(image)} finding(s)")
+
+    # THE NON-DEGENERACY FLOOR, AND IT IS THE WHOLE DIFFERENCE BETWEEN A GATE AND
+    # A DECORATION. A comparison is vacuously satisfied by an empty right-hand
+    # side: an image report with no findings makes `image - base` empty and the
+    # gate green. But an image built FROM this base cannot carry fewer findings
+    # than nothing — a drop to zero means the scan did not scan the image, not
+    # that the image is clean. Measured before this check existed: `{"Results":
+    # []}`, `{}` and `{"Results":[{"Vulnerabilities":null}]}` all reported "our
+    # layers add none" against a 39-finding base.
+    #
+    # It is deliberately NOT `base <= image`. `apt-get install` can legitimately
+    # upgrade a package the base shipped and retire one of the base's own
+    # findings, so a subset assertion would go red on an improvement.
+    if base and not image:
+        print(
+            f"\nTHE IMAGE REPORT IS EMPTY WHILE THE BASE CARRIES {len(base)}.\n"
+            "An image built from that base cannot carry none, so the scan did not\n"
+            "scan the image. Check the image-ref and that the scan step ran.",
+            file=sys.stderr,
+        )
+        return 1
+
+    added = sorted(image[k] for k in set(image) - set(base))
 
     if not added:
         print("Our layers add none. This is what the gate asserts.")
         return 0
 
     print(f"\nOUR LAYERS ADD {len(added)} FINDING(S) THE BASE DID NOT CARRY:\n", file=sys.stderr)
-    for vuln in added:
-        print(f"  {vuln}  in  {image[vuln]}", file=sys.stderr)
+    for line in added:
+        print(f"  {line}", file=sys.stderr)
     print(
         "\nEach came from an instruction in containers/estate-runner/Containerfile,"
         "\nnot from the pinned base. Fix or justify it there.",
