@@ -14,11 +14,18 @@
 # environment's secrets. A `curl | sh` toolchain install at job time inside that
 # pod is the opposite of what D61 asks for everywhere else, so the toolchain is
 # baked and pinned instead.
-FROM ghcr.io/actions/actions-runner@sha256:5036480998280bb21e32ade9fe1b02b493861ac314b62ba1aea320b94f56ec97
+FROM ghcr.io/actions/actions-runner@sha256:e5496277be5d09bc968b3d64911b74e219ac4a3f2edce956a3ecf9271bea1ef4
 
 LABEL org.opencontainers.image.source="https://github.com/yadgarhq/actions"
 LABEL org.opencontainers.image.description="Self-hosted runner for yadgarhq/estate: pinned actions-runner plus the estate's Rust toolchain."
 
+# THE DIGEST IS THE INDEX, NOT THE amd64 CHILD, and the difference is easy to
+# get wrong: reading a digest out of a locally pulled image gives you the child
+# (`sha256:5036480998280bb2…`), which silently locks the build to one
+# architecture and does not match what the tag resolves to. Measured: the tag
+# `2.337.0` resolves to this index, whose four children include linux/amd64 and
+# linux/arm64. `rust-build` pins its own base the same way.
+#
 # GitHub DEPRECATES OLD RUNNER BINARIES and refuses registration for one far
 # enough behind, so the digest above is a maintenance obligation rather than a
 # set-and-forget pin. It is actions-runner v2.337.0. The weekly rebuild this
