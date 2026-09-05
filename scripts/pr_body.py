@@ -137,6 +137,21 @@ def review(text, wrapped):
         elif not any(l.strip() for l in found[heading]):
             problems.append(f"`## {heading}` is empty (comments are not an answer)")
 
+    # A RED THAT NAMES ITS CAUSE. Five `missing section` lines describe a
+    # symptom. When a COMMIT MESSAGE carries none of the sections, the usual
+    # cause is not a body somebody wrote badly — it is a repository that does
+    # not squash-merge with the body at all, so the text this reads was never
+    # the text `ci / template` checked. Gated on `wrapped` because that is the
+    # discriminator: an unwrapped body is a pull request body, where the setting
+    # cannot be the reason.
+    if wrapped and len(problems) == len(REQUIRED):
+        problems.insert(
+            0,
+            "this commit message carries none of the template's sections, which "
+            "usually means the repository does not squash-merge with the pull "
+            "request body — check `squash_merge_commit_message`",
+        )
+
     bump, count = None, 0
     lines = found.get("Changelog", [])
     if any(l.strip() for l in lines):

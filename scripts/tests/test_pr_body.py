@@ -215,6 +215,30 @@ def test_the_gate_is_red_and_names_the_problem():
     assert "Conventional Commits" in result.stdout + result.stderr
 
 
+def test_a_commit_message_with_no_sections_at_all_names_the_likely_cause():
+    """The `yadgarhq/yadgar` shape: `squash_merge_commit_message` is not PR_BODY.
+
+    Five `missing section` lines tell that repository's maintainer nothing about
+    why. The body never became the commit message in the first place.
+    """
+    problems, _, _ = pr_body.review("ci: gateway 0.9.3", wrapped=True)
+    assert "squash_merge_commit_message" in problems[0]
+
+
+def test_the_hint_is_not_offered_when_some_sections_are_present():
+    """A body missing one section is a body problem, not a settings problem."""
+    text = body().replace("## Risk\n\nnone\n", "")
+    problems, _, _ = pr_body.review(text, wrapped=True)
+    assert not any("squash_merge_commit_message" in p for p in problems)
+
+
+def test_an_empty_pull_request_body_is_not_blamed_on_the_squash_setting():
+    """Unwrapped means a pull request body, where the setting is not the cause."""
+    problems, _, _ = pr_body.review("", wrapped=False)
+    assert problems
+    assert not any("squash_merge_commit_message" in p for p in problems)
+
+
 def test_the_gate_refuses_an_empty_body_rather_than_passing_it():
     """The degenerate input. An absent body proves nothing and must not pass."""
     result = run("")
