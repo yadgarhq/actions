@@ -136,6 +136,30 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
+      # GUARD AT THE PRODUCER, NOT AT EACH CONSUMER. `steps.push.outputs.digest`
+      # feeds three of them below — the SBOM, the cosign signature and the step
+      # summary the operator copies into `estate-front-runner.yaml`. The first
+      # two build a reference ending in `@` and die on the malformed ref, by luck
+      # rather than design. The SUMMARY fails silently: it prints an image line
+      # with no digest and exits 0, so the operator pins nothing. This estate has
+      # already paid for that lesson once, in `ci-release.yaml`, where an empty
+      # digest published a chart with no tag at all.
+      #
+      # THE RIGHT-HAND SIDE OF `=~` STAYS UNQUOTED. Quoting turns the pattern
+      # into a literal string, so the guard would reject every valid digest — a
+      # red build on every release. A test that feeds only malformed input passes
+      # either way, so the valid case has to be a real 64-character hex digest.
+      - name: the digest must be a digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::the push step produced no usable digest: '${DIGEST}'"
+            exit 1
+          fi
+          echo "digest: $DIGEST"
+
       - name: SBOM
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
@@ -164,8 +188,18 @@ jobs:
           OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
+          # `.get`, NOT `["token"]`, AND THAT IS THE CASE THIS CHECK EXISTS FOR.
+          # GHCR answers the token endpoint with 403 and
+          # {"errors":[{"code":"DENIED",...}]} — no `token` key — for a package an
+          # anonymous client cannot reach. Subscripting dies with KeyError under
+          # `set -euo pipefail`, so the step would red with a Python traceback and
+          # never print the instruction below, in exactly the private-package case
+          # it was written for. `000` is the sentinel for "GHCR refused to issue
+          # an anonymous token at all", which is itself the answer.
           token=$(curl -sS "https://ghcr.io/token?scope=repository:${OWNER}/estate-runner:pull" \
-                  | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
+                  | python3 -c 'import sys,json; print(json.load(sys.stdin).get("token",""))' || true)
+          code=000
+          if [ -n "$token" ]; then
           code=$(curl -sS -o /dev/null -w '%{http_code}' \
                    -H "Authorization: Bearer $token" \
                    -H 'Accept: application/vnd.oci.image.index.v1+json' \
@@ -173,8 +207,13 @@ jobs:
                    -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
                    -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
                    "https://ghcr.io/v2/${OWNER}/estate-runner/manifests/latest")
+          fi
           if [ "$code" != "200" ]; then
-            echo "::error::published, but an anonymous pull answered ${code}."
+            if [ "$code" = "000" ]; then
+              echo "::error::GHCR refused to issue an anonymous pull token, which means the package is PRIVATE."
+            else
+              echo "::error::published, but an anonymous pull answered ${code}."
+            fi
             echo "::error::Set the package public at https://github.com/orgs/${OWNER}/packages/container/estate-runner/settings"
             exit 1
           fi
