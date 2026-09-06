@@ -385,3 +385,26 @@ def test_a_templated_file_holding_a_certificate_is_refused(tmp_path):
     assert result.returncode == 1
     assert "chart/templates/cert.yaml" in result.stdout
     assert "never read" in result.stdout
+
+
+def test_a_trailing_comment_does_not_hide_a_templated_certificate(tmp_path):
+    """`kind: Certificate  # serving` is legal YAML and must not be invisible.
+
+    Anchoring the grep on `$` alone let a templated leaf carrying BOTH
+    directions pass with exit 0 — this file's own defect one level down, for
+    the third time. A comment after the value changes nothing about the
+    document, so it must change nothing about the verdict.
+    """
+    write(tmp_path, "infra/certificates.yaml", SERVING_WITH_COMMENT_GAP, EDGE)
+    write(tmp_path, "infra/client.yaml", CLIENT, AUTHORITY)
+    write(
+        tmp_path,
+        "chart/templates/cert.yaml",
+        "apiVersion: cert-manager.io/v1\n"
+        "kind: Certificate  # serving leaf for {{ .Release.Name }}\n"
+        "spec:\n  usages:\n    - server auth\n    - client auth\n",
+    )
+    result = run(tmp_path)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "chart/templates/cert.yaml" in result.stdout
+    assert "never read" in result.stdout

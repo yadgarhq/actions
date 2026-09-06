@@ -141,7 +141,15 @@ TEMPLATE = re.compile(r"\{\{")
 # Enough to tell a templated file that holds a Certificate from one that does
 # not. A grep rather than a parse, because a parse is exactly what is impossible
 # here — and the only verdict it feeds is "this gate must be widened".
-CERTIFICATE_KIND = re.compile(r"^\s*kind:\s*[\"']?Certificate[\"']?\s*$", re.MULTILINE)
+#
+# THE TRAILING COMMENT IS PART OF THE PATTERN, not decoration. Anchoring this on
+# `$` alone made `kind: Certificate  # serving` invisible, so a templated leaf
+# carrying both directions passed with exit 0 — this file's own defect for the
+# third time, one level further down each time. A `#` after the value is legal
+# YAML and changes nothing about the document.
+CERTIFICATE_KIND = re.compile(
+    r"^\s*kind:\s*[\"']?Certificate[\"']?\s*(?:#.*)?$", re.MULTILINE
+)
 
 DOCUMENT_BREAK = re.compile(r"^---\s*$")
 TOP_LEVEL_KEY = re.compile(r"^(?P<key>[A-Za-z_][\w.-]*):\s*(?P<value>.*)$")
