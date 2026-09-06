@@ -1319,6 +1319,30 @@ jobs:
   # regardless of which stages ran. Without it a repository with no Cargo.toml
   # would have a required check that never reports and pull requests that block
   # forever.
+  #
+  # WHAT IT ASSERTS IS NOT "NOTHING FAILED". This job used to read every upstream
+  # result through one shell loop that accepted `success|skipped`, and the
+  # `skipped` arm was unconditional. GitHub reports `skipped` for two situations
+  # that mean opposite things — a job whose own `if:` was false had NOTHING TO DO,
+  # a job whose `needs` did not run DID NOT RUN — and a result cannot tell them
+  # apart. So any condition that skipped a job turned the one required check in
+  # the estate green having checked less. Ledger 701.
+  #
+  # THE CONDITIONS ARE THE ANSWER, and `scripts/ci_verdict.py` reads them out of
+  # this file rather than restating them: a job whose `if:` is true must report
+  # `success`, a job whose `if:` is false must report `skipped`, and both halves
+  # are asserted. Editing a job's condition edits this gate's expectation in the
+  # same keystroke, and adding a job to `needs:` below puts it under the gate with
+  # no second edit to forget. The gate REFUSES rather than guesses at a condition
+  # it cannot read — including any condition that reads another job's `.result`,
+  # which is a consequence rather than a reason. Its docstring carries the
+  # reasoning, and `scripts/tests/test_ci_verdict.py` carries the matrix.
+  #
+  # THE STEP THAT USED TO BE HERE FOR `detect` IS GONE, subsumed rather than
+  # dropped. It required `success` on a pull request and `skipped` on a push,
+  # which is exactly what the general rule derives from `detect`'s own
+  # `github.event_name != 'push'`. `test_the_old_first_step_is_preserved_by_the_
+  # general_rule` pins that it still catches the matrix it was written for.
   passed:
     if: always()
     needs:
@@ -1334,67 +1358,80 @@ jobs:
       ]
     runs-on: ubuntu-latest
     steps:
-      # DETECT IS CHECKED HERE AND NOT BELOW, because the step below reads
-      # `skipped` as success and a skipped detect is the one skip that is never
-      # benign. Every gating job either needs detect or reads its outputs, so a
-      # detect that fails or is cancelled leaves precommit, test and proto all
-      # reporting `skipped` — the result GitHub gives a job whose dependency did
-      # not succeed — and the loop below waves all three through. That is a pull
-      # request merging with no hooks, no tests and no proto check having run at
-      # all, and detect was not in `needs` for any of it to be noticed.
-      #
-      # THE REQUIRED RESULT DEPENDS ON THE EVENT, and it has to. detect carries
-      # `if: github.event_name != 'push'`, so on push to main it is MEANT not to
-      # run; demanding success there would turn the post-merge run red in every
-      # repository at once. Callers trigger on `pull_request` and `push` and
-      # nothing else, so these two branches are the whole set rather than a case
-      # and a default.
-      - name: detect reached a conclusion of its own
+      # THE CHECKOUTS ARE THE `portability` AND `template` JOBS', deliberately
+      # unchanged from them. `ci-pr.yaml` is a reusable workflow, so nothing from
+      # `yadgarhq/actions` is on a consumer's runner and the gate takes a second
+      # checkout to get there. `@main` because that is what every consumer pins
+      # the workflow at, so the gate, its tests and the workflow whose conditions
+      # it reads all move together — and reading the conditions from the same
+      # checkout as the script is what makes them the ones that actually ran.
+      - if: github.repository == 'yadgarhq/actions'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+      - if: github.repository != 'yadgarhq/actions'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: yadgarhq/actions
+          ref: main
+          path: .ci-actions
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x"
+      # The conditions are PARSED rather than grepped, so an `if:` inside a
+      # comment or a folded block cannot be mistaken for one. PyYAML is not in
+      # the standard library and is not guaranteed on the runner; pinned to the
+      # 6.0.3 the `portability` job and the `pytest-scripts` hook already use.
+      - name: install PyYAML
+        run: pip install --disable-pip-version-check "pyyaml==6.0.3"
+
+      - name: every job did what its condition asked of it
         env:
-          # Through the environment rather than interpolated into the script,
-          # for the reason the template job gives at length.
+          # Through the environment, never `${{ }}` inside the script — the habit
+          # zizmor audits for, and `user.type` below comes from an event payload.
+          #
+          # `toJSON(needs)` IS ONE INPUT RATHER THAN EIGHT INTERPOLATIONS. It
+          # carries every gated job's result AND `detect`'s outputs, JSON-encoded
+          # by GitHub, so adding a job to `needs:` above feeds it with no second
+          # edit here either.
+          NEEDS: ${{ toJSON(needs) }}
           EVENT: ${{ github.event_name }}
-          RESULT: ${{ needs.detect.result }}
+          AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [ "$EVENT" = push ]; then required=skipped; else required=success; fi
-          if [ "$RESULT" != "$required" ]; then
-            echo "::error::detect reported '$RESULT' on a '$EVENT' event, and '$required' is required. Every other stage keys off its outputs, so this run proved nothing about the change."
+          # THE REPOSITORY NAME DECIDES, never the presence of the file, so that
+          # no repository under review can supply its own merge gate. This
+          # repository reads its OWN checkout, which is what `ci-self.yaml`
+          # exists for: a change to a shared workflow must be gated by the
+          # version in the pull request rather than the copy already on `main`.
+          if [ "$REPO" = "yadgarhq/actions" ]; then dir=.; else dir=.ci-actions; fi
+          if [ ! -f "$dir/scripts/ci_verdict.py" ]; then
+            echo "::error::the merge gate is missing at $dir/scripts/ci_verdict.py"
             exit 1
           fi
-          echo "detect: $RESULT on $EVENT, as required."
-
-      # AND EVERY OTHER STAGE, where `skipped` is a real answer now that the one
-      # illegitimate skip is caught above. What remains, named rather than
-      # assumed, because this step's message asserted a distinction it could not
-      # make:
-      #
-      #   workflows, vulnerabilities, portability  skip on push and nowhere else.
-      #   template                                 skips on push, and for a bot,
-      #                                            which is the exemption it
-      #                                            documents at length.
-      #   test                                     skips when rust is false, which
-      #                                            takes deleting Cargo.toml — and
-      #                                            the cargo hooks match `.rs` and
-      #                                            `.toml` files rather than that
-      #                                            file, so they run anyway and
-      #                                            fail precommit instead.
-      #   proto                                    skips when proto is false, which
-      #                                            detect now refuses to report
-      #                                            while `proto/` is still there.
-      - name: no upstream job failed
-        run: |
-          set -euo pipefail
-          for r in "${{ needs.precommit.result }}" \
-                   "${{ needs.workflows.result }}" \
-                   "${{ needs.vulnerabilities.result }}" \
-                   "${{ needs.template.result }}" \
-                   "${{ needs.test.result }}" \
-                   "${{ needs.proto.result }}" \
-                   "${{ needs.portability.result }}"; do
-            case "$r" in
-              success|skipped) ;;
-              *) echo "upstream job result: $r"; exit 1 ;;
-            esac
-          done
-          echo "All stages passed or were legitimately skipped."
+          export WORKFLOW="$dir/.github/workflows/ci-pr.yaml"
+          if [ ! -f "$WORKFLOW" ]; then
+            echo "::error::the gate cannot read the conditions at $WORKFLOW"
+            exit 1
+          fi
+          # THE SUMMARY IS WRITTEN ON THE FAILING PATH TOO, which is the only
+          # path anybody reads it on. A pipe into `tee` would have carried the
+          # gate's exit status out through `pipefail` and never reached the
+          # summary, leaving the one required check in the estate reporting red
+          # with its reasoning in a log nobody opens.
+          rc=0
+          python3 "$dir/scripts/ci_verdict.py" \
+            >"$RUNNER_TEMP/verdict.txt" 2>"$RUNNER_TEMP/verdict.err" || rc=$?
+          cat "$RUNNER_TEMP/verdict.txt"
+          cat "$RUNNER_TEMP/verdict.err" >&2
+          {
+            echo "## Every job did what its condition asked of it"
+            echo ""
+            echo '```'
+            cat "$RUNNER_TEMP/verdict.txt" "$RUNNER_TEMP/verdict.err"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
