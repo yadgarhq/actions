@@ -763,6 +763,120 @@ jobs:
           D80_REPO: ${{ github.repository }}
         run: python3 "$RUNNER_TEMP/d80_portability.py"
 
+  # A CHART CHANGE ARGO CD CANNOT APPLY TO A LIVE Service IS NAMED BEFORE THE
+  # MERGE (ledger 735). `scripts/service_immutable.py` carries the whole
+  # argument; what belongs here is why this is a JOB rather than a hook, and what
+  # its checkout has to provide that no other job's does.
+  #
+  # SEPARATE FROM `portability` DESPITE THE IDENTICAL TOOLING, and the checkout is
+  # the reason. This gate compares the chart at HEAD against the chart at the
+  # pull request's BASE, so it needs `fetch-depth: 0`; `portability` reads only
+  # the working tree and deliberately does not. Folding them together would give
+  # every D80 run a full-history fetch to serve one of them.
+  #
+  # MERGING THIS JOB REDDENS IN-FLIGHT CONSUMER RUNS ONCE, and that is the merge
+  # window `ci_verdict.py` already documents rather than a new defect. A run
+  # dispatched before this merge built its `toJSON(needs)` from the OLD
+  # `passed.needs`, while its `passed` step re-checks out `@main` minutes later
+  # and reads a `passed.needs` that now lists this job. `ci_verdict.py` refuses
+  # BOTH directions of that disagreement on purpose — "no result was reported
+  # for 'service_immutable'" — so any consumer pull request open across the
+  # merge needs one re-run. It is a one-time cost of adding a gated job, it
+  # fails loudly rather than passing quietly, and a re-run clears it.
+  #
+  # WHY NOT A PRE-COMMIT HOOK. It needs PyYAML, which a published
+  # `language: script` hook cannot install — every hook in
+  # `.pre-commit-hooks.yaml` is stdlib-only for that reason. And it needs a BASE
+  # REF, which exists on a pull request and does not exist for somebody
+  # committing on a branch with no pull request yet. A hook would have to guess
+  # the base or skip, and a gate that skips is the failure this repository has
+  # already recorded several times.
+  service_immutable:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+          # THE GATE REFUSES WITHOUT THIS rather than skipping, and names it in
+          # the refusal. At the default depth `origin/$GITHUB_BASE_REF` is not in
+          # the checkout, so there is no earlier chart to render and the run
+          # would hold one side of a comparison while reporting agreement.
+          fetch-depth: 0
+      # The same two pins the `precommit` and `portability` jobs use — the
+      # action's SHA and the helm version — rather than a third pair to keep in
+      # step with them. The reasoning for v3.18.4 is above the precommit copy:
+      # it is the helm Argo CD v3.1.8 renders with, and a gate that exists to
+      # catch what Argo would reject must render the chart the way Argo does.
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.18.4
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x"
+      # Rendered manifests are parsed rather than grepped, for the reason the
+      # `portability` job states. Pinned to the 6.0.3 that job and the
+      # `pytest-scripts` hook already use.
+      - name: install PyYAML
+        run: pip install --disable-pip-version-check "pyyaml==6.0.3"
+
+      # THE SECOND CHECKOUT AND `@main`: same mechanism and same reasoning as the
+      # `portability` job above — `ci-pr.yaml` is a reusable workflow, so nothing
+      # from `yadgarhq/actions` is on a consumer's runner.
+      - if: github.repository != 'yadgarhq/actions'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: yadgarhq/actions
+          ref: main
+          path: .ci-actions
+
+      - name: stage the gate, then restore the tree
+        env:
+          # Through the environment, never `${{ }}` inside the script.
+          UNDER_REVIEW: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # THE REPOSITORY NAME DECIDES, never the presence of the file, so that
+          # no repository under review can supply its own gate. This repository
+          # reads its OWN checkout, which is what `ci-self.yaml` exists for.
+          if [ "$UNDER_REVIEW" = "yadgarhq/actions" ]; then
+            src=scripts/service_immutable.py
+          else
+            src=.ci-actions/scripts/service_immutable.py
+          fi
+          if [ ! -f "$src" ]; then
+            echo "::error::the Service immutability gate is missing at $src"
+            exit 1
+          fi
+          cp "$src" "$RUNNER_TEMP/service_immutable.py"
+          # DELETED BEFORE THE GATE RUNS. The gate renders `chart/` and reads
+          # this repository's own history for the base ref; a second repository
+          # sitting inside the workspace belongs in neither.
+          rm -rf .ci-actions
+          echo "Service gate staged from \`$src\`." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: no chart change may move a Service field the apiserver refuses
+        run: |
+          set -euo pipefail
+          # THE SUMMARY IS WRITTEN ON THE FAILING PATH TOO, which is the only
+          # path anybody reads it on — the same reasoning `passed` records for
+          # not piping the gate's output through `tee`. This gate's whole value
+          # is the procedure in its refusal, so that text has to reach the place
+          # a reviewer looks.
+          rc=0
+          python3 "$RUNNER_TEMP/service_immutable.py" >"$RUNNER_TEMP/svc.txt" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/svc.txt"
+          {
+            echo "## Service fields the apiserver refuses to update"
+            echo ""
+            echo '```'
+            cat "$RUNNER_TEMP/svc.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
   # PHASE 3 OF VERSIONING: derive the next version AND cut the tag for it.
   #
   # The squash-merge decision already did the hard half — the pull request body
@@ -1186,6 +1300,7 @@ jobs:
         test,
         proto,
         portability,
+        service_immutable,
       ]
     runs-on: ubuntu-latest
     steps:
