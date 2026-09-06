@@ -356,6 +356,20 @@ def judge(path, name, is_ca, usages):
 
 
 def main() -> int:
+    """Report EVERY finding, then decide once.
+
+    This used to `return 1` from each condition as it was reached, and print
+    `problems` only after all four had passed. So a leaf naming both directions
+    was FOUND, counted and then never mentioned whenever anything else failed
+    first — a templated Certificate, either floor, one unreadable file. The exit
+    code was right and the message was not: an operator fixed what they were
+    shown and hit a second refusal they had never been told about.
+
+    Every arm now appends to one list and the single return reads it. The
+    unreadable-file arm is the one that still stops the scan, because a shape
+    this cannot parse means the counts below it are not trustworthy — but it
+    reports what was already gathered before it does.
+    """
     root = pathlib.Path(".")
     total = 0
     leaves = 0
@@ -363,12 +377,13 @@ def main() -> int:
 
     readable, templated = yaml_files(root)
 
+    fatal = None
     for path in readable:
         try:
             found = list(certificates(path))
         except Unreadable as error:
-            print(f"::error::{error}")
-            return 1
+            fatal = str(error)
+            break
         for name, is_ca, usages in found:
             total += 1
             if not is_ca:
@@ -381,42 +396,48 @@ def main() -> int:
         f"skipped {len(templated)} templated file(s) this scan cannot read."
     )
 
-    unreadable = [path for path, holds_one in templated if holds_one]
-    if unreadable:
-        for path in unreadable:
-            print(
-                f"::error::{path} is templated — it carries `{{{{ ... }}}}` — and "
+    for path, holds_one in templated:
+        if holds_one:
+            problems.append(
+                f"{path} is templated — it carries `{{{{ ... }}}}` — and "
                 "declares a `kind: Certificate` this gate therefore never read. A "
                 "verdict over the certificates it COULD read would be a pass that "
                 "inspected less than it reported, and the floors below cannot catch "
                 "it: dropping one leaf from ten still clears them. Widen this gate "
                 "to render the template, or declare the leaf where it can be read."
             )
-        return 1
 
-    if total < MINIMUM_CERTIFICATES:
-        print(
-            f"::error::found {total} `kind: Certificate` document(s), and "
+    if fatal is None and total < MINIMUM_CERTIFICATES:
+        problems.append(
+            f"found {total} `kind: Certificate` document(s), and "
             f"{MINIMUM_CERTIFICATES} is the fewest this can inspect. A gate with "
             "nothing to check reports success, which is the failure this file was "
             "written to stop. If this repository genuinely stopped declaring "
             "certificates, remove the hook id from `.pre-commit-config.yaml` rather "
             "than leaving it green and blind."
         )
-        return 1
 
-    if leaves < MINIMUM_LEAVES:
-        print(
-            f"::error::found {total} Certificate(s) but only {leaves} leaf/leaves the "
+    if fatal is None and leaves < MINIMUM_LEAVES:
+        problems.append(
+            f"found {total} Certificate(s) but only {leaves} leaf/leaves the "
             f"wall judges, and {MINIMUM_LEAVES} is the fewest this can inspect. Every "
             "certificate here is exempt as an authority, so nothing was checked. This "
             "is the shape the issuer allowlist this gate replaced could reach by a "
             "rename; it must fail rather than pass."
         )
-        return 1
 
     for problem in problems:
         print(f"::error::{problem}")
+
+    if fatal is not None:
+        print(f"::error::{fatal}")
+        print(
+            "::error::the scan stopped at the file above, so the counts printed "
+            "here cover only what was read before it. The floors are NOT reported: "
+            "a partial count cannot be measured against them."
+        )
+        return 1
+
     return 1 if problems else 0
 
 
