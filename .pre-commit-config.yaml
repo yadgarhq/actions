@@ -89,13 +89,33 @@ repos:
       # provisions its own venv and needs no binary already on the machine or
       # CI runner. That is the failure class the actionlint hook above exists
       # to catch for a compiled binary; a self-provisioned interpreter hook
-      # cannot have it. Kept as a second, independent guard alongside the
-      # standalone `pytest` job in `ci-self.yaml` — see that job's comment for
-      # why neither replaces the other.
+      # cannot have it. This is the mechanism that actually gates — see the
+      # `pytest` job's comment in `ci-self.yaml` for why that job is visibility
+      # only and this hook is the enforcement.
+      #
+      # `always_run: true`, and `files:` is kept only as documentation of what
+      # this hook is about. `pass_filenames: false` does NOT exempt a hook from
+      # `files:` filtering — measured against pre-commit 4.5.1: without
+      # `always_run`, `pre-commit run --files other.txt` against this exact
+      # block reports `pytest scripts/tests......(no files to check)Skipped`,
+      # exit 0. `pre-commit/action`'s `--all-files` default masks that in CI
+      # today because `scripts/` is populated, but a pull request that moves
+      # `pr_body.py`/`scan_delta.py` to, say, `tools/` would make `^scripts/`
+      # match nothing — Skipped-green, `precommit` green, `ci / passed` green,
+      # and with `required_approving_review_count: 0` that merges past a
+      # visible red `pytest` job with no human required to look at it. The
+      # change most likely to break this guard is the one most likely to
+      # silently disarm it, so this hook does not get to skip.
+      #
+      # PYTEST VERSION KEPT IN STEP WITH `ci-self.yaml`'S `pytest` JOB, the way
+      # the actionlint and prettier entries above stay in step with their own
+      # published/CI twins: if the two ever disagree, that is a drift to fix,
+      # not a discrepancy to explain away.
       - id: pytest-scripts
         name: pytest scripts/tests
         language: python
         additional_dependencies: ["pytest==9.1.1"]
         entry: pytest scripts/tests/ -q
         pass_filenames: false
+        always_run: true
         files: ^scripts/
