@@ -116,8 +116,11 @@ jobs:
       # scripts/tests/ imports nothing beyond the standard library and pytest
       # itself, but it RUNS the gates as subprocesses and `helm_pin_agrees.py`
       # parses YAML, so PyYAML has to be in the interpreter the suite spawns.
-      # (`d80_portability.py` parses YAML as well but has no test, so it is not
-      # a reason for this pin yet.) Both pins are kept in step with the
+      # `d80_portability.py` parses YAML too, and since ledger 731 it has a
+      # suite, so it is a second reason for this pin rather than a future one.
+      # That suite also puts a stub `helm` on PATH, written in this same
+      # interpreter — see its module docstring for why a stub and not the
+      # binary. Both pins are kept in step with the
       # `pytest-scripts` hook's own in `.pre-commit-config.yaml` — if the two
       # ever disagree, that is a drift to fix, not a discrepancy to explain
       # away.
