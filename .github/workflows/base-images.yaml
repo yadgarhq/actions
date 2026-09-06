@@ -253,10 +253,27 @@ jobs:
           set -euo pipefail
           docker buildx imagetools create -t "${REF}:latest" "${REF}@${PUSHED}"
 
-          promoted=$(docker buildx imagetools inspect "${REF}:latest" --format '{{.Manifest.Digest}}')
-          if [ "$promoted" != "$PUSHED" ]; then
-            echo "::error::the latest tag resolves to ${promoted}, not the signed ${PUSHED}."
-            echo "::error::The tag has MOVED and the signature does not cover what it points at."
+          # COMPARED AS RAW BYTES, BY THE SAME COMMAND ON BOTH SIDES, which is
+          # what makes this checkable at all. A manifest digest is a content
+          # address over these exact bytes, so byte equality IS digest
+          # equality — and reading both sides with one flag of one binary
+          # means any quirk of that reader cancels out instead of being a
+          # third thing to trust. Asking for the digest through a `--format`
+          # template would put an unverified field name on the failure path,
+          # where a typo and a real mismatch look identical.
+          if ! signed_raw=$(docker buildx imagetools inspect --raw "${REF}@${PUSHED}"); then
+            echo "::error::could not read back the signed manifest at ${PUSHED}."
+            echo "::error::That is a registry or credential fault. The tag has already been promoted; whether the signature covers it is UNKNOWN, not disproved."
+            exit 1
+          fi
+          if ! promoted_raw=$(docker buildx imagetools inspect --raw "${REF}:latest"); then
+            echo "::error::could not read back the latest tag just promoted."
+            echo "::error::That is a registry or credential fault. The tag has already been promoted; whether the signature covers it is UNKNOWN, not disproved."
+            exit 1
+          fi
+          if [ "$promoted_raw" != "$signed_raw" ]; then
+            echo "::error::the latest tag does not resolve to the bytes that were signed."
+            echo "::error::imagetools re-serialised the manifest rather than copying it, so the tag has MOVED to a digest cosign did not sign."
             exit 1
           fi
           echo "latest -> ${PUSHED}"
