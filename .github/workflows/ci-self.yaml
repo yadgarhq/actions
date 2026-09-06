@@ -56,6 +56,72 @@ permissions:
 # serves every repository. Renaming this job breaks the merge gate rather than
 # reporting anything.
 jobs:
+  # LEDGER 686. `scripts/tests/` exercises `pr_body.py` and `scan_delta.py`, and
+  # nothing ran it anywhere before this job: `grep` across `.github/`,
+  # `.pre-commit-config.yaml` and `hooks/` for pytest/unittest/scripts/tests
+  # returned zero hits. That was tolerable while `scan_delta.py` was the only
+  # subject. PR #49 made `pr_body.py` the shared contract behind the `version`
+  # job's post-merge assertion above, which runs on push to `main` in
+  # seventeen consumer repositories plus this one, because the seventeen pin
+  # the shared workflows at `@main` — this repository does not; the header
+  # above already says it tests `ci-pr.yaml` by local path instead. A
+  # regression here reds the estate, and it was guarded by a suite nobody made
+  # run.
+  #
+  # HERE, NOT `ci-pr.yaml`. `scripts/tests/` belongs to this repository's own
+  # meta-tooling — `pr_body.py` and `scan_delta.py` are gates THIS repository
+  # ships, not a capability a consumer opts into the way `actionlint` is
+  # published for one. No consumer has a `scripts/tests/` directory and none
+  # ever will, unlike `rust`/`proto` in `ci-pr.yaml`'s `detect` job, which are
+  # genuine per-repo capabilities. Putting this in the shared workflow would add
+  # a step every one of the seventeen consumers pays for on every pull request,
+  # for a check only this repository can ever exercise.
+  #
+  # VISIBILITY, NOT ENFORCEMENT — said plainly rather than implied as a second
+  # gate. `scripts/tests/` also runs inside `precommit` (`ci-pr.yaml`) through
+  # an `always_run: true`, `language: python` hook in this repository's own
+  # `.pre-commit-config.yaml` — self-provisioned, so it adds no step to that
+  # shared job either — and `precommit` already feeds the required
+  # `ci / passed` context. THAT hook is what stops a merge; THIS job only
+  # catches the regression and shows it as a plainly-named `pytest` check,
+  # independent of `.pre-commit-config.yaml` staying correctly wired —
+  # refactor the hook, change its `files:` pattern, or break venv
+  # provisioning, and this job still runs and still reports. It is
+  # deliberately NOT wired via `needs:` into the `ci` job below, for two
+  # reasons: a red suite would skip `zizmor`, `trivy`, `gitleaks`, `template`
+  # and `portability` entirely, inverting the cheapest repository-local check
+  # ahead of the security scans; and with `ci` skipped, `ci-pr.yaml`'s
+  # `passed` job never runs either, so `ci / passed` would never report at
+  # all — with `bypass_actors: []` on the ruleset, that leaves the pull
+  # request blocked on a check stuck PENDING forever rather than one that
+  # failed and can be read.
+  #
+  # IT DOES NOT GATE `ci / passed` ITSELF, and cannot: this is a plain job in
+  # this file, not a job inside the reusable `ci-pr.yaml`, so GitHub cannot
+  # compose it into the `<caller>/<callee>` context name that comes from a
+  # reusable workflow's own jobs. The ruleset on `main` requires only that one
+  # context (`repos/yadgarhq/actions/rulesets`, checked 2026-09-06) — this job
+  # reports under its own name, `pytest`, and gating already happens through the
+  # hook above.
+  pytest:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x"
+      # scripts/tests/ imports nothing beyond the standard library and pytest
+      # itself. Pinned to the version this suite is verified against, and kept
+      # in step with the `pytest-scripts` hook's own pin in
+      # `.pre-commit-config.yaml` — if the two ever disagree, that is a drift
+      # to fix, not a discrepancy to explain away.
+      - name: install pytest
+        run: pip install --disable-pip-version-check "pytest==9.1.1"
+      - run: python3 -m pytest scripts/tests/ -q
+
   ci:
     if: github.event_name == 'pull_request'
     uses: ./.github/workflows/ci-pr.yaml
