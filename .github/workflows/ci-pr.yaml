@@ -574,6 +574,8 @@ jobs:
             | select(.kind | index("test"))
             | "\(.name)\t\(.src_path)"')
 
+          echo "test targets read from cargo metadata: ${#rows[@]}"
+
           wanted=()
           partial=()
           for row in ${rows[@]+"${rows[@]}"}; do
@@ -602,10 +604,26 @@ jobs:
             exit 0
           fi
 
-          image=$(docker images --no-trunc --format '{{.Repository}}@{{.Digest}}' \
-            | grep -E '(^|/)mariadb@sha256:[0-9a-f]{64}$' | head -n1)
+          # `|| true` ON BOTH READS, and it is load-bearing rather than tidy.
+          # Under `set -e` with `pipefail` a `grep` that matches nothing kills
+          # the step outright, so the refusal below never printed and the log
+          # said only "Process completed with exit code 1" — the silent failure
+          # the refusal exists to replace. Measured on the first run of this
+          # step (store#21, run 34032503728).
+          #
+          # THE RUNNING SERVICE CONTAINER IS ASKED FIRST, because it carries the
+          # exact reference the `services:` block named. The image list is the
+          # fallback for the same fact seen from the other side.
+          image=$(docker ps --no-trunc --format '{{.Image}}' \
+            | grep -E '(^|/)mariadb@sha256:[0-9a-f]{64}$' | head -n1 || true)
           if [ -z "$image" ]; then
-            echo "::error::the mariadb image the services: block pinned is not on this runner, so there is no pinned engine to start. This step must never fall back to a tag (D61)."
+            image=$(docker images --no-trunc --format '{{.Repository}}@{{.Digest}}' \
+              | grep -E '(^|/)mariadb@sha256:[0-9a-f]{64}$' | head -n1 || true)
+          fi
+          if [ -z "$image" ]; then
+            echo "::error::the mariadb image the services: block pinned could not be read back from this runner, so there is no pinned engine to start. This step must never fall back to a tag (D61). What was there:"
+            docker ps --no-trunc --format '{{.Names}} {{.Image}}' || true
+            docker images --no-trunc --format '{{.Repository}} {{.Tag}} {{.Digest}}' || true
             exit 1
           fi
           echo "using $image"
@@ -687,7 +705,10 @@ jobs:
             #
             # A count rather than a number: asserting `3 passed` would redden a
             # fourth arm somebody adds on purpose.
-            line=$(grep -E '^test result:' "$out" | tail -n1)
+            # `|| true` for the same reason as the image read above: a `grep`
+            # that matches nothing would kill the step under `set -e` before
+            # the refusal below could name what was missing.
+            line=$(grep -E '^test result:' "$out" | tail -n1 || true)
             passed=$(printf '%s' "$line" | sed -n 's/^test result: [^.]*\. \([0-9]*\) passed.*/\1/p')
             ignored=$(printf '%s' "$line" | sed -n 's/.*; \([0-9]*\) ignored.*/\1/p')
             if [ -z "${passed:-}" ] || [ -z "${ignored:-}" ]; then
