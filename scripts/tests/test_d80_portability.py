@@ -352,7 +352,7 @@ def test_a_group_the_table_has_never_heard_of_is_treated_as_a_product(tmp_path):
         tmp_path,
         {
             "chart/values.yaml": "_render:\n"
-            "  - apiVersion: invented.example.com/v1\n"
+            "  - apiVersion: widgets.unlisted.invalid/v1\n"
             "    kind: Widget\n"
             "    metadata:\n"
             "      name: thing\n"
@@ -360,7 +360,11 @@ def test_a_group_the_table_has_never_heard_of_is_treated_as_a_product(tmp_path):
     )
     result = run(root)
     assert result.returncode == 1, result.stdout
-    assert "invented.example.com" in result.stdout
+    assert "Widget/thing" in result.stdout
+    # THE FAIL-SAFE ITSELF, asserted rather than the group name: an unknown
+    # group must be reported UNCLASSIFIED and treated as a product. A gate that
+    # merely mentioned the group could still have waved it through.
+    assert "UNCLASSIFIED" in result.stdout
 
 
 def test_a_chart_that_does_not_render_at_all_is_refused(tmp_path):
