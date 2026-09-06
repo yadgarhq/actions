@@ -5,24 +5,72 @@ FROM docker.io/library/rust:1.98-bookworm@sha256:82150a52ec202c1b14d7817e14516c3
 LABEL org.opencontainers.image.source="https://github.com/yadgarhq/actions"
 LABEL org.opencontainers.image.description="Build base for Rust modules: pinned toolchain, musl target, cargo-chef, protoc."
 
-# libssh2-1 IS ALREADY IN THE BASE AND IS LISTED HERE ANYWAY, which is the point.
-# The base ships 1.10.0-3+b1, which carries CVE-2026-7598 and CVE-2026-58050 —
-# both fixed in Debian's 1.10.0-3+deb12u1. Naming the package on an apt line that
-# has already run `apt-get update` upgrades it to the security version; measured,
-# 1.10.0-3+b1 -> 1.10.0-3+deb12u1.
+# THE SECURITY SUITE IS TAKEN WHOLESALE, WHICH IS WHY NO PACKAGE IS NAMED HERE
+# FOR ITS CVEs. `apt-get upgrade` below takes every update Debian has published
+# for the packages this pinned base already carries, so a hand-curated list of
+# those packages is a manually maintained SUBSET of what apt already does — and
+# it has to be curated again every time Debian publishes.
 #
-# A REBUILD ALONE DOES NOT FIX THIS, and that is why the package is named rather
-# than left to the base. The `FROM` above is digest-pinned, so every rebuild
-# resolves the identical bytes, and upstream has not republished the tag — the
-# `rust:1.98-bookworm` tag still resolves to exactly the digest pinned above
-# (measured 2026-09-05). Bumping the pin would gain nothing today.
+# libssh2-1 WAS THAT LIST, and it was one package long. The base ships
+# 1.10.0-3+b1, carrying CVE-2026-7598 and CVE-2026-58050, both fixed in Debian's
+# 1.10.0-3+deb12u1; naming it on an apt line that had already run `apt-get
+# update` took the security version. Measured 2026-09-06 in the pinned base:
+# `apt-get -s upgrade` proposes eight packages and libssh2-1 is one of them, so
+# the wholesale upgrade reaches it without the name. Built both ways, libssh2-1
+# is 1.10.0-3+deb12u1 in each.
+#
+# THE NAME IS NOT KEPT AS A BELT-AND-BRACES FLOOR, and the reason is that it
+# would not be one. `apt-get upgrade` holds back any update whose installation
+# needs a removal, and `apt-get install <pkg>` is allowed to take it — so a
+# named package genuinely covers a case the wholesale form skips. It covers it
+# for ONE package out of eight, chosen by which CVE happened to redden a build
+# on 2026-09-05, and leaves the other seven and everything Debian publishes
+# later with no floor at all. Measured today the two resolve identically:
+# `apt-get -s install libssh2-1` proposes exactly what `apt-get -s upgrade`
+# already proposes for it, and neither proposes a removal. A floor that covers
+# an eighth of its class and has to be re-curated by hand is a leftover rather
+# than a guarantee. The residual is real and it is not pretended away: it is
+# part of why the CRITICAL/HIGH gate in `base-images.yaml` still has a job.
+#
+# WHAT THE UPGRADE BUYS, MEASURED RATHER THAN ASSUMED. Against the pinned base
+# digest, this apt layer alone, scanned with the workflow's own flags: BEFORE,
+# trivy reports 53 fixed-available rows over 19 distinct ids — 14 MEDIUM in
+# libexpat1 at 2.5.0-1+deb12u2 and 5 UNKNOWN in libpcre2 at 10.42-1. AFTER, 0
+# rows at any severity, with libexpat1 at 2.5.0-1+deb12u3 and the libpcre2 set
+# at 10.42-1+deb12u1.
+#
+# A REBUILD ALONE FIXES NONE OF IT, which is the whole reason a line is needed
+# here. The `FROM` above is digest-pinned, so every rebuild resolves the
+# identical bytes and the base's own packages never move; `apt-get install`
+# refreshes only what it is given plus its dependency closure. Everything else
+# stays at whatever the pinned base shipped for as long as the pin stands. So
+# the weekly cron in `base-images.yaml` was not delivering the security refresh
+# its own comment claims until this flag existed.
+#
+# WHAT IT COSTS, said rather than discovered: two rebuilds of the same commit
+# can produce different images, because the security suite moves under a base
+# that does not. That determinism was already surrendered in this very `RUN` —
+# `hadolint ignore=DL3008` below accepts unpinned install versions, and the
+# libssh2-1 mechanism this comment replaces DEPENDED on apt being free to
+# resolve something newer than the base shipped. A digest-pinned `FROM` buys
+# BASE determinism, which this does not touch; it never bought build
+# determinism. The date-stamped tag exists because the output already moved
+# with time.
+#
+# WHAT WOULD SILENTLY UNDO IT: a build cache. Neither publishing workflow sets
+# `cache-from`/`cache-to`, and `setup-buildx-action` provisions a fresh builder
+# per run, so this `RUN` genuinely re-executes on every build including the
+# weekly cron. A GitHub Actions or registry cache would turn it into a
+# permanent cache hit and freeze these versions at whatever the cache holds,
+# with no failing check anywhere.
 #
 # WHY IT MATTERS LESS THAN A SCAN FAILURE SUGGESTS, stated so nobody panics or
 # over-corrects: this image NEVER SHIPS. It is the build stage, discarded once
-# the binary is copied out; a service runs on `runtime`. So the exposure is a
-# vulnerable library inside a build container, not in anything serving traffic.
-# It is fixed here because it is one word and the gate should be green for real
-# reasons, not because a pod was at risk.
+# the binary is copied out; a service runs on `runtime`, which is distroless
+# and carries neither expat nor pcre2. So the exposure is a vulnerable library
+# inside a build container, not in anything serving traffic. It is fixed here
+# because it is one flag and the gate should be green for real reasons, not
+# because a pod was at risk.
 
 # musl-tools supplies musl-gcc, which the musl target needs to link.
 #
@@ -40,11 +88,11 @@ LABEL org.opencontainers.image.description="Build base for Rust modules: pinned 
 # places because the image and the runner install their own toolchains.
 # hadolint ignore=DL3008
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install --no-install-recommends -y \
         musl-tools \
         protobuf-compiler \
         libprotobuf-dev \
-        libssh2-1 \
     && rm -rf /var/lib/apt/lists/*
 
 # One layer, both toolchain setup — hadolint DL3059 is right that splitting them
