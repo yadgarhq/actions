@@ -162,3 +162,29 @@ repos:
         entry: python scripts/helm_pin_agrees.py
         pass_filenames: false
         always_run: true
+      # LEDGER 715. `containers/rust-build/Containerfile` runs `apt-get upgrade
+      # -y`, and that line is the whole of the weekly security refresh — the
+      # `FROM` is digest-pinned, so a rebuild on its own moves nothing. It works
+      # only because the `RUN` re-executes on every build. A `cache-from` /
+      # `cache-to` pair, the obvious speed-up, turns it into a permanent cache
+      # hit and freezes libexpat1, libpcre2 and libssh2, with nothing anywhere
+      # reporting it: the findings are MEDIUM and UNKNOWN while the scan gate is
+      # CRITICAL,HIGH, and a cached image is internally consistent and merely
+      # old. The gate's own header argues that down against the two alternatives
+      # — asserting the installed versions at build time, and cache-busting the
+      # layer from inside the Containerfile.
+      #
+      # LOCAL AND NOT PUBLISHED in `.pre-commit-hooks.yaml`, the same reasoning
+      # as `helm-pin-agrees` above: no consumer repository builds an image of
+      # its own — they call `ci-release.yaml` and get its build step, which this
+      # gate already reads from here.
+      #
+      # `always_run` with `pass_filenames: false`, because the subject is every
+      # build step in the directory rather than the file somebody touched.
+      - id: no-build-cache
+        name: no docker/build-push-action step declares a layer cache
+        language: python
+        additional_dependencies: ["pyyaml==6.0.3"]
+        entry: python scripts/no_build_cache.py
+        pass_filenames: false
+        always_run: true
