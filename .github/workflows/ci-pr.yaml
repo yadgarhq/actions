@@ -611,9 +611,19 @@ jobs:
           # the refusal exists to replace. Measured on the first run of this
           # step (store#21, run 34032503728).
           #
-          # THE RUNNING SERVICE CONTAINER IS ASKED FIRST, because it carries the
-          # exact reference the `services:` block named. The image list is the
-          # fallback for the same fact seen from the other side.
+          # THE RUNNING SERVICE CONTAINER IS ASKED FIRST, and it is the source
+          # that answers on a GitHub-hosted runner: `docker images` reports NO
+          # digest for the image the runner pulled for `services:`, which is why
+          # the first attempt found nothing. Measured, not assumed — run
+          # 34032503728 attempt 1 died on that read, attempt 2 printed
+          # `using mariadb@sha256:2439dcd7…`.
+          #
+          # THE IMAGE LIST IS NOT DEAD CODE. It is the source that answers when
+          # this block is extracted and run outside CI, which is how a developer
+          # reproduces the suite (see `store/tests/engine_tls.rs`'s header):
+          # there is no service container then, and the pinned image is one that
+          # was pulled by digest, so its digest IS recorded. Both paths are
+          # exercised; neither covers the other.
           image=$(docker ps --no-trunc --format '{{.Image}}' \
             | grep -E '(^|/)mariadb@sha256:[0-9a-f]{64}$' | head -n1 || true)
           if [ -z "$image" ]; then
