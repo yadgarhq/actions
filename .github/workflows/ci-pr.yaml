@@ -40,7 +40,20 @@ permissions:
 # WHAT RUNS WHEN, and the push case is the interesting one.
 #
 #   pull_request  everything. This is the gate.
+#   an edited PR  the template job ONLY. Ledger 685.
 #   push to main  the version job ONLY.
+#
+# LEDGER 685, AND IT IS AFFORDABILITY RATHER THAN CORRECTNESS. Closing ledger
+# 630's other half means each consumer subscribing to `edited`, which no change
+# here can do for them — this workflow is `workflow_call` only, so activity types
+# live in each caller's own `ci.yaml`. What a caller CANNOT choose is how much
+# `edited` re-runs, and the answer before this change is everything. Measured on
+# `yadgarhq/actions` pull request 49, which is subscribed: four runs on ONE head
+# sha, each of them eleven jobs with seven executing. In the Rust repositories
+# that seven includes `test`, which starts a database service container. So the
+# sweep across seventeen repositories would make every body typo re-run the full
+# matrix seventeen times over. This short-circuit is INERT until a caller
+# subscribes, which is why it can land before the sweep.
 #
 # Validation on push to main would re-run exactly what the pull request just
 # passed, on code already merged, with nobody watching the result. The ruleset
@@ -60,6 +73,7 @@ jobs:
     outputs:
       rust: ${{ steps.d.outputs.rust }}
       proto: ${{ steps.d.outputs.proto }}
+      text_edit: ${{ steps.e.outputs.text_edit }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -100,6 +114,39 @@ jobs:
             exit 1
           fi
 
+      # LEDGER 685. ONE PREDICATE, COMPUTED ONCE, because six jobs read it and
+      # six copies of an expression are six things to keep in agreement by hand
+      # — the argument this job already makes for detection itself.
+      #
+      # `github.event.changes` IS THE WHOLE OF IT, and `base` is the reason this
+      # is not simply `action == 'edited'`. GitHub fires `edited` for a changed
+      # TITLE, a changed BODY and a changed BASE BRANCH, and the last one alters
+      # what the pull request proposes WITHOUT changing its head sha — no
+      # `synchronize` follows it. Short-circuiting there would wave through a
+      # diff nothing had ever tested. `changes` carries only what changed, so
+      # its `base` key present means retarget and absent means text. Observed
+      # rather than reasoned: a retarget logs `BASE_CHANGED: true` and runs the
+      # full set.
+      - id: e
+        name: whether this run is a text-only edit
+        env:
+          # Through the environment rather than interpolated, for the reason the
+          # template job gives at length: a title is attacker-controlled text.
+          ACTION: ${{ github.event.action }}
+          BASE_CHANGED: ${{ github.event.changes.base != null }}
+        run: |
+          set -euo pipefail
+          if [ "$ACTION" = edited ] && [ "$BASE_CHANGED" = false ]; then
+            echo "text_edit=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "- **text-only edit**: the pull request's title or body changed"
+              echo "  and its head did not, so only \`template\` re-reads it. The"
+              echo "  code on this sha was checked by the run that preceded this one."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "text_edit=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # ONE definition of "is this repository clean": the hooks. CI installs what
   # they need and runs all of them.
   #
@@ -111,8 +158,9 @@ jobs:
   # It also makes D55's argument true one level up: what a developer runs is
   # exactly what CI runs, not something resembling it.
   precommit:
+    # Ledger 685: a text-only edit re-reads the body and nothing else.
     needs: detect
-    if: github.event_name != 'push'
+    if: github.event_name != 'push' && needs.detect.outputs.text_edit != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -250,7 +298,9 @@ jobs:
   # NOT hook-covered, and that is the line: pre-commit owns what pre-commit can
   # define. These need a runner and network, so they are jobs.
   workflows:
-    if: github.event_name != 'push'
+    # Ledger 685: a text-only edit re-reads the body and nothing else.
+    needs: detect
+    if: github.event_name != 'push' && needs.detect.outputs.text_edit != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -278,7 +328,9 @@ jobs:
             --no-online-audits --persona=regular --config /tmp/zizmor.yml .
 
   vulnerabilities:
-    if: github.event_name != 'push'
+    # Ledger 685: a text-only edit re-reads the body and nothing else.
+    needs: detect
+    if: github.event_name != 'push' && needs.detect.outputs.text_edit != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -399,8 +451,11 @@ jobs:
   # Pinned by digest, never by tag (D61). 11.8 is the first LTS carrying the
   # VECTOR type the probe checks for.
   test:
+    # Ledger 685: a text-only edit re-reads the body and nothing else.
     needs: detect
-    if: github.event_name != 'push' && needs.detect.outputs.rust == 'true'
+    if: >-
+      github.event_name != 'push' && needs.detect.outputs.rust == 'true' &&
+      needs.detect.outputs.text_edit != 'true'
     runs-on: ubuntu-latest
     services:
       mariadb:
@@ -771,8 +826,11 @@ jobs:
   # like a substitute for it. This job answers exactly one question — does the
   # vendored copy match the pin?
   proto:
+    # Ledger 685: a text-only edit re-reads the body and nothing else.
     needs: detect
-    if: needs.detect.outputs.proto == 'true'
+    if: >-
+      needs.detect.outputs.proto == 'true' &&
+      needs.detect.outputs.text_edit != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -915,7 +973,9 @@ jobs:
   # output. No grep finds that. It is a question for a human and it is in the
   # pull request template's `## Risk` section.
   portability:
-    if: github.event_name != 'push'
+    # Ledger 685: a text-only edit re-reads the body and nothing else.
+    needs: detect
+    if: github.event_name != 'push' && needs.detect.outputs.text_edit != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
