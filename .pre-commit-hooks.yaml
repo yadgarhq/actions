@@ -369,3 +369,59 @@
   entry: hooks/certificate_usages.py
   always_run: true
   pass_filenames: false
+
+# LEDGER 726. THE OTHER DIRECTION OF THE WATCH SET. ADR-0523 makes a process
+# exit when the material it read at boot is replaced underneath it, and every
+# service's `tests/assembly.rs` asserts `rotate::watch_set` against a LITERAL
+# path list. That test kills a member DELETED from the set and is blind to its
+# opposite: a file newly read at boot with no watch-set member leaves the
+# literal list matching, because the watch set did not change. The assembly test
+# asserts the watch set against itself, never against what boot reads.
+#
+# THE CLASS IS ALREADY REALISED. `yadgarhq/iam` reads `encryption.key` and
+# `blind-index.key` at boot and neither is in `iam::rotate::watch_set`. Every
+# rotation test in that repository is green.
+#
+# NOT A SECOND LIST, and the direction of the default is the whole difference.
+# A test naming the files boot reads fails exactly where the watch set does — an
+# author who forgets the member forgets the list entry. Here an UNMARKED READ IS
+# THE VIOLATION: forgetting is red, and the author cannot reach a passing state
+# without saying at the read site which material carries the file, or that it is
+# not carried and why. The marker is written in the same edit that adds the read.
+#
+# WHERE THE TWO SIDES COME FROM (ADR-0599). Side A is the call expression in the
+# consumer's own `src/`; side B is `src/rotate.rs` — its `impl Material for T`
+# blocks and the `watch_set` signature. A `WATCHED` marker must NAME one of them,
+# so it cannot be satisfied by inventing a name at the read site, and neither
+# side is computed from the other.
+#
+# `git grep ADR-0523-UNWATCHED` answers "which boot reads are unwatched, and
+# why" in one command — the property `ADR-0569-EXCEPTION` is built for, applied
+# to a rule that otherwise depends on being remembered.
+#
+# `always_run` WITH `pass_filenames: false`: the subject is every read in the
+# tree, not the file somebody touched, and a `files:` filter would let a read
+# added outside the touched set go unjudged. `certificate_usages.py` records the
+# same choice after measuring the hole a `files:` scoping left open.
+#
+# `language: script`, NOT python, for the reason four hooks above already carry:
+# `language: python` makes pre-commit pip-install this repository, which is not a
+# package, and the failure surfaces in the CONSUMING repository where nothing
+# explains it. Stdlib only, so the Rust scan is hand-written — and
+# `scripts/tests/test_boot_reads_watched.py` asserts it against the two traps the
+# real corpus carries: braces inside format strings moving a `#[cfg(test)]`
+# module's end, and `yadgar-lifecycle`'s own `rotate::File::read`, which opens
+# nothing and which every service's `src/rotate.rs` calls.
+#
+# ADOPTION IS PER REPOSITORY AND IS NOT AUTOMATIC. A consumer switching this on
+# marks every read in its `src/` first; the gate refuses a repository with no
+# `src/rotate.rs`, because there would be nothing for a marker to name. It sees
+# only the CONSUMER's tree, so a read inside `yadgar-dial`, `yadgar-store` or
+# `yadgar-lifecycle` is judged when that repository adopts the hook, not by the
+# service that calls into it.
+- id: boot-reads-watched
+  name: ADR-0523 — a boot read is watched, or declared unwatched
+  language: script
+  entry: hooks/boot_reads_watched.py
+  always_run: true
+  pass_filenames: false
