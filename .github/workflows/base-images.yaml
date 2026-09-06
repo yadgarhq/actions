@@ -26,6 +26,20 @@ permissions:
   packages: write
   id-token: write
 
+# A SECOND REGISTRY WRITE NEEDS A LOCK. Promoting `:latest` below is a write
+# that FOLLOWS the push, so two overlapping runs — the Monday cron and a `main`
+# push, say — can interleave one run's promotion with another run's push and
+# leave the consumed tag pointing at a digest neither run signed. The window is
+# small and it did not exist before the promotion did.
+#
+# `cancel-in-progress: false`, DELIBERATELY. Cancelling a run mid-flight
+# reintroduces exactly the failure the `fail-fast: false` comment below
+# describes: a leg killed between `push` and `sign` leaves a published, unsigned
+# image. A lock that queues is the point; a lock that kills is the defect.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 env:
   REGISTRY: ghcr.io
 
@@ -39,13 +53,13 @@ jobs:
       #
       # THE ORIGINAL REASON IS GONE AND THE SETTING STAYS. It was added when
       # `push` ran BEFORE `scan`, where a cancellation could land between
-      # publishing a moving `:latest` and signing it. This change moved `push`
-      # after the gate, so that specific window is closed — but `sign` and the
-      # SBOM still follow `push`, so a cancelled leg can still leave a moved tag
-      # unsigned. Same shape, later in the job, and the setting still earns its
-      # place. Measured on PR #46, where a third matrix entry could not pass the
-      # scan gate; on 2026-09-05 `runtime` completed for exactly this reason
-      # while `rust-build` failed.
+      # publishing a moving `:latest` and signing it. That window closed in two
+      # steps rather than one: `push` moved after the gate, and `:latest` now
+      # moves only after `sign`. What a cancelled leg can still leave behind is
+      # the DATED tag, published and unsigned — smaller, because nothing
+      # consumes that tag by default, and not zero. Measured on PR #46, where a
+      # third matrix entry could not pass the scan gate; on 2026-09-05 `runtime`
+      # completed for exactly this reason while `rust-build` failed.
       fail-fast: false
       matrix:
         image: [rust-build, runtime]
@@ -119,6 +133,12 @@ jobs:
           skip-dirs: /usr/local/cargo/registry
 
       # ONLY NOW. The layers are in the build cache, so this reuses them.
+      #
+      # THE DATED TAG ALONE. `:latest` is the tag every module does `FROM` on,
+      # and it is not written here: it is promoted further down, after the
+      # equality below has been asserted and the digest has been signed. Nothing
+      # consumes the dated tag by default, so publishing it first is what gives
+      # the assertion something to refuse.
       - id: push
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -126,8 +146,79 @@ jobs:
           file: containers/${{ matrix.image }}/Containerfile
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}:latest
             ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}:${{ steps.v.outputs.version }}
+
+      # THE EQUALITY THE GATE RESTS ON, ASSERTED RATHER THAN OBSERVED ONCE
+      # (ADR-0587). The scan above reads `${{ matrix.image }}:candidate` out of
+      # the runner's local daemon; what reaches the registry is a SECOND build.
+      # They agree today because the `FROM` is digest-pinned and the push leg
+      # reuses the buildx cache the build leg filled inside this same job, so
+      # neither leg can re-resolve a moving tag. That is a property of the
+      # current arrangement, not a claim this workflow makes — an evicted cache
+      # or an inserted step would publish an UNSCANNED image and report success.
+      #
+      # IT RUNS BEFORE THE PROMOTION, WHICH IS WHAT MAKES IT A GATE. A mismatch
+      # found here refuses to move `:latest`; the same check after the promotion
+      # would only report one, which is the shape ADR-0581 exists to forbid.
+      #
+      # SHAPE-AGNOSTIC, and that is not defensive coding. `push: true` attaches
+      # a provenance attestation, so what lands is an OCI index whose sole child
+      # carrying no `vnd.docker.reference.type` annotation is the scanned
+      # digest. Written for the index case ALONE it returns an empty child list
+      # against a plain manifest and reds every run — and `estate-runner`, which
+      # shares this shape, has never published through its workflow, so nobody
+      # can say which of the two its first success produces.
+      #
+      # AUTHENTICATED, via the `docker/login-action` above. The anonymous flow
+      # would red here on a private package, which is a real fact that the
+      # anonymous-pull check further down already reports with its own message.
+      #
+      # THREE CAUSES, THREE MESSAGES (ADR-0578). A missing digest, an
+      # unreachable registry and a genuine mismatch are three different facts,
+      # and only the third says anything about what was published.
+      #
+      # THE DIGESTS ARE FORMAT-CHECKED FIRST, and the right-hand side of `=~`
+      # STAYS UNQUOTED — quoting turns the pattern into a literal string and
+      # rejects every valid digest. An empty digest is not hypothetical: it
+      # reaches the SBOM and cosign as a reference ending in `@`, which they
+      # refuse by luck rather than by design, and it reaches the step summary,
+      # which prints a line with no digest and exits 0.
+      - name: the published manifest must commit to the scanned candidate
+        env:
+          REF: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}
+          BUILT: ${{ steps.build.outputs.digest }}
+          PUSHED: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+
+          for pair in "build:$BUILT" "push:$PUSHED"; do
+            step=${pair%%:*}
+            digest=${pair#*:}
+            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::the ${step} step produced no usable digest: '${digest}'"
+              exit 1
+            fi
+          done
+
+          if ! raw=$(docker buildx imagetools inspect --raw "${REF}@${PUSHED}"); then
+            echo "::error::could not read back the manifest just pushed at ${PUSHED}."
+            echo "::error::That is a registry or credential fault and says NOTHING about whether the scanned image is the published one."
+            exit 1
+          fi
+
+          if printf '%s' "$raw" | jq -e 'has("manifests")' >/dev/null; then
+            children=$(printf '%s' "$raw" | jq -r '.manifests[] | select(.annotations["vnd.docker.reference.type"] == null) | .digest')
+          else
+            children=$PUSHED
+          fi
+
+          if ! printf '%s\n' "$children" | grep -Fqx "$BUILT"; then
+            echo "::error::the published manifest does not commit to the scanned candidate."
+            echo "::error::scanned ${BUILT}; published ${PUSHED} carries [${children//$'\n'/ }]."
+            echo "::error::latest is NOT promoted, and the dated tag now holds bytes nothing scanned."
+            exit 1
+          fi
+          echo "the published manifest commits to the scanned candidate: ${BUILT}"
 
       - name: SBOM
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
@@ -141,6 +232,34 @@ jobs:
           IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}@${{ steps.push.outputs.digest }}
         run: |
           cosign sign --yes "$IMAGE"
+
+      # THE PROMOTION, AND THE ONLY STEP THAT MOVES THE TAG EVERY MODULE DOES
+      # `FROM` ON. It follows `sign`, so `:latest` moves to a digest that has
+      # been scanned, asserted AND signed — which closes the sign-after-push
+      # window for the consumed tag as a side effect of asserting the equality.
+      #
+      # THE READ-BACK IS NOT DECORATION. `imagetools create` from a single
+      # source is documented as a copy, but nothing in this estate has measured
+      # whether it copies the index byte for byte or re-serialises it, and a
+      # re-serialised index is a NEW digest that the `cosign sign` above did not
+      # sign. The content would still be the scanned bytes; the signature would
+      # simply not cover the tag, silently. An invariant a guarantee rests on is
+      # asserted, never assumed (ADR-0587).
+      - name: promote :latest to the signed digest
+        env:
+          REF: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}
+          PUSHED: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create -t "${REF}:latest" "${REF}@${PUSHED}"
+
+          promoted=$(docker buildx imagetools inspect "${REF}:latest" --format '{{.Manifest.Digest}}')
+          if [ "$promoted" != "$PUSHED" ]; then
+            echo "::error::the latest tag resolves to ${promoted}, not the signed ${PUSHED}."
+            echo "::error::The tag has MOVED and the signature does not cover what it points at."
+            exit 1
+          fi
+          echo "latest -> ${PUSHED}"
 
       # See ci-release.yaml for why this exists: a new package is private by
       # default, no API can change it, and nothing else would report it.
