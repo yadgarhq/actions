@@ -591,14 +591,23 @@ jobs:
       # baseline. Nothing anywhere flagged that `task` sat on `v1.2.0` while
       # `proto` was tagged `v1.6.0`.
       #
-      # REPORT ONLY, NEVER A FAILURE. Please read this before turning it into a
-      # gate: being behind is a CHOICE until somebody bumps it — a newer tag
-      # adding an RPC this module does not call is not a defect in this module —
-      # and a hard failure would turn every repository here red the moment
-      # `proto` is tagged. It also needs the network and a remote tag listing,
-      # and a gate that fails when a third party is unreachable fails for reasons
-      # unrelated to the change under review. Derive and REPORT — unlike the
-      # version job below, which now writes the tag it derives.
+      # THE COMPARISON IS REPORT ONLY, NEVER A FAILURE. Please read this before
+      # turning it into a gate: being behind is a CHOICE until somebody bumps
+      # it — a newer tag adding an RPC this module does not call is not a
+      # defect in this module — and a hard failure would turn every repository
+      # here red the moment `proto` is tagged. It also needs the network and a
+      # remote tag listing, and a gate that fails when a third party is
+      # unreachable fails for reasons unrelated to the change under review.
+      # Derive and REPORT — unlike the version job below, which now writes the
+      # tag it derives. `scripts/proto_pin_report.py` carries the comparison
+      # itself and the reasoning for each of its outcomes.
+      #
+      # THAT PROMISE COVERS THE COMPARISON, NOT THIS STEP. The `run:` block
+      # below fails closed if it cannot find its own script — a statement
+      # about THIS workflow, not about `yadgarhq/proto` — because a gate that
+      # cannot reach its own logic must not report success having run nothing.
+      # Ledger 720 already found that shape more than once; this step does not
+      # add a third instance of it.
       #
       # It compares CONTENTS, not version strings, and splits the answer three
       # ways. `buf export` follows the import graph, so a newer tag can reach a

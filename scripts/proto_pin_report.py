@@ -21,7 +21,7 @@ import os, re, subprocess, sys, pathlib, filecmp, traceback
 # vendored copy match the pin"; it cannot answer "is the pin still current",
 # because the pin is its own baseline.
 #
-# REPORT ONLY, NEVER A FAILURE, and that is deliberate rather than timid:
+# THE COMPARISON NEVER FAILS THE BUILD, and that is deliberate rather than timid:
 #
 #   * Being behind is a CHOICE until somebody bumps it. A newer tag adding an
 #     RPC this module does not call is not a defect in this module, and failing
@@ -37,12 +37,23 @@ import os, re, subprocess, sys, pathlib, filecmp, traceback
 # `yadgarhq/proto`, and nothing here is entitled to act on that.
 # Please do not "fix" this into a hard failure without reading the above.
 #
-# "NEVER A FAILURE" IS MADE STRUCTURAL, not merely intended. Every enumerated
-# path exits 0, AND the whole body runs inside a try/except that turns an
-# unexpected exception into a report as well. Without that last part the promise
-# holds only for the failures somebody thought of — and a traceback here would
-# redden `proto`, and through it `passed`, in a repository whose change had
-# nothing to do with protos.
+# THAT PROMISE IS SCOPED TO THIS FILE'S OWN LOGIC, not to the step end to end.
+# Every path through `report()` — behind, ahead, a pin that cannot be ordered,
+# `proto` unreachable, `buf export` failing, or an unexpected exception in the
+# comparison — is a statement about `yadgarhq/proto`, and every one of them
+# leaves this module at exit 0. The whole body of `report()` runs inside the
+# try/except below for exactly that reason: without it the promise would hold
+# only for the failures somebody thought of, and a traceback in the comparison
+# would redden `proto`, and through it `passed`, in a repository whose change
+# had nothing to do with protos.
+#
+# IT DOES NOT COVER THIS FILE BEING UNREACHABLE. That is a statement about
+# THIS workflow, not about `yadgarhq/proto`, and it is refused rather than
+# swallowed: the `run:` step in `ci-pr.yaml` that calls this file exits 1 if
+# `$dir/proto_pin_report.py` is missing, instead of silently skipping the
+# report. A gate that cannot reach its own logic must not pass — the same
+# shape ledger 720 has already found more than once — and that check lives in
+# the shell wrapper, outside the try/except below, on purpose.
 
 PROTO_REPO = "https://github.com/yadgarhq/proto.git"
 out, warnings = [], []
