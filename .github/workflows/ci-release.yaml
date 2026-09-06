@@ -160,10 +160,13 @@ jobs:
       #
       # AT THE PRODUCER RATHER THAN AT EACH CONSUMER. A guard in `deployment`
       # protects one of those five writes. Here it protects all five, and the
-      # gating already carries the failure downstream: `chart` runs on
-      # `needs.image.result != 'failure'` and `deployment` on `== 'success'`, so
-      # a red guard skips both writes rather than letting them run on a value
-      # nobody vouched for. The sixth consumer, whenever it arrives, gets the
+      # gating already carries the failure downstream: wherever there is an
+      # image at all, `chart` requires this job to have SUCCEEDED and
+      # `deployment` runs on `== 'success'`, so a red guard skips both writes
+      # rather than letting them run on a value nobody vouched for. (`chart`
+      # read `!= 'failure'` when this comment was written, which admitted a
+      # cancelled job; ledger 729 replaced it — see the condition itself.) The
+      # sixth consumer, whenever it arrives, gets the
       # guarantee without having to remember to ask for it.
       #
       # THE SHAPE IS NOT INVENTED HERE. `^sha256:[0-9a-f]{64}$` is what
@@ -271,9 +274,44 @@ jobs:
 
   chart:
     needs: [detect, image]
-    # always(): a repository may ship a chart and no image. Without this the
-    # chart would be skipped whenever the image job did not run.
-    if: always() && needs.detect.outputs.chart == 'true' && needs.image.result != 'failure'
+    # THREE CASES, NOT TWO, and the middle one is what the old condition
+    # published. GitHub renders `needs.image.result` as one of four values, and
+    # `!= 'failure'` sorted them into "failure" and "everything else" — so a
+    # CANCELLED image job satisfied this gate. The digest-pin step below is
+    # separately gated on `success`, so it did not run, and `helm push` then
+    # published the chart built from git's `values.yaml`, which by D65 carries a
+    # MOVING TAG rather than a digest. Nothing errored and nothing reported it:
+    # from every angle this file could see, that was a successful release.
+    #
+    #   image succeeded             -> package it, pinned by the digest below
+    #   image SKIPPED, because this
+    #     repository has no image   -> package it, there is nothing to pin
+    #   image cancelled or failed   -> refuse; a digest exists and we do not
+    #                                  have it
+    #
+    # always() STAYS, and it is load-bearing rather than defensive: without it a
+    # chart-only repository's chart is skipped whenever the image job does not
+    # run. That repository exists. Measured 2026-09-06 across all 18
+    # repositories in the organisation: 7 carry a `chart/`, and exactly one of
+    # them — `yadgarhq/config` — carries no `Containerfile`. It calls this
+    # workflow at `@main`, so the skipped arm is live rather than hypothetical.
+    #
+    # THE SKIP ARM ASKS `detect`, NOT `image`. `needs.detect.outputs.image` is a
+    # FACT about the tree — the `Containerfile` is absent — and it is the same
+    # fact that made the image job skip. Reading `needs.image.result ==
+    # 'skipped'` instead would let any FUTURE reason for that job not to run
+    # publish an unpinned chart, which is the defect being closed rather than a
+    # narrower spelling of the fix.
+    #
+    # `== 'false'` RATHER THAN `!= 'true'`, which reads as equivalent and is
+    # not. `detect` writes the literal string `false`. Anything else it could
+    # ever render — an empty output from a job that did not itself complete, a
+    # typo, some third value — leaves `== 'false'` demanding a successful image
+    # and leaves `!= 'true'` publishing without one. One keystroke, opposite
+    # failure direction.
+    if: >-
+      always() && needs.detect.outputs.chart == 'true'
+      && (needs.image.result == 'success' || needs.detect.outputs.image == 'false')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -301,9 +339,21 @@ jobs:
       # release, changing one line — noise that trains people to merge without
       # reading.
       #
-      # A chart published without this step would ship a floating tag. The
-      # release workflow is the only thing that publishes a chart, which is what
-      # keeps that from happening.
+      # A chart published without this step ships a floating tag, and the JOB
+      # CONDITION above is what keeps that from happening — not this step's own.
+      # Until ledger 729 the argument written here was that the release workflow
+      # is the only thing that publishes a chart, which names publication
+      # frequency as the safeguard rather than a gate; a cancelled image job
+      # walked straight through it.
+      #
+      # LEFT ON `needs.image.result == 'success'` rather than restated as the
+      # fact the gate above uses. Inside this job the two are now equivalent, so
+      # rewriting it would widen the diff and buy nothing. It would not buy a
+      # red build either: `yq` exits 0 on an empty digest, writing
+      # `image.digest: ""` and deleting the tag, so no phrasing of THIS
+      # condition turns a missing digest into a failure. The `image` job's own
+      # digest guard is where an empty digest reddens, and the gate above is
+      # where "no digest at all" is decided.
       - name: pin the image by digest, for the published chart only
         if: needs.image.result == 'success'
         env:

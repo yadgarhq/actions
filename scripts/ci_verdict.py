@@ -75,9 +75,19 @@ JSON handed to this script contains every one of them. A condition that reads
 another job's result makes "should this job have run" depend on whether an
 upstream job passed, and then a skip caused by an upstream FAILURE reads as a job
 that legitimately had nothing to do. That is the same defect one level up, and
-`ci-release.yaml` carries a live instance of it: `chart` runs on
+`ci-release.yaml` carried a live instance of it until ledger 729: `chart` ran on
 `always() && ... && needs.image.result != 'failure'`, so a CANCELLED image job
-publishes a chart. A result is a consequence; only a FACT is a reason.
+published a chart with no digest pinned. Its skip arm now asks
+`needs.detect.outputs.image` — the absent `Containerfile` that made the image job
+skip — rather than the skip itself. A result is a consequence; only a FACT is a
+reason.
+
+`chart`'s SUCCESS arm still reads `needs.image.result`, and that is not the same
+claim wearing a disguise. This gate's rule governs what may justify a job
+CHECKING LESS under a required merge check; `ci-release.yaml` publishes rather
+than merges, is not gated by this script, and its success arm has no fact to
+stand on, because "the digest exists" is not a property of the tree. The skip
+arm — the one that decides whether less work is acceptable — is on the fact.
 
 Tests: `python3 -m pytest scripts/tests/ -q`.
 """

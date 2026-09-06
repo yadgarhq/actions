@@ -389,12 +389,17 @@ def test_a_reference_may_be_registered_with_the_assertion_that_earns_it(tmp_path
 
 
 def test_a_condition_reading_a_job_result_is_refused(tmp_path):
-    """`ci-release.yaml`'s live defect, refused rather than reproduced.
+    """`ci-release.yaml`'s former defect, refused rather than reproduced.
 
-    `chart` runs on `needs.image.result != 'failure'`, so a CANCELLED image job
-    publishes a chart. If that shape ever appears under `ci / passed`, the gate
-    refuses instead of resolving it — a result is a consequence, and a skip caused
-    by an upstream failure would read as a job that had nothing to do.
+    `chart` ran on `needs.image.result != 'failure'` until ledger 729, so a
+    CANCELLED image job published a chart. If that shape ever appears under
+    `ci / passed`, the gate refuses instead of resolving it — a result is a
+    consequence, and a skip caused by an upstream failure would read as a job
+    that had nothing to do.
+
+    The synthetic workflow below is what is under test; the real
+    `ci-release.yaml` is checked by the chart-gate matrix at the foot of this
+    file, which is where a revert of that fix reddens.
     """
     wf = synthetic(tmp_path, "always() && needs.image.result != 'failure'")
     proc = run({"probe": {"result": "skipped", "outputs": {}}}, workflow=wf)
@@ -540,16 +545,179 @@ def test_every_condition_in_the_real_workflow_is_evaluable():
         assert isinstance(ci_verdict.evaluate(condition, resolve), bool), job
 
 
-def test_the_release_workflows_chart_gate_is_the_unsafe_shape():
-    """Pinned where it is, so the finding does not rot into a comment nobody reads.
+# ---------------------------------------------------------------------------
+# `ci-release.yaml`'s chart gate (ledger 729)
+# ---------------------------------------------------------------------------
+#
+# THE CONDITION IS EVALUATED, NOT MATCHED AS A STRING, and that is the whole
+# difference between this block and the single assertion it replaces. A string
+# assertion reds on a literal revert and passes on every OTHER predicate that
+# admits a cancelled image, which is the property that actually needs pinning.
+# `ci_verdict.evaluate` already reads this dialect — `always()` is in
+# `_FUNCTIONS` and the parser's own docstring says parentheses exist "because
+# `ci-release.yaml` would need them the moment its `chart` condition is written
+# correctly" — so the matrix below runs the real file's real condition.
+#
+# It sidesteps a second, duller failure too: `prettier` formats YAML in this
+# repository's hook chain, so the exact bytes of a folded `if: >-` block are not
+# something a test should be asserting on.
+#
+# `ci-release.yaml` IS NOT GATED BY `ci_verdict.py`. It is tag-triggered and
+# publishes rather than merges, so nothing evaluates these conditions in
+# anger until a real tag. That is the reason to evaluate them here.
 
-    `ci-release.yaml` is not gated by this script — it is tag-triggered and
-    publishes rather than merges. Its `chart` job carries the shape this whole
-    file exists to refuse, and its `deployment` job carries the safe one. This
-    test fails when either changes, which is when somebody should reread both.
+
+def release_resolver(image_detected, chart_detected, image_result):
+    """The three references `ci-release.yaml`'s `chart` condition may read.
+
+    LOCAL, AND REFUSES EVERYTHING ELSE. `make_resolver` refuses
+    `needs.<job>.result` outright, and rightly — but that refusal is about what
+    may justify a job checking LESS under the required merge check, which this
+    workflow is not under. Here the success arm has no fact to stand on: "the
+    digest exists" is not a property of the tree. The refusal is kept for every
+    reference NOT named below, so a condition that grows a fourth one reds this
+    matrix instead of being quietly evaluated against a default.
+    """
+    values = {
+        "needs.detect.outputs.image": image_detected,
+        "needs.detect.outputs.chart": chart_detected,
+        "needs.image.result": image_result,
+    }
+
+    def resolve(ref, expr):
+        if ref not in values:
+            raise ci_verdict.Refused(f"{ref} is not a reference this test supplies ({expr!r})")
+        return values[ref]
+
+    return resolve
+
+
+def chart_condition():
+    import yaml
+
+    return yaml.safe_load(CI_RELEASE.read_text(encoding="utf-8"))["jobs"]["chart"]["if"]
+
+
+# (what `detect` said about the image, what the image job reported, may publish)
+#
+# The four values GitHub renders for a job result, against the two things
+# `detect` can say. `success`/`skipped` are the only results reachable for their
+# respective rows — the image job's own `if:` is `needs.detect.outputs.image ==
+# 'true'` — and the unreachable combinations are covered by the chart=false
+# sweep below rather than invented here.
+CHART_MATRIX = [
+    ("true", "success", True),
+    ("true", "cancelled", False),
+    ("true", "failure", False),
+    ("false", "skipped", True),
+]
+
+
+@pytest.mark.parametrize("detected,result,may_publish", CHART_MATRIX)
+def test_the_release_chart_gate_publishes_only_what_it_can_pin(
+    detected, result, may_publish
+):
+    """A chart is published when it can be pinned, or when there is nothing to pin.
+
+    The cancelled row is the defect. `helm push` would publish the chart built
+    from git's `values.yaml`, which by D65 carries a moving tag, because the
+    digest-pin step is separately gated on `success` and does not run. Nothing
+    errors and nothing reports it.
+    """
+    got = ci_verdict.evaluate(
+        chart_condition(), release_resolver(detected, "true", result)
+    )
+    assert got is may_publish
+
+
+@pytest.mark.parametrize("detected,result,_may_publish", CHART_MATRIX)
+def test_the_release_chart_gate_never_runs_without_a_chart(detected, result, _may_publish):
+    """The paired red for every green above, on the same tree.
+
+    Same matrix with `detect` reporting no `chart/`, where the answer is always
+    no. Without this, a condition that had lost its `chart` conjunct entirely
+    would still satisfy the test above on all four rows.
+    """
+    assert (
+        ci_verdict.evaluate(
+            chart_condition(), release_resolver(detected, "false", result)
+        )
+        is False
+    )
+
+
+def test_the_old_release_chart_gate_would_have_published_a_cancelled_image():
+    """The bypass transcribed, so the fix is shown to change an outcome.
+
+    `test_the_documented_bypass`'s discipline applied to `ci-release.yaml`: run
+    the predicate that shipped and the one in the file over the same row, and
+    assert they disagree. A fix nobody can demonstrate changing a verdict is a
+    fix nobody can review.
+    """
+    row = release_resolver("true", "true", "cancelled")
+    was = "always() && needs.detect.outputs.chart == 'true' && needs.image.result != 'failure'"
+    assert ci_verdict.evaluate(was, row) is True
+    assert ci_verdict.evaluate(chart_condition(), row) is False
+
+
+def test_the_release_chart_gate_still_admits_a_chart_only_repository():
+    """`always()` is a deliberate allowance and this is the case that needs it.
+
+    `yadgarhq/config` has a `chart/` and no `Containerfile`, so its image job
+    never runs, and it calls `ci-release.yaml@main`. Narrowing this gate to
+    demand `success` unconditionally would stop releasing its chart. Stated as
+    its own test because the cancelled fix and this allowance pull in opposite
+    directions, and only one of them is written in the condition's shape.
+    """
+    assert (
+        ci_verdict.evaluate(
+            chart_condition(), release_resolver("false", "true", "skipped")
+        )
+        is True
+    )
+
+
+def test_the_release_chart_gate_falls_closed_on_an_unexpected_detect_output():
+    """`== 'false'` rather than `!= 'true'`, which reads as equivalent.
+
+    `detect` writes the literal `false`. Fed anything else — an empty output
+    from a job that did not complete, a typo, a third value — the gate must
+    still demand a successful image. Under `!= 'true'` every row here publishes
+    an unpinned chart instead.
+    """
+    for odd in ("", "False", "no", "0"):
+        assert (
+            ci_verdict.evaluate(
+                chart_condition(), release_resolver(odd, "true", "cancelled")
+            )
+            is False
+        ), odd
+
+
+def test_the_release_chart_gate_pins_the_digest_whenever_it_has_one():
+    """The job condition and the step condition are one decision in two places.
+
+    The job may run with no digest only when there is no image at all, so the
+    step's `success` test is what turns that allowance into "publish unpinned".
+    If the job gate ever widens again without this step widening too, the pair
+    goes back to publishing a floating tag in silence.
+    """
+    import yaml
+
+    chart = yaml.safe_load(CI_RELEASE.read_text(encoding="utf-8"))["jobs"]["chart"]
+    pin = [s for s in chart["steps"] if "pin the image by digest" in s.get("name", "")]
+    assert len(pin) == 1, "the digest-pin step was renamed or removed"
+    assert pin[0]["if"] == "needs.image.result == 'success'"
+
+
+def test_the_release_deployment_gate_is_the_reference_shape():
+    """Unchanged by ledger 729, and the shape `chart` was converged onto.
+
+    `deployment` writes a digest into `yadgarhq/argocd`, so it has never had a
+    legitimate no-image case: a repository with no `chart/` is not deployed by
+    the ApplicationSet at all.
     """
     import yaml
 
     jobs = yaml.safe_load(CI_RELEASE.read_text(encoding="utf-8"))["jobs"]
-    assert "needs.image.result != 'failure'" in jobs["chart"]["if"]
     assert "needs.image.result == 'success'" in jobs["deployment"]["if"]
