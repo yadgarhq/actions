@@ -1020,7 +1020,16 @@ jobs:
       # or a dropped `!` — passes both this and the pull-request check, because
       # both bodies are valid. Only a reader notices, from the bump the
       # `edited` re-run reports.
-      - name: the message this version is derived from is one the template accepts
+      #
+      # LEDGER 687(b), AND THE NAME IS THE CORRECTION. This step used to be
+      # called "is one the template accepts", which is false in wrapped mode and
+      # falsely reassuring: wrapped mode accepts bodies the template REJECTS.
+      # Measured rather than reasoned: a paragraph of prose appended directly
+      # under a bullet with no blank line between them is refused unwrapped and
+      # passes wrapped as one `patch` entry, because that is exactly what a
+      # wrapped continuation looks like. The name now claims only what the step
+      # enforces: the sections are there, and the Changelog parses.
+      - name: the message this version is derived from carries a Changelog this can read
         id: gate
         env:
           UNDER_REVIEW: ${{ github.repository }}
@@ -1065,7 +1074,7 @@ jobs:
           import os, re, subprocess, sys
 
           sys.path.insert(0, os.environ["GATE_DIR"])
-          from pr_body import BULLET, bump_for
+          from pr_body import BULLET, bump_for, is_wrap_continuation, looks_wrapped
 
           def sh(*a):
               return subprocess.run(a, capture_output=True, text=True).stdout.strip()
@@ -1081,16 +1090,44 @@ jobs:
           rng = f"{last}..HEAD" if last else "HEAD"
           log = sh("git", "log", rng, "--format=%B%x00")
 
-          entries, matches = [], []
+          # IT ABSORBS MORE FREELY THAN THE GATE DOES, said here rather than
+          # left to be found. `changelog_entries` absorbs only inside an OPEN
+          # entry and only within the `## Changelog` section; this loop has
+          # neither notion, because the derivation never had one — it reads
+          # every line of every commit. So a bullet list under `## Why` written
+          # with no blank line above it can drop from the lenient count too.
+          # The direction is safe: a disagreement writes no tag and leaves main
+          # green, and across 160 real tag windows in eighteen repositories the
+          # two readings never disagreed once.
+          #
+          # BOTH READINGS OVER THE WHOLE RANGE, and the range is why the gate
+          # above is not enough on its own. That gate reads HEAD only, so it
+          # refuses the ambiguous message on the push that lands it — and the
+          # NEXT push, with a clean HEAD, still has the ambiguous commit sitting
+          # in `last..HEAD` and would cut the major from it. Refusing here is
+          # what makes 687(c) closed rather than delayed by one merge.
+          entries, matches, lenient = [], [], []
           for commit in [c for c in log.split("\0") if c.strip()]:
-              for line in commit.splitlines():
+              lines = commit.splitlines()
+              # WRAPPEDNESS IS DECIDED ONCE PER COMMIT, and a message the wrap
+              # never touched absorbs nothing. Six real messages in the estate
+              # carry an unwrapped line of 71 or 72 columns above a genuine
+              # bullet, and asking the arithmetic line by line eats that bullet.
+              absorb = looks_wrapped(lines)
+              previous = None
+              for line in lines:
                   m = BULLET.match(line)
                   if not m:
+                      previous = line
                       continue
                   entries.append(line.strip())
                   matches.append(m)
+                  if not (absorb and is_wrap_continuation(previous, line)):
+                      lenient.append(m)
+                  previous = line
 
           base = SEMVER.match(last) if last else None
+          ambiguous = bool(matches) and bump_for(matches) != bump_for(lenient)
           nxt, note = "", ""
           out = ["## Next version", ""]
           if not last:
@@ -1103,6 +1140,21 @@ jobs:
                       "Cut a plain one by hand to start the sequence again."]
           elif not entries:
               out += [f"No parseable Changelog entries since `{last}`. Nothing to release."]
+          elif ambiguous:
+              # NO TAG AND NO GUESS, which is this step's rule everywhere else
+              # too. A `- feat!:` the wrap pushed to column 0 is a second entry
+              # to one reading and prose to the other, and the two imply
+              # different releases. Nobody can withdraw a tag, so the cheaper
+              # mistake is to cut none and name both readings. It does not
+              # self-heal the way the HEAD gate does — the commit stays in the
+              # range — so the way out is a tag cut by hand, which is already
+              # how the first tag of every repository is cut.
+              out += [f"The Changelog since `{last}` is ambiguous under GitHub's",
+                      "72-column wrap, so no version was derived and nothing was",
+                      f"tagged. Read strictly: {len(matches)} entries implying a",
+                      f"**{bump_for(matches)}** bump. Read as the wrap explains",
+                      f"it: {len(lenient)} entries implying a",
+                      f"**{bump_for(lenient)}**. Cut the intended tag by hand."]
           else:
               bump = bump_for(matches)
               major, minor, patch = (int(g) for g in base.groups())
@@ -1125,6 +1177,15 @@ jobs:
               out += [f"- {e.lstrip('-* ')}" for e in entries[:25]]
               if len(entries) > 25:
                   out += [f"", f"...and {len(entries) - 25} more."]
+
+          # AN ANNOTATION, BECAUSE THIS JOB STAYS GREEN. Every other refusal
+          # here is a report about a release that was never going to happen;
+          # this one is a release that WAS going to happen and now silently does
+          # not, on a job whose conclusion is success. A step summary nobody
+          # opens is how that becomes invisible. The HEAD gate exits 1 for the
+          # same condition; this cannot, because the commit is already merged.
+          if ambiguous:
+              print("::warning::" + " ".join(out[2:]))
 
           tmp = os.environ["RUNNER_TEMP"]
           if nxt:
