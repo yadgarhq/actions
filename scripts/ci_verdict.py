@@ -373,15 +373,59 @@ def load_conditions(workflow_path, gate_job):
 
 def verdict(conditions, results, resolve):
     """`(ok, rows)`. Each row is (job, should_run, required, actual, ok)."""
+    # THE TWO SETS MUST BE THE SAME SET, and only one of the two asymmetries is
+    # obvious. This function iterates the CONDITIONS, so a job that reported a
+    # result the workflow file does not list is never looked at: no row records
+    # it, nothing requires anything of it, and it can report `failure` while the
+    # verdict comes back green. `passed` runs under `if: always()`, so that run
+    # exists. It is this file's own defect one level up — a gate reporting on a
+    # matrix smaller than the one it was handed, and saying so about the part it
+    # read rather than about the run.
+    #
+    # HOW THE SETS COME APART, since they are produced by two different reads of
+    # the same file. `toJSON(needs)` is built by the workflow version the CALLER
+    # resolved when the run started; the conditions are read from the checkout
+    # the gate step takes minutes later. Today every consumer pins
+    # `ci-pr.yaml@main`, so the two agree except across a merge to `main` inside
+    # that window — and the moment any consumer pins a tag instead, they diverge
+    # for as long as the pin lags. Both directions refuse here, rather than one
+    # refusing and the other passing quietly.
+    gated = [j for j, _ in conditions]
+    unreported = [j for j in gated if j not in results]
+    unread = [j for j in results if j not in gated]
+    if unreported or unread:
+        parts = []
+        if unreported:
+            parts.append(
+                "no result was reported for "
+                + ", ".join(repr(j) for j in unreported)
+            )
+        if unread:
+            parts.append(
+                "a result was reported for "
+                + ", ".join(repr(j) for j in unread)
+                + ", which is not among the jobs this gate reads and so would "
+                "not have been checked at all"
+            )
+        raise Refused(
+            "the `needs` context and the workflow do not describe the same run: "
+            + "; ".join(parts)
+            + ". The gate reads the conditions from its own checkout; a caller "
+            "running a different version of this file produces exactly this."
+        )
     rows = []
     for job, condition in conditions:
         should_run = evaluate(condition, resolve)
         required = "success" if should_run else "skipped"
         actual = (results.get(job) or {}).get("result")
         if actual is None:
+            # The job IS in the context — the set check above passed — but its
+            # entry carries no `result`. GitHub always writes one, so this is a
+            # malformed payload rather than a version mismatch, and it is
+            # refused separately so the two are not reported as one thing.
             raise Refused(
-                f"no result was reported for {job!r}. The gate was handed a "
-                f"`needs` context that does not match the workflow it read."
+                f"the entry for {job!r} in the `needs` context carries no "
+                f"`result`, so there is nothing to check it against."
             )
         rows.append((job, should_run, required, actual, actual == required))
     return all(r[4] for r in rows), rows
@@ -427,7 +471,13 @@ def main(argv=None):
     ok, rows = verdict(conditions, needs, resolve)
     print(render(rows))
     if ok:
-        print(f"\nEvery job under `{gate_job}` did what its condition asked of it.")
+        # THE COUNT IS PART OF THE VERDICT, not decoration. "Everything passed"
+        # is what a gate that inspected nothing also says; "all 8 of them" is
+        # not, and it is the number a reader can compare against `needs:`.
+        print(
+            f"\nAll {len(rows)} jobs under `{gate_job}` did what their "
+            f"conditions asked of them."
+        )
         return 0
     bad = [r for r in rows if not r[4]]
     for job, should_run, required, actual, _ in bad:

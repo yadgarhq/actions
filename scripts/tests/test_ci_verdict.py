@@ -431,12 +431,62 @@ def test_a_gate_that_needs_nothing_is_refused(tmp_path):
 
 
 def test_a_missing_result_is_refused():
-    """The `needs` context and the workflow must describe the same run."""
+    """The `needs` context and the workflow must describe the same run.
+
+    The loud direction: the workflow lists a job the caller's run did not
+    report. Paired with the green below, so this is not passing because the
+    gate is dead.
+    """
+    assert verdict(needs({}))[0] is True
     ctx = needs({})
     del ctx["portability"]
     proc = run(ctx)
     assert proc.returncode == 1
     assert "no result was reported for 'portability'" in proc.stderr
+
+
+def test_a_reported_job_the_gate_does_not_read_is_refused(capsys):
+    """The QUIET direction, and a bypass rather than an error.
+
+    The gate iterates the conditions it read, so a job present in `needs` and
+    absent from the workflow file is never looked at. Fed a matrix in which
+    exactly that job reports `failure`, every row the gate DID read is `ok` —
+    so without the set check it prints eight green rows and exits 0 on a run
+    with a failed job in it.
+
+    Reachable because the two sets are two reads of one file at two moments:
+    the caller resolved `ci-pr.yaml` when the run started, the gate checks it
+    out minutes later. A job renamed on `main` inside that window, or any
+    consumer pinning a tag that lags `main`, is this input.
+    """
+    ctx = needs({})
+    ctx["legacy_job"] = {"result": "failure", "outputs": {}}
+
+    with capsys.disabled():
+        print("\n--- the input, not just the verdict ---")
+        print("event: pull_request   author type: User")
+        for job, entry in ctx.items():
+            tail = "  <- not in this file's `passed.needs:`" if job == "legacy_job" else ""
+            print(f"  {job:<16} {entry['result']}{tail}")
+
+    proc = run(ctx)
+    with capsys.disabled():
+        print(f"--- exit {proc.returncode} ---")
+        print(proc.stderr.rstrip())
+
+    assert proc.returncode == 1
+    assert "'legacy_job'" in proc.stderr
+    assert "would not have been checked at all" in proc.stderr
+    # The eight jobs it CAN read are all consistent, which is what makes this
+    # the quiet direction: nothing else in the matrix gives it a reason to fail.
+    assert verdict(needs({}))[0] is True
+
+
+def test_the_verdict_names_how_many_jobs_it_read():
+    """A gate that inspected nothing must not be able to phrase it as success."""
+    ok, proc = verdict(needs({}))
+    assert ok
+    assert f"All {len(GATED)} jobs under `passed`" in proc.stdout
 
 
 def test_an_empty_event_is_refused():
