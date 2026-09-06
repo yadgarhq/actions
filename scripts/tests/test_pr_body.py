@@ -359,16 +359,39 @@ def test_a_wrap_continuation_is_decided_by_the_previous_line_length():
     assert not pr_body.is_wrap_continuation("x" * 70, "- feat: a thing")
 
 
-def test_a_line_wider_than_the_wrap_was_not_produced_by_the_wrap():
-    """The upper half of the bound, and the corpus is what found it.
+def test_a_multi_word_line_wider_than_the_wrap_means_the_wrap_never_ran():
+    """The corpus found this, not a test: 4,520 such lines in 605 messages.
 
     A repository whose squash message is not the pull request body reaches
-    history unwrapped, so its bullets are single lines far wider than 72. With
-    a one-sided bound every one of them absorbs the next, and the nine-entry
-    Changelogs in `yadgarhq/iam-db` and `yadgarhq/task-db` read as one patch.
+    history unwrapped, so its bullets are single lines far wider than 72. Judge
+    each line on its own and every one of them absorbs the next, and the
+    nine-entry Changelogs in `yadgarhq/iam-db` and `yadgarhq/task-db` read as
+    one patch.
     """
-    assert not pr_body.is_wrap_continuation("x" * 73, "- feat: a thing")
-    assert not pr_body.is_wrap_continuation("x" * 200, "- feat: a thing")
+    assert not pr_body.looks_wrapped(["a word " * 20])
+    assert pr_body.looks_wrapped(["x" * 72, "short", ""])
+
+
+def test_one_over_long_token_does_not_make_a_message_unwrapped():
+    """A greedy wrap emits an over-long line for a token it cannot break.
+
+    A URL or a long path. 105 such lines exist in the same 605 messages, and
+    calling them unwrapped would switch the absorption off for the whole
+    message and let 687(a) back in behind a link.
+    """
+    url = "https://github.com/yadgarhq/actions/actions/runs/" + "3" * 40
+    assert len(url) > pr_body.WRAP
+    assert pr_body.looks_wrapped(["- fix: see", url, "and so on"])
+    assert pr_body.is_wrap_continuation(url, "- W for warnings is not a bullet")
+
+
+def test_a_bullet_after_a_long_url_is_still_a_continuation():
+    """687(a) behind a link, which the two-sided bound used to let through."""
+    url = "https://github.com/yadgarhq/actions/actions/runs/" + "3" * 40
+    text = body(changelog=f"- chore: see the run at\n{url}\n- W for warnings, so it fails")
+    problems, bump, count = pr_body.review(text, wrapped=True)
+    assert problems == []
+    assert (bump, count) == ("patch", 1)
 
 
 def test_an_unwrapped_commit_message_keeps_every_entry():
@@ -377,6 +400,27 @@ def test_an_unwrapped_commit_message_keeps_every_entry():
         for t in ("chore", "feat", "fix")
     )
     problems, bump, count = pr_body.review(body(changelog=long_bullets), wrapped=True)
+    assert problems == []
+    assert (bump, count) == ("minor", 3)
+
+
+def test_an_unwrapped_message_does_not_absorb_a_bullet_under_a_full_line():
+    """Six real messages have exactly this shape; none may lose an entry.
+
+    `deploy`, `docs`, `iam`, `project-db` and `telemetry` each carry an
+    unwrapped line of 71 or 72 columns immediately above a genuine bullet. Six
+    of the seven near misses absorbed a `feat`, the class that decides a bump,
+    so the zero divergence measured over the estate is a property of how many
+    features each Changelog happened to hold rather than of the arithmetic.
+    """
+    changelog = (
+        "- feat: generate the cache password and the broker account on sync\n"
+        + FULL
+        + "\n- feat: issue a per-service certificate from an internal CA, which "
+        "is a line far wider than the wrap column and so proves the message "
+        "was never wrapped at all"
+    )
+    problems, bump, count = pr_body.review(body(changelog=changelog), wrapped=True)
     assert problems == []
     assert (bump, count) == ("minor", 3)
 

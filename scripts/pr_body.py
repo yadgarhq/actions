@@ -74,6 +74,39 @@ WRAP = 72
 REQUIRED = ("What", "Why", "Changelog", "Verification", "Risk")
 
 
+def looks_wrapped(lines, width=WRAP):
+    """Whether this text could be what the wrap emitted, judged as a whole.
+
+    WRAPPEDNESS IS A PROPERTY OF THE MESSAGE, not of one line, and deciding it
+    once is what stops the arithmetic below misfiring on a message the wrap
+    never touched. A repository whose squash message is not the pull request
+    body reaches history unwrapped, and its bullets are single lines far wider
+    than the column. `yadgarhq/iam-db` and `yadgarhq/task-db` both carry a
+    nine-entry Changelog of exactly that shape.
+
+    A GREEDY WRAP CAN STILL EMIT AN OVER-LONG LINE, and only one way: a single
+    token wider than the column, which has nowhere to break. A URL or a long
+    path does it. So an over-long line is evidence of an unwrapped message only
+    when it holds more than one word. Both halves are measured over 605 real
+    commit messages — 105 over-long single-token lines, which are wrap output,
+    against 4,520 over-long multi-word lines, which are not.
+
+    THE MEASUREMENT THAT DECIDED IT. Judging line by line instead, six real
+    messages in `deploy`, `docs`, `iam`, `project-db` and `telemetry` have an
+    unwrapped line of exactly 71 or 72 columns immediately above a genuine
+    bullet, and the arithmetic below absorbs that bullet. None of the six
+    changed a bump, but six of the seven near misses absorbed a `feat` — the
+    class that decides one. Deciding wrappedness first removes all six.
+    """
+    for line in lines:
+        if not line.strip() or len(line) <= width:
+            continue
+        if len(line.split()) == 1:
+            continue
+        return False
+    return True
+
+
 def is_wrap_continuation(previous, line, width=WRAP):
     """Whether the wrap alone explains `line` beginning where it does.
 
@@ -82,16 +115,13 @@ def is_wrap_continuation(previous, line, width=WRAP):
     line is a possible continuation only when its first word did not FIT on the
     line above. For a line opening `- ` that first word is one character, so the
     line above has to be 71 or 72 columns already — anything shorter had room
-    for the dash, and the author must have typed the break.
+    for the dash, and the author must have typed the break. An over-long single
+    token above it satisfies that trivially, which is the right answer: the wrap
+    had to break after it.
 
-    THE BOUND IS TWO-SIDED, and the upper half was found by replaying it over
-    601 real commit messages rather than reasoned out. A line LONGER than the
-    wrap column was not produced by the wrap at all — the body reached history
-    unwrapped, which happens whenever a repository's squash message is not the
-    pull request body. Without the upper bound every bullet in such a message
-    looks like a continuation of the bullet above it, and `yadgarhq/iam-db` and
-    `yadgarhq/task-db` both carry a nine-entry Changelog that collapsed to one.
-    A test alone would not have caught that; the corpus did.
+    ONLY ASK THIS OF A MESSAGE `looks_wrapped` HAS ALREADY ACCEPTED. On one it
+    has not, the arithmetic is being applied to line breaks a person typed, and
+    it will absorb bullets that are really bullets.
 
     Nothing precedes the first line of a paragraph, so it is never anybody's
     continuation. That is the invariant that keeps the two readings comparable:
@@ -101,8 +131,6 @@ def is_wrap_continuation(previous, line, width=WRAP):
         return False
     words = line.split()
     if not words:
-        return False
-    if len(previous) > width:
         return False
     return len(previous) + 1 + len(words[0]) > width
 
@@ -249,9 +277,11 @@ def review(text, wrapped):
     lines = found.get("Changelog", [])
     if any(l.strip() for l in lines):
         # BOTH READINGS OF THE SAME TEXT, because in wrapped mode they can
-        # differ and only one of them can be released. `absorb=wrapped` keeps a
-        # pull request body verbatim: what the author typed is what it says.
-        bad, lenient = changelog_entries(lines, wrapped, absorb=wrapped)
+        # differ and only one of them can be released. A pull request body is
+        # kept verbatim — what the author typed is what it says — and so is a
+        # commit message the wrap plainly never touched.
+        absorb = wrapped and looks_wrapped((text or "").splitlines())
+        bad, lenient = changelog_entries(lines, wrapped, absorb=absorb)
         _, strict = changelog_entries(lines, wrapped)
         if bad:
             problems.append(
