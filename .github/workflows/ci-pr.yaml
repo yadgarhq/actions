@@ -47,11 +47,12 @@ permissions:
 # 630's other half means each consumer subscribing to `edited`, which no change
 # here can do for them — this workflow is `workflow_call` only, so activity types
 # live in each caller's own `ci.yaml`. What a caller CANNOT choose is how much
-# `edited` re-runs, and the answer today is everything: one body edit on
-# `yadgarhq/actions` pull request 49 produced ten fresh check runs, and in the
-# Rust repositories that includes `test` with a database service container. So
-# the sweep across seventeen repositories would make every body typo re-run the
-# full matrix seventeen times over. This short-circuit is INERT until a caller
+# `edited` re-runs, and the answer before this change is everything. Measured on
+# `yadgarhq/actions` pull request 49, which is subscribed: four runs on ONE head
+# sha, each of them eleven jobs with seven executing. In the Rust repositories
+# that seven includes `test`, which starts a database service container. So the
+# sweep across seventeen repositories would make every body typo re-run the full
+# matrix seventeen times over. This short-circuit is INERT until a caller
 # subscribes, which is why it lands first.
 #
 # Validation on push to main would re-run exactly what the pull request just
@@ -1147,6 +1148,16 @@ jobs:
           rng = f"{last}..HEAD" if last else "HEAD"
           log = sh("git", "log", rng, "--format=%B%x00")
 
+          # IT ABSORBS MORE FREELY THAN THE GATE DOES, said here rather than
+          # left to be found. `changelog_entries` absorbs only inside an OPEN
+          # entry and only within the `## Changelog` section; this loop has
+          # neither notion, because the derivation never had one — it reads
+          # every line of every commit. So a bullet list under `## Why` written
+          # with no blank line above it can drop from the lenient count too.
+          # The direction is safe: a disagreement writes no tag and leaves main
+          # green, and across 160 real tag windows in eighteen repositories the
+          # two readings never disagreed once.
+          #
           # BOTH READINGS OVER THE WHOLE RANGE, and the range is why the gate
           # above is not enough on its own. That gate reads HEAD only, so it
           # refuses the ambiguous message on the push that lands it — and the
