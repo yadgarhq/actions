@@ -111,11 +111,48 @@ repos:
       # the actionlint and prettier entries above stay in step with their own
       # published/CI twins: if the two ever disagree, that is a drift to fix,
       # not a discrepancy to explain away.
+      #
+      # PYYAML IS HERE FOR THE SUBJECT, NOT FOR THE SUITE. `scripts/tests/`
+      # imports nothing beyond the standard library and pytest, but it runs
+      # `helm_pin_agrees.py` and `d80_portability.py` as SUBPROCESSES of
+      # `sys.executable` — which inside this hook is the hook's own venv — and
+      # those parse YAML. Without it every one of those cases fails with
+      # `ModuleNotFoundError: No module named 'yaml'`, which is a red that
+      # blames the suite for a missing dependency of the thing it is testing.
+      # Pinned to the same 6.0.3 the `portability` job installs in `ci-pr.yaml`.
       - id: pytest-scripts
         name: pytest scripts/tests
         language: python
-        additional_dependencies: ["pytest==9.1.1"]
+        additional_dependencies: ["pytest==9.1.1", "pyyaml==6.0.3"]
         entry: pytest scripts/tests/ -q
         pass_filenames: false
         always_run: true
         files: ^scripts/
+      # LEDGER 649. The helm the estate renders with is ONE constant with three
+      # copies — `precommit` and `portability` in `ci-pr.yaml`, `chart` in
+      # `ci-release.yaml` — and until this hook nothing compared them. Ledger 635
+      # set all three; nothing kept them set, and the divergence it exists to
+      # stop was already measured: `yadgarhq/iam` run 33968099875 installed helm
+      # v4.2.4 for one job and v3.18.4 for another, two majors inside one run.
+      #
+      # LOCAL AND NOT PUBLISHED in `.pre-commit-hooks.yaml`, unlike the hooks
+      # above it. This is a rule about THIS repository's own workflows rather
+      # than one the estate shares — no consumer repository installs helm, they
+      # call `ci-pr.yaml` and get these steps — which is the same reasoning
+      # `yadgarhq/config` records above its own local `one-source-per-knob`.
+      #
+      # `always_run` with `pass_filenames: false`, for the reason that gate
+      # gives too: a disagreement is a property of several files TOGETHER, so a
+      # hook that saw only the changed one would miss half of every divergence
+      # it exists to find.
+      #
+      # `language: python` rather than `system`, so pre-commit provisions the
+      # interpreter and PyYAML rather than trusting a bare CI runner to carry
+      # them — the failure class the actionlint entry above documents at length.
+      - id: helm-pin-agrees
+        name: every azure/setup-helm step installs the same helm
+        language: python
+        additional_dependencies: ["pyyaml==6.0.3"]
+        entry: python scripts/helm_pin_agrees.py
+        pass_filenames: false
+        always_run: true

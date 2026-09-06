@@ -135,6 +135,64 @@ def is_wrap_continuation(previous, line, width=WRAP):
     return len(previous) + 1 + len(words[0]) > width
 
 
+def commit_entries(lines):
+    """Every Changelog bullet in one commit message: its text, and both readings.
+
+    THE DERIVATION'S READER, lifted out of the `version` job's heredoc so the
+    text that reaches an annotated tag is written where it can be tested. That
+    job already imported `looks_wrapped` and `is_wrap_continuation`, and already
+    decided wrappedness once per commit — but it used them only to decide WHICH
+    BULLETS COUNT, never to reassemble what a bullet SAYS. So a bullet the wrap
+    broke across two lines reached the tag as its first line alone: the
+    continuation matched no `BULLET`, was skipped by the loop, and the tail was
+    gone. An annotated tag's message is the permanent record of a release and
+    the `v*` ruleset forbids moving or deleting one, so that truncation could
+    never be corrected — only a new tag could.
+
+    JOINING IS THE WHOLE OF THE CHANGE, and the invariant that makes it safe is
+    that a continuation line never matched `BULLET` in the first place, so it
+    was never counted. `entries`, `matches` and `lenient` hold exactly what they
+    held before, one element per bullet; only the TEXT of an entry grows. No
+    version this derives can move.
+
+    IT ABSORBS MORE FREELY THAN `changelog_entries` DOES, and that is inherited
+    rather than new: this reads every line of every commit with no notion of the
+    `## Changelog` section. `is_wrap_continuation` is what keeps it honest. A
+    greedy wrap fills every line but the last, so the line after a bullet's
+    final continuation is short, and a following heading or paragraph fails the
+    arithmetic and is not absorbed. A blank line closes the entry outright.
+
+    ONLY A MESSAGE `looks_wrapped` ACCEPTS is joined at all. One the wrap never
+    touched carries whole bullets on single lines, and joining into those would
+    append text the author deliberately put on a line of its own.
+    """
+    absorb = looks_wrapped(lines)
+    entries, matches, lenient = [], [], []
+    previous, open_entry = None, False
+    for line in lines:
+        if not line.strip():
+            previous, open_entry = None, False
+            continue
+        match = BULLET.match(line)
+        if not match:
+            if absorb and open_entry and is_wrap_continuation(previous, line):
+                entries[-1] += " " + line.strip()
+            else:
+                open_entry = False
+            previous = line
+            continue
+        entries.append(line.strip())
+        matches.append(match)
+        # THE AMBIGUITY READING, unchanged. A `- ` line the wrap alone explains
+        # is a second entry to the strict reading and a continuation to the
+        # lenient one, and when the two imply different bumps the caller cuts no
+        # tag at all.
+        if not (absorb and is_wrap_continuation(previous, line)):
+            lenient.append(match)
+        previous, open_entry = line, True
+    return entries, matches, lenient
+
+
 # A BOT IDENTITY, in the three shapes this is handed one. GitHub appends `[bot]`
 # to the login, so it ends the NAME (`dependabot[bot]`), precedes the `@` of the
 # noreply ADDRESS, and precedes the `<` of the `%an <%ae>` form a commit author
