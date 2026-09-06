@@ -15,6 +15,7 @@ beside it is that pull request's body as the API returns it.
 Run: python3 -m pytest scripts/tests/ -q
 """
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -24,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pr_body  # noqa: E402
 
 GATE = Path(__file__).resolve().parents[1] / "pr_body.py"
+REPO = Path(__file__).resolve().parents[2]
 
 
 def body(what="a thing", why="a reason", changelog="- fix: a thing",
@@ -593,3 +595,96 @@ def test_the_ambiguity_reading_is_unchanged_by_the_rejoining():
     _, matches, lenient = pr_body.commit_entries(lines)
     assert pr_body.bump_for(matches) == "major"
     assert pr_body.bump_for(lenient) == "patch"
+
+
+# ---------------------------------- what `sections()` does, now that two gates
+#                                    read a body through it (ledger 730)
+#
+# Both behaviours below were previously described in prose — in `sections()`'s
+# own docstring and in the pull request template's instructions — and pinned by
+# nothing. Lifting the `template` job's reader onto this module makes them the
+# shared contract for the pre-merge and post-merge readers at once, so they are
+# now the kind of thing that has to break loudly rather than quietly.
+
+
+def test_a_sub_heading_inside_a_required_section_makes_it_read_EMPTY():
+    """THE TRAP THE TEMPLATE WARNS ABOUT, and it must keep behaving this way.
+
+    ANY heading from `#` to `######` starts a new section, so a `###` inside
+    `## What` ends `## What` and the prose beneath it belongs to the sub-heading.
+    The section then collects nothing and is refused as empty, even though a
+    reader can plainly see the answer. That is surprising, it is deliberate, and
+    it is why the template says to use bold lead-ins for sub-structure.
+    """
+    text = body(what="### the detail\n\nthe prose that answers it")
+    problems, _, _ = pr_body.review(text, wrapped=False)
+    assert any("What" in p and "empty" in p for p in problems)
+
+
+def test_a_bold_lead_in_is_the_way_to_write_the_same_thing():
+    """THE PAIR. Without it the test above passes just as well against a gate
+    that refuses every body, and the template's own advice goes unchecked."""
+    text = body(what="**The detail.** The prose that answers it.")
+    problems, _, _ = pr_body.review(text, wrapped=False)
+    assert problems == []
+
+
+def test_a_repeated_heading_is_last_wins_rather_than_merged():
+    """LAST-WINS, asserted as a REFUSAL so it cannot pass vacuously.
+
+    A second `## Risk` with nothing under it replaces the answered one, and the
+    body is refused. A reader that merged the two, or kept the first, would call
+    this body complete.
+    """
+    text = body(risk="the answer") + "\n## Risk\n"
+    problems, _, _ = pr_body.review(text, wrapped=False)
+    assert any("Risk" in p and "empty" in p for p in problems)
+
+
+def test_the_later_heading_wins_in_the_other_direction_too():
+    """THE PAIR, and it separates last-wins from "an empty repeat always fails".
+
+    Empty first, answered second: last-wins accepts it. A reader that kept the
+    FIRST occurrence would refuse.
+    """
+    sections = body().split("## Risk")[0]
+    problems, _, _ = pr_body.review(sections + "## Risk\n\n## Risk\n\nthe answer\n",
+                                    wrapped=False)
+    assert problems == []
+
+
+# ------------------------------------------- one reader, and no second copy of it
+
+
+def test_no_workflow_carries_its_own_copy_of_the_contract():
+    """LEDGER 730, AND THIS IS THE TEST THAT MAKES THE EXTRACTION STICK.
+
+    The `template` job carried its own `REQUIRED`, `BULLET` and `TYPES` inside a
+    heredoc, importing nothing — a third reader of the same artefact that
+    nothing compared against this module. It agreed when it was lifted; the
+    point of this test is that the next copy cannot be added quietly.
+
+    STRUCTURAL RATHER THAN A LITERAL GREP: it matches the ASSIGNMENT of any of
+    the three names, so re-inlining with a reordered alternation or a reworded
+    heading list still trips it.
+    """
+    defines = re.compile(r"^\s*(REQUIRED|BULLET|TYPES)\s*=", re.M)
+    offenders = []
+    for workflow in sorted((REPO / ".github" / "workflows").glob("*.y*ml")):
+        for match in defines.finditer(workflow.read_text()):
+            offenders.append(f"{workflow.name}: {match.group(1)}")
+    assert offenders == [], (
+        "the template contract is defined in a workflow again; it belongs in "
+        f"scripts/pr_body.py and nowhere else: {offenders}"
+    )
+
+
+def test_both_readers_reach_the_gate_by_name():
+    """THE OTHER HALF: no inline copy AND the file is actually invoked.
+
+    Deleting the step entirely would satisfy the test above. Two jobs run the
+    script — `template` before the merge and `version` after it — and both reach
+    it through the same staged path.
+    """
+    text = (REPO / ".github" / "workflows" / "ci-pr.yaml").read_text()
+    assert text.count('python3 "$dir/pr_body.py"') == 2
