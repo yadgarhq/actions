@@ -558,21 +558,75 @@ jobs:
       # rather than falling back to `mariadb:11.8`, because an unpinned image
       # arriving through a fallback is exactly the pin D61 asks for going missing
       # while everything still looks green.
+      #
+      # TWO SOURCES ARE ASKED, AND NEITHER COVERS THE OTHER. `docker ps` answers
+      # on a GitHub-hosted runner, because the reference the `services:` block
+      # named is on the running container; `docker images` reports NO digest for
+      # that pull, which is why the first attempt of the proving run found
+      # nothing. `docker images` answers when this block is extracted and run
+      # OUTSIDE CI, which is how a developer reproduces the suite (see
+      # `store/tests/engine_tls.rs`'s header): there is no service container
+      # then, and the pinned image was pulled by digest, so its digest is
+      # recorded. Both paths are exercised.
+      #
+      # `|| true` ON BOTH READS, and it is load-bearing rather than tidy. Under
+      # `set -e` with `pipefail` a `grep` that matches nothing kills the step
+      # outright, so on the first attempt the refusal never printed and the log
+      # said only "Process completed with exit code 1" — the silent failure the
+      # refusal exists to replace. Measured: store#21, run 34032503728 attempt 1.
+      #
+      # THE PREDICATE READS A FACT, NOT A FILE NAME. `[ -f tests/engine_tls.rs ]`
+      # is a detection that answers "no" the day somebody renames the file, and a
+      # check switched off by a rename reports green forever — the failure
+      # `detect`'s own comment names. The contract between this step and a suite
+      # is the three environment variables, so the fact read is which test
+      # SOURCES name `YADGAR_TEST_TLS_DSN`. A source naming one of the other two
+      # without the DSN refuses the run: half a contract is a rename that
+      # switched this off, and it is the one way the "no" could be false. Same
+      # shape as `detect` refusing a `proto/` with no `PROTO_VERSION`.
+      #
+      # THE jq RUNS IN AN ASSIGNMENT, NOT IN A PROCESS SUBSTITUTION, and that is
+      # the same class of hole one level earlier. A command that fails inside a
+      # process substitution does not trip `set -e`: measured with a `cargo` that
+      # prints "not json", the array came back EMPTY and the shell stayed alive
+      # at status 0, so a jq that died on unexpected metadata would fall through
+      # to a `wanted` count of zero, print the "skipped" line and exit GREEN —
+      # the state before this step, wearing the appearance of coverage.
+      # Assigning first makes the failure the assignment's, which `set -e` does
+      # catch: the same input now exits 5. A crate with no integration test
+      # target is a different thing and still reaches the skip arm, because
+      # there jq succeeds and prints nothing.
+      #
+      # THE ASSERTION THIS STEP EXISTS FOR is at the bottom of the block.
+      # `cargo test -- --ignored` exits 0 having run NOTHING — a filter that
+      # matches no test, a suite whose `#[ignore]` was lifted, a target that no
+      # longer exists. A green job that executed no test is worse than the state
+      # before this step, because it looks like coverage. So the `test result:`
+      # line is read and required to report at least one PASS with nothing left
+      # IGNORED. A count rather than a literal `3`, so a fourth arm added on
+      # purpose does not redden it.
+      #
+      # THE PROSE LIVES HERE RATHER THAN INSIDE THE `run:`, and that is
+      # mechanical rather than aesthetic. actionlint pipes a `run:` block to
+      # shellcheck without draining the pipe, so a block over 8192 bytes hangs
+      # the linter and burns the job's whole timeout — `hooks/run_block_size.py`
+      # caps it at 8000 for that reason. Explaining this step in the depth the
+      # estate expects put the block at 8649 bytes, and the hook could not even
+      # report it, because `actionlint` runs first and had already deadlocked. A
+      # YAML comment above the step is outside the block and costs nothing.
       - name: the ignored suites that need a private-CA engine
         run: |
           set -euo pipefail
 
-          # WHICH TEST TARGETS, read from the crate rather than from a file name.
-          # `[ -f tests/engine_tls.rs ]` is a detection that answers "no" the day
-          # somebody renames the file, and a check switched off by a rename
-          # reports green forever — the failure `detect`'s own comment names. The
-          # CONTRACT between this step and a suite is the three environment
-          # variables, so the fact read here is which test sources name them.
+          # Which test targets: read from the crate, never from a file name.
+          # The jq runs in an ASSIGNMENT, not a process substitution — see the
+          # comment above the step for both reasons.
           meta=$(cargo metadata --no-deps --format-version 1)
-          mapfile -t rows < <(printf '%s' "$meta" | jq -r '
+          rows_raw=$(printf '%s' "$meta" | jq -r '
             .packages[].targets[]
             | select(.kind | index("test"))
             | "\(.name)\t\(.src_path)"')
+          mapfile -t rows < <(printf '%s' "$rows_raw")
 
           echo "test targets read from cargo metadata: ${#rows[@]}"
 
@@ -589,11 +643,7 @@ jobs:
             fi
           done
 
-          # HALF A CONTRACT IS A RENAME THAT SWITCHED THIS OFF, and it is the one
-          # way the "no" below could be false. Same shape as `detect` refusing a
-          # `proto/` with no `PROTO_VERSION`: the fixture is named by three
-          # variables, so a suite naming two of them is a suite this step would
-          # skip while its author believed it ran.
+          # Half a contract is a rename that switched this off.
           if [ ${#partial[@]} -gt 0 ]; then
             echo "::error::${partial[*]} names YADGAR_TEST_TLS_CA or YADGAR_TEST_TLS_WRONG_CA but not YADGAR_TEST_TLS_DSN, so this step would skip it. Those three names are the contract that stands the private-CA engine up; restore the third or drop the other two."
             exit 1
@@ -604,26 +654,9 @@ jobs:
             exit 0
           fi
 
-          # `|| true` ON BOTH READS, and it is load-bearing rather than tidy.
-          # Under `set -e` with `pipefail` a `grep` that matches nothing kills
-          # the step outright, so the refusal below never printed and the log
-          # said only "Process completed with exit code 1" — the silent failure
-          # the refusal exists to replace. Measured on the first run of this
-          # step (store#21, run 34032503728).
-          #
-          # THE RUNNING SERVICE CONTAINER IS ASKED FIRST, and it is the source
-          # that answers on a GitHub-hosted runner: `docker images` reports NO
-          # digest for the image the runner pulled for `services:`, which is why
-          # the first attempt found nothing. Measured, not assumed — run
-          # 34032503728 attempt 1 died on that read, attempt 2 printed
-          # `using mariadb@sha256:2439dcd7…`.
-          #
-          # THE IMAGE LIST IS NOT DEAD CODE. It is the source that answers when
-          # this block is extracted and run outside CI, which is how a developer
-          # reproduces the suite (see `store/tests/engine_tls.rs`'s header):
-          # there is no service container then, and the pinned image is one that
-          # was pulled by digest, so its digest IS recorded. Both paths are
-          # exercised; neither covers the other.
+          # `|| true` on both reads is load-bearing, and two sources are asked
+          # because each answers where the other does not — see the comment
+          # above the step.
           image=$(docker ps --no-trunc --format '{{.Image}}' \
             | grep -E '(^|/)mariadb@sha256:[0-9a-f]{64}$' | head -n1 || true)
           if [ -z "$image" ]; then
@@ -638,10 +671,9 @@ jobs:
           fi
           echo "using $image"
 
-          # A ONE-DAY LIFETIME because the fixture outlives nothing but this job.
+          # A one-day lifetime: the fixture outlives nothing but this job.
           # `verify_identity` checks the DSN's host against the certificate, so
-          # the SAN carries both spellings of loopback and the DSN uses the DNS
-          # one.
+          # the SAN carries both spellings of loopback.
           D="$RUNNER_TEMP/private-ca-engine"
           mkdir -p "$D"
           openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
@@ -657,10 +689,9 @@ jobs:
           openssl x509 -req -in "$D/server.csr" -CA "$D/good-ca.pem" \
             -CAkey "$D/good-ca.key" -CAcreateserial -out "$D/server.pem" \
             -days 1 -extfile "$D/server.ext" 2>/dev/null
-          # THE CONTAINER'S mysql UID MUST READ THESE. An unreadable key is this
-          # fixture's one false verdict: MariaDB starts with TLS off,
-          # `require_secure_transport` refuses everything, and all three arms fail
-          # in a way that reads as "the CA was never consulted".
+          # The container's mysql uid must READ these. An unreadable key is
+          # this fixture's one false verdict: MariaDB starts with TLS off and
+          # every arm fails as though the CA was never consulted.
           chmod 644 "$D"/*.pem "$D"/*.key
 
           # 3307, because the plaintext service container above holds 3306 and the
@@ -706,18 +737,9 @@ jobs:
               exit "$rc"
             fi
 
-            # THE ASSERTION THIS STEP EXISTS FOR. `cargo test -- --ignored` exits
-            # 0 having run NOTHING — a filter that matches no test, a suite whose
-            # `#[ignore]` was lifted, a target that no longer exists. A green job
-            # that executed no test is worse than the state before this step,
-            # because it looks like coverage. So the summary line is read: at
-            # least one test PASSED, and none stayed IGNORED.
-            #
-            # A count rather than a number: asserting `3 passed` would redden a
-            # fourth arm somebody adds on purpose.
-            # `|| true` for the same reason as the image read above: a `grep`
-            # that matches nothing would kill the step under `set -e` before
-            # the refusal below could name what was missing.
+            # THE ASSERTION THIS STEP EXISTS FOR: `cargo test -- --ignored`
+            # exits 0 having run NOTHING. A count rather than a literal 3.
+            # `|| true` for the same reason as the image read above.
             line=$(grep -E '^test result:' "$out" | tail -n1 || true)
             passed=$(printf '%s' "$line" | sed -n 's/^test result: [^.]*\. \([0-9]*\) passed.*/\1/p')
             ignored=$(printf '%s' "$line" | sed -n 's/.*; \([0-9]*\) ignored.*/\1/p')
@@ -729,7 +751,12 @@ jobs:
               echo "::error::$t executed no ignored test ($line). The private-CA engine was stood up and nothing was measured against it."
               exit 1
             fi
-            echo "- \`$t\`: $passed ignored test(s) executed against a private-CA engine" >> "$GITHUB_STEP_SUMMARY"
+            # To the LOG as well as the summary. A step summary renders only
+            # in the web UI, so a reviewer checking that the suite executed
+            # could not read it out of the log or out of the API.
+            msg="- \`$t\`: $passed ignored test(s) executed against a private-CA engine"
+            echo "$msg"
+            echo "$msg" >> "$GITHUB_STEP_SUMMARY"
           done
 
   # D70: a consumer VENDORS the protos it needs at a pinned tag. Vendoring is
