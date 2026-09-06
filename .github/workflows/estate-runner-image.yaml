@@ -40,6 +40,19 @@ on:
 permissions:
   contents: read
 
+# A SECOND REGISTRY WRITE NEEDS A LOCK. Promoting `:latest` below is a write
+# that FOLLOWS the push, so two overlapping runs — the Monday cron and a `main`
+# push, say — can interleave one run's promotion with another run's push and
+# leave the consumed tag pointing at a digest neither run signed.
+#
+# `cancel-in-progress: false`, DELIBERATELY. A run killed between `push` and
+# `sign` leaves a published, unsigned image, which is the failure this file
+# already reorders its steps to avoid. A lock that queues is the point; a lock
+# that kills reintroduces what the ordering removed.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 env:
   REGISTRY: ghcr.io
 
@@ -124,6 +137,12 @@ jobs:
 
       # ONLY NOW. The layers are already in the build cache, so this re-uses
       # them rather than rebuilding.
+      #
+      # THE DATED TAG ALONE. `:latest` is the tag the runner pod resolves, and
+      # it is not written here: it is promoted further down, after the equality
+      # below has been asserted and the digest has been signed. Nothing consumes
+      # the dated tag by default, so publishing it first is what gives the
+      # assertion something to refuse.
       - id: push
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -131,34 +150,89 @@ jobs:
           file: containers/estate-runner/Containerfile
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/estate-runner:latest
             ${{ env.REGISTRY }}/${{ github.repository_owner }}/estate-runner:${{ steps.v.outputs.version }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
-      # GUARD AT THE PRODUCER, NOT AT EACH CONSUMER. `steps.push.outputs.digest`
-      # feeds three of them below — the SBOM, the cosign signature and the step
-      # summary the operator copies into `estate-front-runner.yaml`. The first
-      # two build a reference ending in `@` and die on the malformed ref, by luck
-      # rather than design. The SUMMARY fails silently: it prints an image line
-      # with no digest and exits 0, so the operator pins nothing. This estate has
-      # already paid for that lesson once, in `ci-release.yaml`, where an empty
-      # digest published a chart with no tag at all.
+      # THE EQUALITY THE GATE RESTS ON, ASSERTED RATHER THAN OBSERVED ONCE
+      # (ADR-0587). The delta gate above reads `estate-runner:candidate` out of
+      # the runner's local daemon; what reaches the registry is a SECOND build.
+      # They agree because the `FROM` is digest-pinned and the push leg reuses
+      # the buildx cache the build leg filled inside this same job — a property
+      # of the current arrangement, not a claim this workflow makes. An evicted
+      # cache or an inserted step would publish an image no delta gate ever read
+      # and report success.
       #
-      # THE RIGHT-HAND SIDE OF `=~` STAYS UNQUOTED. Quoting turns the pattern
-      # into a literal string, so the guard would reject every valid digest — a
-      # red build on every release. A test that feeds only malformed input passes
-      # either way, so the valid case has to be a real 64-character hex digest.
-      - name: the digest must be a digest
+      # IT RUNS BEFORE THE PROMOTION, WHICH IS WHAT MAKES IT A GATE rather than
+      # a report: a mismatch found here refuses to move `:latest`.
+      #
+      # SHAPE-AGNOSTIC, AND THIS IS THE IMAGE THAT NEEDS IT. `push: true`
+      # attaches a provenance attestation, so what lands is normally an OCI
+      # index whose sole child carrying no `vnd.docker.reference.type`
+      # annotation is the built digest. This workflow has never published
+      # successfully (the package is unlinked), and the only tag that exists,
+      # `0.1.0`, is a plain manifest pushed by hand — so nobody can say which of
+      # the two shapes its first success produces. Written for the index case
+      # alone this returns an empty child list against a plain manifest and reds
+      # every run.
+      #
+      # AUTHENTICATED, via the `docker/login-action` above. The anonymous flow
+      # would red here on a private package, which is exactly the fact the
+      # anonymous-pull check further down reports properly, with its own three
+      # messages.
+      #
+      # THREE CAUSES, THREE MESSAGES, the same rule as that check (ADR-0578). A
+      # missing digest, an unreachable registry and a genuine mismatch are three
+      # different facts and only the third says anything about what was
+      # published.
+      #
+      # THIS SUBSUMES THE FORMAT GUARD THAT STOOD HERE, which checked only that
+      # `steps.push.outputs.digest` looked like a digest. Both lessons it
+      # recorded survive in the loop below. An empty digest is not hypothetical:
+      # it feeds the SBOM and cosign as a reference ending in `@`, which they
+      # refuse by luck rather than by design, and it feeds the step summary the
+      # operator copies into `estate-front-runner.yaml`, which prints an image
+      # line with no digest and exits 0 — so the operator pins nothing. And THE
+      # RIGHT-HAND SIDE OF `=~` STAYS UNQUOTED: quoting turns the pattern into a
+      # literal string, so the guard would reject every valid digest. A test
+      # that feeds only malformed input passes either way, so the valid case has
+      # to be a real 64-character hex digest.
+      - name: the published manifest must commit to the scanned candidate
         env:
-          DIGEST: ${{ steps.push.outputs.digest }}
+          REF: ${{ env.REGISTRY }}/${{ github.repository_owner }}/estate-runner
+          BUILT: ${{ steps.build.outputs.digest }}
+          PUSHED: ${{ steps.push.outputs.digest }}
         run: |
           set -euo pipefail
-          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "::error::the push step produced no usable digest: '${DIGEST}'"
+
+          for pair in "build:$BUILT" "push:$PUSHED"; do
+            step=${pair%%:*}
+            digest=${pair#*:}
+            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::the ${step} step produced no usable digest: '${digest}'"
+              exit 1
+            fi
+          done
+
+          if ! raw=$(docker buildx imagetools inspect --raw "${REF}@${PUSHED}"); then
+            echo "::error::could not read back the manifest just pushed at ${PUSHED}."
+            echo "::error::That is a registry or credential fault and says NOTHING about whether the scanned image is the published one."
             exit 1
           fi
-          echo "digest: $DIGEST"
+
+          if printf '%s' "$raw" | jq -e 'has("manifests")' >/dev/null; then
+            children=$(printf '%s' "$raw" | jq -r '.manifests[] | select(.annotations["vnd.docker.reference.type"] == null) | .digest')
+          else
+            children=$PUSHED
+          fi
+
+          if ! printf '%s\n' "$children" | grep -Fqx "$BUILT"; then
+            echo "::error::the published manifest does not commit to the scanned candidate."
+            echo "::error::scanned ${BUILT}; published ${PUSHED} carries [${children//$'\n'/ }]."
+            echo "::error::latest is NOT promoted, and the dated tag now holds bytes no delta gate read."
+            exit 1
+          fi
+          echo "the published manifest commits to the scanned candidate: ${BUILT}"
 
       - name: SBOM
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
@@ -171,6 +245,38 @@ jobs:
         env:
           IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/estate-runner@${{ steps.push.outputs.digest }}
         run: cosign sign --yes "$IMAGE"
+
+      # THE PROMOTION, AND THE ONLY STEP THAT MOVES THE TAG THE RUNNER POD
+      # RESOLVES. It follows `sign`, so `:latest` moves to a digest that has
+      # passed the delta gate, been asserted equal to what was published and
+      # been signed.
+      #
+      # THE READ-BACK IS NOT DECORATION. `imagetools create` from a single
+      # source is documented as a copy, but nothing in this estate has measured
+      # whether it copies the manifest byte for byte or re-serialises it, and a
+      # re-serialised manifest is a NEW digest that the `cosign sign` above did
+      # not sign. The content would still be the gated bytes; the signature
+      # would simply not cover the tag, silently.
+      #
+      # IT ALSO HAS TO RUN BEFORE THE ANONYMOUS-PULL CHECK BELOW, which fetches
+      # `manifests/latest`. On this image that tag has never existed, so a
+      # promotion placed after it would report "not publicly pullable" for a
+      # package that is merely untagged.
+      - name: promote :latest to the signed digest
+        env:
+          REF: ${{ env.REGISTRY }}/${{ github.repository_owner }}/estate-runner
+          PUSHED: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create -t "${REF}:latest" "${REF}@${PUSHED}"
+
+          promoted=$(docker buildx imagetools inspect "${REF}:latest" --format '{{.Manifest.Digest}}')
+          if [ "$promoted" != "$PUSHED" ]; then
+            echo "::error::the latest tag resolves to ${promoted}, not the signed ${PUSHED}."
+            echo "::error::The tag has MOVED and the signature does not cover what it points at."
+            exit 1
+          fi
+          echo "latest -> ${PUSHED}"
 
       # A VISIBILITY FLIP IS OTHERWISE SILENT. The runner pod carries no
       # `imagePullSecrets` by design, so the kubelet pulls anonymously; a
