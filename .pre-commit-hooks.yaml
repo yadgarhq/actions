@@ -270,3 +270,59 @@
   language: script
   entry: hooks/observe_coverage.py
   files: \.rs$
+
+# LEDGER 658. A mechanical ceiling on the size of a `run:` block, published so a
+# repository that grows one can inherit the check rather than rediscover the
+# failure. actionlint pipes every `run:` block to shellcheck and does not drain
+# the pipe while it writes; above 8192 bytes the write never returns, actionlint
+# hangs, and the job burns its whole timeout. The numbers are in the script.
+#
+# PUBLISHED BUT ADOPTED NOWHERE TODAY, and the measurement says so rather than a
+# preference. Measured across all eighteen repositories 2026-09-06, the largest
+# `run:` block outside this one is 303 bytes in `estate/smoke.yaml`; every other
+# consumer is at zero, because a consumer's workflow is a caller. This
+# repository's own `ci-pr.yaml` is at 7795 bytes against the 8000 limit. So the
+# entry exists for the repository that first writes a real `run:` block, and
+# adding the id to a consumer that has nothing to measure would be ceremony.
+#
+# `language: script`, NOT python — the reason the `complexity` entry above
+# records: a python-language hook pip-installs this repository, and the failure
+# surfaces in the consuming repo as an install error rather than a hook error.
+# The script is stdlib-only and carries a shebang and the executable bit.
+- id: run-block-size
+  name: a run block must stay small enough to lint
+  language: script
+  entry: hooks/run_block_size.py
+  files: ^\.github/workflows/.*\.ya?ml$
+
+# LEDGER 648. The ADR-0569 gate, published. It was a 131-line shell script
+# copied byte-identically into five repositories — gateway, iam, iam-db, task
+# and task-db — each declaring it `repo: local`. Measured 2026-09-06: md5
+# identical in all five. A copy is not a shared gate. The other SEVEN Rust
+# repositories in the estate never had it, so the rule ADR-0574 says must be
+# closed as a CLASS was in force in five repositories and absent in seven, and
+# no repository created after those five would have inherited it.
+#
+# The sweep that publishing made possible found what the copies could not: real
+# violations in `project-db`, `store` and `estate`, none of which carried the
+# gate. That is the argument for publication in one line — five copies checked
+# the five repositories that already passed.
+#
+# `always_run` with `pass_filenames: false`, because the subject is the whole
+# source tree rather than the file somebody touched: a compiled-in default added
+# to a file the commit does not name is exactly the case a filtered hook misses.
+# The script asserts it actually searched something and prints the count, so a
+# run that globs nothing refuses rather than passes.
+#
+# `language: script`, for the reason `observe-coverage` and `complexity` record:
+# `language: python` makes pre-commit try to pip install this repository, which
+# is not a package, and the error is raised in the CONSUMING repo where nothing
+# explains it. Under `language: script` pre-commit runs the file from its own
+# clone while the working directory stays the consumer's root, which is what
+# lets the script's `src/`, `tests/` and `crates/*/src` walk see the consumer.
+- id: no-compiled-in-defaults
+  name: ADR-0569 — no compiled-in configuration default
+  language: script
+  entry: hooks/no_compiled_in_defaults.sh
+  always_run: true
+  pass_filenames: false

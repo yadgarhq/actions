@@ -11,6 +11,28 @@ repos:
       - id: check-added-large-files
       - id: check-yaml
         args: [--allow-multiple-documents]
+  # LEDGER 647. This repository ships shell to every other one — hooks/*.sh runs
+  # in each consumer that references a `language: script` hook — and until this
+  # entry nothing checked a line of it. The estate holds eight `.sh` files and
+  # had no shellcheck anywhere: not a hook, not a CI step. The gap is sharpest
+  # here, because `hooks/actionlint.sh` exists to refuse when shellcheck is NOT
+  # running over workflow `run:` blocks, and was itself unchecked shell.
+  #
+  # `shellcheck-py` rather than `koalaman/shellcheck-precommit`: the latter is a
+  # Docker hook and needs a daemon, while this provisions the binary into the
+  # hook's own venv. That is the same self-provisioning argument the
+  # `pytest-scripts` entry below records, and it is why this runs on a machine
+  # with no shellcheck on $PATH.
+  #
+  # NOT ADDED TO THE PUBLISHED MANIFEST. A consumer's shell is its own, and
+  # `hooks/*.sh` is checked HERE on every consumer's behalf — one definition
+  # rather than sixteen pins. A repository that grows shell of its own can
+  # reference shellcheck-py directly.
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1
+    hooks:
+      - id: shellcheck
+
   - repo: local
     hooks:
       - id: gitleaks
