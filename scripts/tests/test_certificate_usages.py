@@ -345,8 +345,34 @@ def test_one_certificate_is_below_the_floor(tmp_path):
 # --- what it deliberately does not read -------------------------------------
 
 
-def test_a_helm_template_is_skipped(tmp_path):
-    """A Go template is not YAML. Documented as a limit, not a claim."""
+def test_a_templated_file_is_skipped_and_counted(tmp_path):
+    """The skip is wider than "Helm templates" and must say so out loud.
+
+    `${{ ... }}` is GitHub Actions expression syntax, so a workflow is skipped
+    by the same rule a chart template is. Neither holds a Certificate here, so
+    the run passes — and reports what it did not read.
+    """
+    write(tmp_path, "infra/certificates.yaml", SERVING_WITH_COMMENT_GAP, EDGE)
+    write(tmp_path, "infra/client.yaml", CLIENT, AUTHORITY)
+    write(
+        tmp_path,
+        ".github/workflows/ci.yaml",
+        "on: push\njobs:\n  a:\n    steps:\n      - run: echo ${{ github.sha }}\n",
+    )
+    write(
+        tmp_path,
+        "chart/templates/service.yaml",
+        "kind: Service\nmetadata:\n  name: {{ .Release.Name }}\n",
+    )
+    result = run(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "inspected 4 Certificate(s)" in result.stdout
+    assert "skipped 2 templated file(s)" in result.stdout
+
+
+def test_a_templated_file_holding_a_certificate_is_refused(tmp_path):
+    """The floors cannot catch this: dropping one leaf from ten still clears
+    them. A certificate the gate never opened must not sit behind a pass."""
     write(tmp_path, "infra/certificates.yaml", SERVING_WITH_COMMENT_GAP, EDGE)
     write(tmp_path, "infra/client.yaml", CLIENT, AUTHORITY)
     write(
@@ -356,5 +382,29 @@ def test_a_helm_template_is_skipped(tmp_path):
         "spec:\n  usages:\n    - server auth\n    - client auth\n",
     )
     result = run(tmp_path)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "inspected 4 Certificate(s)" in result.stdout
+    assert result.returncode == 1
+    assert "chart/templates/cert.yaml" in result.stdout
+    assert "never read" in result.stdout
+
+
+def test_a_trailing_comment_does_not_hide_a_templated_certificate(tmp_path):
+    """`kind: Certificate  # serving` is legal YAML and must not be invisible.
+
+    Anchoring the grep on `$` alone let a templated leaf carrying BOTH
+    directions pass with exit 0 — this file's own defect one level down, for
+    the third time. A comment after the value changes nothing about the
+    document, so it must change nothing about the verdict.
+    """
+    write(tmp_path, "infra/certificates.yaml", SERVING_WITH_COMMENT_GAP, EDGE)
+    write(tmp_path, "infra/client.yaml", CLIENT, AUTHORITY)
+    write(
+        tmp_path,
+        "chart/templates/cert.yaml",
+        "apiVersion: cert-manager.io/v1\n"
+        "kind: Certificate  # serving leaf for {{ .Release.Name }}\n"
+        "spec:\n  usages:\n    - server auth\n    - client auth\n",
+    )
+    result = run(tmp_path)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "chart/templates/cert.yaml" in result.stdout
+    assert "never read" in result.stdout

@@ -84,11 +84,22 @@ case where "no problems found" is least trustworthy.
 
 WHAT IT DOES NOT CHECK, said here rather than left to be found.
 
-  * HELM TEMPLATES ARE SKIPPED. A chart template is a Go template that happens
-    to look like YAML, and no parser here can read `{{ .Values.x }}` as a value.
-    No chart in this estate declares a Certificate today — measured across all
-    eighteen repositories on 2026-09-06 — so this costs nothing now. If one
-    does, this gate will not see it, and widening it then is the honest fix.
+  * A TEMPLATED FILE IS NOT READ, AND THE COUNT SAYS SO. Any file carrying a
+    `{{` is skipped, because no parser here can read `{{ .Values.x }}` as a
+    value. That is WIDER than "Helm templates", and saying otherwise was this
+    file's own first version of the defect it exists to close: `${{ ... }}` is
+    GitHub Actions expression syntax, so every workflow was already being
+    skipped while the note claimed charts were. Measured in `yadgarhq/deploy` on
+    2026-09-06, the skip drops three files — `.github/workflows/ci.yaml`,
+    `infra/prometheus.yaml` and `infra/network-policies/shared-infrastructure.yaml`
+    — and none holds a Certificate.
+
+    SO THE SKIP IS COUNTED AND PRINTED, and a skipped file that DOES hold a
+    `kind: Certificate` is REFUSED rather than passed over. The floors cannot
+    catch that one: dropping a single leaf from ten still clears both. This is
+    the same fail-closed rule the paragraph above states for a shape the scan
+    cannot parse, applied to a file it never opened — the refusal asks for the
+    gate to be widened, and is not a rule about where a Certificate may live.
   * A LEAF ISSUED OUTSIDE GIT. cert-manager is not the only way a Secret can
     hold a certificate, and a leaf minted by hand is invisible to a scan of the
     tree. The live cluster is the check for that, not this.
@@ -123,8 +134,22 @@ SUFFIXES = (".yaml", ".yml")
 # the rest are caches and vendored trees that can hold a copy of anything.
 SKIP_DIRECTORIES = {".git", "node_modules", "target", ".venv", "__pycache__"}
 
-# A Go template marker. A file carrying one is a Helm template, not YAML.
+# A template marker. A file carrying one is a Helm chart template or a GitHub
+# Actions workflow (`${{ ... }}`), and neither is YAML this scan can read.
 TEMPLATE = re.compile(r"\{\{")
+
+# Enough to tell a templated file that holds a Certificate from one that does
+# not. A grep rather than a parse, because a parse is exactly what is impossible
+# here — and the only verdict it feeds is "this gate must be widened".
+#
+# THE TRAILING COMMENT IS PART OF THE PATTERN, not decoration. Anchoring this on
+# `$` alone made `kind: Certificate  # serving` invisible, so a templated leaf
+# carrying both directions passed with exit 0 — this file's own defect for the
+# third time, one level further down each time. A `#` after the value is legal
+# YAML and changes nothing about the document.
+CERTIFICATE_KIND = re.compile(
+    r"^\s*kind:\s*[\"']?Certificate[\"']?\s*(?:#.*)?$", re.MULTILINE
+)
 
 DOCUMENT_BREAK = re.compile(r"^---\s*$")
 TOP_LEVEL_KEY = re.compile(r"^(?P<key>[A-Za-z_][\w.-]*):\s*(?P<value>.*)$")
@@ -273,7 +298,15 @@ def certificates(path: pathlib.Path):
 
 
 def yaml_files(root: pathlib.Path):
-    """Every YAML file under `root` that is not a Helm template or a cache."""
+    """Partition the YAML under `root` into what this scan reads and what it cannot.
+
+    Returns `(readable, templated)`. A templated file carries a `{{` — a Helm
+    value or a GitHub Actions expression alike — and no parser here can read it.
+    The caller counts and reports the second list rather than dropping it
+    silently, which is the whole point: an invisible skip in this gate is the
+    defect the gate exists to refuse.
+    """
+    readable, templated = [], []
     for path in sorted(root.rglob("*")):
         if path.suffix not in SUFFIXES or not path.is_file():
             continue
@@ -284,8 +317,10 @@ def yaml_files(root: pathlib.Path):
         except (OSError, UnicodeDecodeError):
             continue
         if TEMPLATE.search(text):
-            continue
-        yield path
+            templated.append((path, CERTIFICATE_KIND.search(text) is not None))
+        else:
+            readable.append(path)
+    return readable, templated
 
 
 def judge(path, name, is_ca, usages):
@@ -326,7 +361,9 @@ def main() -> int:
     leaves = 0
     problems: list[str] = []
 
-    for path in yaml_files(root):
+    readable, templated = yaml_files(root)
+
+    for path in readable:
         try:
             found = list(certificates(path))
         except Unreadable as error:
@@ -340,8 +377,22 @@ def main() -> int:
 
     print(
         f"certificate-usages: inspected {total} Certificate(s), "
-        f"{leaves} of them leaves subject to the `{SERVER}` / `{CLIENT}` wall."
+        f"{leaves} of them leaves subject to the `{SERVER}` / `{CLIENT}` wall; "
+        f"skipped {len(templated)} templated file(s) this scan cannot read."
     )
+
+    unreadable = [path for path, holds_one in templated if holds_one]
+    if unreadable:
+        for path in unreadable:
+            print(
+                f"::error::{path} is templated — it carries `{{{{ ... }}}}` — and "
+                "declares a `kind: Certificate` this gate therefore never read. A "
+                "verdict over the certificates it COULD read would be a pass that "
+                "inspected less than it reported, and the floors below cannot catch "
+                "it: dropping one leaf from ten still clears them. Widen this gate "
+                "to render the template, or declare the leaf where it can be read."
+            )
+        return 1
 
     if total < MINIMUM_CERTIFICATES:
         print(
