@@ -114,12 +114,15 @@ jobs:
         with:
           python-version: "3.x"
       # scripts/tests/ imports nothing beyond the standard library and pytest
-      # itself. Pinned to the version this suite is verified against, and kept
-      # in step with the `pytest-scripts` hook's own pin in
-      # `.pre-commit-config.yaml` — if the two ever disagree, that is a drift
-      # to fix, not a discrepancy to explain away.
+      # itself, but it RUNS the gates as subprocesses and `helm_pin_agrees.py`
+      # parses YAML, so PyYAML has to be in the interpreter the suite spawns.
+      # (`d80_portability.py` parses YAML as well but has no test, so it is not
+      # a reason for this pin yet.) Both pins are kept in step with the
+      # `pytest-scripts` hook's own in `.pre-commit-config.yaml` — if the two
+      # ever disagree, that is a drift to fix, not a discrepancy to explain
+      # away.
       - name: install pytest
-        run: pip install --disable-pip-version-check "pytest==9.1.1"
+        run: pip install --disable-pip-version-check "pytest==9.1.1" "pyyaml==6.0.3"
       - run: python3 -m pytest scripts/tests/ -q
 
   ci:

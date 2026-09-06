@@ -1074,7 +1074,7 @@ jobs:
           import os, re, subprocess, sys
 
           sys.path.insert(0, os.environ["GATE_DIR"])
-          from pr_body import BULLET, bump_for, is_wrap_continuation, looks_wrapped
+          from pr_body import bump_for, commit_entries
 
           def sh(*a):
               return subprocess.run(a, capture_output=True, text=True).stdout.strip()
@@ -1106,25 +1106,24 @@ jobs:
           # NEXT push, with a clean HEAD, still has the ambiguous commit sitting
           # in `last..HEAD` and would cut the major from it. Refusing here is
           # what makes 687(c) closed rather than delayed by one merge.
+          #
+          # THE READER IS `commit_entries` NOW, and it lives in `pr_body.py`
+          # rather than here. It still decides wrappedness once per commit — a
+          # message the wrap never touched absorbs nothing, because six real
+          # messages in the estate carry an unwrapped line of 71 or 72 columns
+          # above a genuine bullet and asking the arithmetic line by line eats
+          # that bullet. What it ALSO does now is REASSEMBLE: a bullet the wrap
+          # broke across two lines used to reach the tag as its first line
+          # alone, and the tag message written below is permanent (ledger 559).
+          # Counting is untouched — a continuation never matched `BULLET`, so it
+          # was never an entry — and a heredoc is the one place in this
+          # repository nothing can test, which is the second reason it moved.
           entries, matches, lenient = [], [], []
           for commit in [c for c in log.split("\0") if c.strip()]:
-              lines = commit.splitlines()
-              # WRAPPEDNESS IS DECIDED ONCE PER COMMIT, and a message the wrap
-              # never touched absorbs nothing. Six real messages in the estate
-              # carry an unwrapped line of 71 or 72 columns above a genuine
-              # bullet, and asking the arithmetic line by line eats that bullet.
-              absorb = looks_wrapped(lines)
-              previous = None
-              for line in lines:
-                  m = BULLET.match(line)
-                  if not m:
-                      previous = line
-                      continue
-                  entries.append(line.strip())
-                  matches.append(m)
-                  if not (absorb and is_wrap_continuation(previous, line)):
-                      lenient.append(m)
-                  previous = line
+              e, m, l = commit_entries(commit.splitlines())
+              entries += e
+              matches += m
+              lenient += l
 
           base = SEMVER.match(last) if last else None
           ambiguous = bool(matches) and bump_for(matches) != bump_for(lenient)

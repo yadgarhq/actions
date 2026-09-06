@@ -449,3 +449,147 @@ def test_the_gate_is_red_on_an_ambiguous_message():
     result = run(text, wrapped="true")
     assert result.returncode == 1
     assert "ambiguous" in result.stdout + result.stderr
+
+
+# ------------------------------------------------- the tag message, ledger 559
+
+# The `## Changelog` of `yadgarhq/actions` v1.13.5 as the wrap wrote it into
+# `main`, and beside it what the author typed. The tag cut from this message
+# carries all five bullets cut off mid-sentence, permanently: the `v*` ruleset
+# forbids moving or deleting a tag, so the record cannot be corrected.
+TAG_FIXTURE = """\
+- fix(pr_body): read a dash the wrap pushed to column 0 as a
+continuation rather than a bullet with no type"""
+
+TAG_FIXTURE_WHOLE = (
+    "- fix(pr_body): read a dash the wrap pushed to column 0 as a "
+    "continuation rather than a bullet with no type"
+)
+
+
+def reference(lines):
+    """The derivation EXACTLY as it stood before ledger 559, kept as the oracle.
+
+    Its counting is the behaviour that must not move, so the tests below compare
+    against it rather than against numbers written down by hand. Its `entries`
+    is the truncation itself.
+    """
+    absorb = pr_body.looks_wrapped(lines)
+    entries, matches, lenient = [], [], []
+    previous = None
+    for line in lines:
+        match = pr_body.BULLET.match(line)
+        if not match:
+            previous = line
+            continue
+        entries.append(line.strip())
+        matches.append(match)
+        if not (absorb and pr_body.is_wrap_continuation(previous, line)):
+            lenient.append(match)
+        previous = line
+    return entries, matches, lenient
+
+
+def test_the_old_derivation_really_did_truncate():
+    """THE DEFECT, DEMANDED. If this stops failing, the fixture is not wrapped."""
+    entries, _, _ = reference(TAG_FIXTURE.splitlines())
+    assert entries == ["- fix(pr_body): read a dash the wrap pushed to column 0 as a"]
+    assert entries[0] != TAG_FIXTURE_WHOLE
+
+
+def test_a_wrapped_bullet_reaches_the_tag_whole():
+    entries, _, _ = pr_body.commit_entries(TAG_FIXTURE.splitlines())
+    assert entries == [TAG_FIXTURE_WHOLE]
+
+
+def test_every_bullet_of_the_real_store_fixture_is_rejoined():
+    entries, _, _ = pr_body.commit_entries(WRAPPED_CHANGELOG.splitlines())
+    assert len(entries) == 4
+    assert entries[0] == (
+        "- fix(pool)!: refuse `verify_ca` when a connection is built — it accepts "
+        "any publicly-trusted certificate for any name, with or without a CA "
+        "configured"
+    )
+    assert all("\n" not in e for e in entries)
+
+
+def test_joining_moves_no_count_on_the_real_fixtures():
+    """THE INVARIANT THE CHANGE RESTS ON, asserted rather than asserted-in-prose.
+
+    A continuation never matched `BULLET`, so it was never an entry. Only the
+    TEXT of an entry may differ from the old derivation's; the three lists must
+    be the same length, and `matches` and `lenient` identical.
+    """
+    for fixture in (TAG_FIXTURE, WRAPPED_CHANGELOG, FULL, SHORT):
+        lines = fixture.splitlines()
+        old_e, old_m, old_l = reference(lines)
+        new_e, new_m, new_l = pr_body.commit_entries(lines)
+        assert len(old_e) == len(new_e)
+        assert [m.group(0) for m in old_m] == [m.group(0) for m in new_m]
+        assert [m.group(0) for m in old_l] == [m.group(0) for m in new_l]
+
+
+# Wider than the column and more than one word, so `looks_wrapped` refuses the
+# whole message. `yadgarhq/iam-db` and `yadgarhq/task-db` both reach history in
+# exactly this shape, because their squash message is not the pull request body.
+UNWRAPPED = (
+    "- feat: issue a per-service certificate from an internal CA, which is a "
+    "line far wider than the wrap column and so proves the message was never "
+    "wrapped at all"
+)
+
+
+def test_an_unwrapped_message_is_not_joined():
+    """`looks_wrapped` gates the whole thing: a message the wrap never touched
+    keeps every line the author put on a line of its own."""
+    assert not pr_body.looks_wrapped([UNWRAPPED])
+    lines = [UNWRAPPED, "and a line the author put on its own"]
+    entries, _, _ = pr_body.commit_entries(lines)
+    assert entries == [UNWRAPPED]
+
+
+def test_joining_absorbs_as_freely_as_the_counting_already_did():
+    """SAID HERE RATHER THAN DISCOVERED LATER, and it is not new behaviour.
+
+    A 71-column bullet is indistinguishable from a line the wrap filled — that
+    is the whole reason `is_wrap_continuation` exists and the reason the
+    ambiguity refusal exists above it. So prose under a full-width bullet with
+    no blank line between them joins the bullet. The counting already read this
+    text the same way; only the tag message's text is affected, and the fix for
+    an author who means two things is the blank line the template already has.
+    """
+    entries, matches, _ = pr_body.commit_entries([FULL, "and prose below it"])
+    assert entries == [FULL + " and prose below it"]
+    assert len(matches) == 1
+
+
+def test_a_blank_line_closes_the_entry():
+    lines = TAG_FIXTURE.splitlines() + ["", "and prose after a blank line"]
+    entries, _, _ = pr_body.commit_entries(lines)
+    assert entries == [TAG_FIXTURE_WHOLE]
+
+
+def test_a_following_heading_is_not_absorbed_into_the_bullet():
+    """The derivation reads WHOLE commit messages, with no notion of a section.
+
+    A greedy wrap leaves the last line of a bullet short, so the arithmetic in
+    `is_wrap_continuation` refuses the heading that follows it. Without that
+    guard the tag message would swallow the rest of the commit.
+    """
+    lines = TAG_FIXTURE.splitlines() + ["## Verification", "ran the suite"]
+    entries, _, _ = pr_body.commit_entries(lines)
+    assert entries == [TAG_FIXTURE_WHOLE]
+
+
+def test_prose_before_any_bullet_is_never_joined():
+    """Nothing precedes the first entry, so nothing can be appended to it."""
+    entries, _, _ = pr_body.commit_entries(["some prose first"] + TAG_FIXTURE.splitlines())
+    assert entries == [TAG_FIXTURE_WHOLE]
+
+
+def test_the_ambiguity_reading_is_unchanged_by_the_rejoining():
+    """LEDGER 687(c) MUST STILL HOLD: a wrap-pushed `- feat!:` still diverges."""
+    lines = (FULL + "\n- feat!: and the bump the two readings imply differs").splitlines()
+    _, matches, lenient = pr_body.commit_entries(lines)
+    assert pr_body.bump_for(matches) == "major"
+    assert pr_body.bump_for(lenient) == "patch"
