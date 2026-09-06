@@ -114,12 +114,17 @@ repos:
       #
       # PYYAML IS HERE FOR THE SUBJECT, NOT FOR THE SUITE. `scripts/tests/`
       # imports nothing beyond the standard library and pytest, but it runs
-      # `helm_pin_agrees.py` and `d80_portability.py` as SUBPROCESSES of
-      # `sys.executable` — which inside this hook is the hook's own venv — and
-      # those parse YAML. Without it every one of those cases fails with
-      # `ModuleNotFoundError: No module named 'yaml'`, which is a red that
-      # blames the suite for a missing dependency of the thing it is testing.
-      # Pinned to the same 6.0.3 the `portability` job installs in `ci-pr.yaml`.
+      # `helm_pin_agrees.py` as a SUBPROCESS of `sys.executable` — which inside
+      # this hook is the hook's own venv — and that gate parses YAML. Without it
+      # all twelve of its cases fail with `ModuleNotFoundError: No module named
+      # 'yaml'`, a red that blames the suite for a missing dependency of the
+      # thing it is testing. Measured, not predicted: that is exactly how they
+      # failed on the first run of this hook.
+      #
+      # `d80_portability.py` parses YAML too and is NOT a reason this line
+      # exists, because nothing in `scripts/tests/` spawns it — it has no test
+      # at all. It will need this the day it gets one. Pinned to the same 6.0.3
+      # the `portability` job installs in `ci-pr.yaml`.
       - id: pytest-scripts
         name: pytest scripts/tests
         language: python

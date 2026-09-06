@@ -26,11 +26,16 @@ REPO = Path(__file__).resolve().parents[2]
 SHA = "azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310"
 
 
-def step(version="v3.18.4", uses=SHA):
-    """One `azure/setup-helm` step; `version=None` omits the input entirely."""
+def step(version="v3.18.4", uses=SHA, comment=None):
+    """One `azure/setup-helm` step; `version=None` omits the input entirely.
+
+    `comment` is emitted ABOVE the `- uses:` line, which is where all seven of
+    this repository's real `v3.18.4` comments sit (`ci-pr.yaml` 185-195).
+    """
+    lead = f"      # {comment}\n" if comment else ""
     if version is None:
-        return f"      - uses: {uses}\n"
-    return f"      - uses: {uses}\n        with:\n          version: {version}\n"
+        return f"{lead}      - uses: {uses}\n"
+    return f"{lead}      - uses: {uses}\n        with:\n          version: {version}\n"
 
 
 def workflow(*steps, name="ci"):
@@ -143,10 +148,9 @@ def test_a_comment_naming_another_version_is_not_a_site(tmp_path):
     one. A gate that grepped the literal reddens here; one that parses the steps
     does not. This repository's own workflows carry about seven such comments.
     """
-    commented = workflow(step("v3.18.4")) + "      # once we ran v4.2.4 here\n"
     root = write(
         tmp_path,
-        a__yaml=commented,
+        a__yaml=workflow(step("v3.18.4", comment="this used to install v4.2.4")),
         b__yaml=workflow(step("v3.18.4")),
     )
     result = run(root)

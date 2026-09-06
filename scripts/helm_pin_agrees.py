@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Every `azure/setup-helm` step in this repository installs the same helm.
+"""Every `azure/setup-helm` step under `.github/workflows/` installs the same helm.
 
 THE PIN IS A CONSTANT WITH THREE COPIES, and until this file nothing compared
 them. Ledger 635 set all three to `v3.18.4`; nothing kept them set. A pin that
@@ -29,7 +29,12 @@ the latest release AT RUN TIME and falls back to a hardcoded version when the
 fetch fails, so the installed helm is decided by the network. That is the
 original defect, not a neutral default.
 
-EVERY `*.yaml` AND `*.yml` UNDER `.github/workflows/`, with nothing excluded.
+EVERY `*.yaml` AND `*.yml` UNDER `.github/workflows/`, with nothing excluded —
+and that directory is the whole of its reach, which is why the first line above
+names it rather than saying "this repository". A composite action or a hook
+could install helm without this noticing. Neither does today and the three
+sites are all workflow steps, so widening the glob would be reach this gate has
+no subject for; the honest fix if that changes is to widen it then.
 `base-images.yaml` and `estate-runner-image.yaml` install no helm today, and
 reading them is how this notices the day one of them does. An exclusion list
 would put the blind spot exactly where the next helm step lands.
