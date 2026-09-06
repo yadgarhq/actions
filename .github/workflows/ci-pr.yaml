@@ -306,81 +306,83 @@ jobs:
       github.event.pull_request.user.type != 'Bot'
     runs-on: ubuntu-latest
     steps:
+      # THE GATE IS THE CHECKED-IN SCRIPT NOW, and this job was the third
+      # inline copy of the contract it defines. `pr_body.py`'s own docstring is
+      # headed "WHY IT IS A FILE RATHER THAN A THIRD INLINE COPY"; the third
+      # copy was here the whole time, carrying its own `REQUIRED`, `BULLET` and
+      # `TYPES` and importing nothing (ledger 730).
+      #
+      # WHAT THE DIVERGENCE WOULD HAVE LOOKED LIKE, because it was never a
+      # theoretical one: a type added to `pr_body.TYPES` is accepted after the
+      # merge by the `version` job and refused before it by this one, or the
+      # reverse. Two readers gate the same artefact at two moments, and nothing
+      # compares them, so the disagreement surfaces as a pull request that
+      # cannot be merged for a reason the post-merge check calls fine.
+      #
+      # THEY AGREED WHEN THIS WAS LIFTED, measured rather than assumed: the
+      # three constants were byte-identical, and 368 bodies — 349 real ones from
+      # thirteen repositories plus 19 edge cases — produced zero verdict
+      # disagreements, with the same bump and entry count on all 346 that passed.
+      # So this is an extraction and not a behaviour change; see the pull
+      # request for the one cosmetic loss.
+      #
+      # THE CHECKOUTS ARE THE `portability` JOB'S, deliberately unchanged from
+      # it. `ci-pr.yaml` is a reusable workflow, so nothing from
+      # `yadgarhq/actions` is on a consumer's runner and the gate takes a second
+      # checkout to get there. That mechanism already runs on this same
+      # `pull_request` event in every consumer, which is the whole reason to
+      # copy it rather than invent a variant.
+      - if: github.repository == 'yadgarhq/actions'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+      # `@main` because that is what every consumer pins the workflow at, so the
+      # script and the workflow that calls it move together. There is no way to
+      # ask which ref this workflow was called at — `github.job_workflow_ref` is
+      # an OIDC claim and renders empty as an expression.
+      - if: github.repository != 'yadgarhq/actions'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: yadgarhq/actions
+          ref: main
+          path: .ci-actions
+
       - name: the pull request body must follow the template
         env:
           # Through the environment, never interpolated into the script. A pull
           # request body is attacker-controlled text and `${{ }}` inside a run
           # block is a shell injection — the class zizmor audits for.
           BODY: ${{ github.event.pull_request.body }}
+          SUBJECT: the pull request body
+          # THE UNWRAPPED READING, and it is the strict one. This reads exactly
+          # what the author typed, so every line under `## Changelog` has to be
+          # a bullet. The `version` job reads the same body after GitHub's
+          # 72-column squash wrap has been through it and sets this to `true`.
+          WRAPPED: "false"
+          # AUTHOR IS DELIBERATELY UNSET. `pr_body.py` exempts a bot author, and
+          # this job's own `if:` already exempts `user.type == 'Bot'` — which is
+          # the better test, because it asks GitHub what the account IS rather
+          # than pattern-matching a name. An unset AUTHOR exempts nobody.
+          UNDER_REVIEW: ${{ github.repository }}
         run: |
-          python3 - <<'PY'
-          import os, re, sys
-
-          REQUIRED = ["What", "Why", "Changelog", "Verification", "Risk"]
-
-          # Conventional Commits. The changelog bullets are what a version bump
-          # will eventually be derived from, so the format is load-bearing rather
-          # than cosmetic — a bullet nobody can parse is a release nobody can
-          # version.
-          TYPES = "build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test"
-          BULLET = re.compile(
-              rf"^\s*[-*]\s+(?P<type>{TYPES})(?P<scope>\([^)]+\))?(?P<bang>!)?:\s+(?P<desc>\S.*)$"
-          )
-
-          body = os.environ.get("BODY") or ""
-          stripped = re.sub(r"<!--.*?-->", "", body, flags=re.S)
-
-          sections, current = {}, None
-          for line in stripped.splitlines():
-              h = re.match(r"^\s*#{1,6}\s+(.+?)\s*$", line)
-              if h:
-                  current = h.group(1).strip()
-                  sections[current] = []
-              elif current:
-                  sections[current].append(line)
-
-          problems = []
-          for h in REQUIRED:
-              if h not in sections:
-                  problems.append(f"missing section `## {h}`")
-              elif not any(l.strip() for l in sections[h]):
-                  problems.append(f"`## {h}` is empty (comments are not an answer)")
-
-          if "Changelog" in sections and any(l.strip() for l in sections["Changelog"]):
-              lines = [l for l in sections["Changelog"] if l.strip()]
-              bad = [l.strip() for l in lines if not BULLET.match(l)]
-              if bad:
-                  problems.append(
-                      "every Changelog line must be a Conventional Commits bullet, "
-                      "e.g. `- fix: a metadata leak in the audit relay`. Offending: "
-                      + "; ".join(f"`{b[:60]}`" for b in bad[:4])
-                  )
-              else:
-                  bumps = []
-                  for l in lines:
-                      m = BULLET.match(l)
-                      if m.group("bang"):
-                          bumps.append("major")
-                      elif m.group("type") == "feat":
-                          bumps.append("minor")
-                      else:
-                          bumps.append("patch")
-                  bump = "major" if "major" in bumps else "minor" if "minor" in bumps else "patch"
-                  with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
-                      fh.write(f"### Changelog parsed\n\n{len(lines)} entries, implying a **{bump}** bump.\n")
-
-          if not problems:
-              print("Pull request body follows the template.")
-              sys.exit(0)
-
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
-              fh.write("### Pull request body does not follow the template\n\n")
-              for p in problems:
-                  fh.write(f"- {p}\n")
-              fh.write("\nThe template is in `.github/pull_request_template.md`.\n")
-          print("::error::" + "; ".join(problems))
-          sys.exit(1)
-          PY
+          set -euo pipefail
+          # THE REPOSITORY NAME DECIDES, never the presence of the file, so that
+          # no repository under review can supply its own gate. This repository
+          # reads its OWN checkout, which is what `ci-self.yaml` exists for: a
+          # change to a shared workflow must be tested by the version in the
+          # pull request rather than the copy already on `main`.
+          if [ "$UNDER_REVIEW" = "yadgarhq/actions" ]; then
+            dir=scripts
+          else
+            dir=.ci-actions/scripts
+          fi
+          if [ ! -f "$dir/pr_body.py" ]; then
+            echo "::error::the body gate is missing at $dir/pr_body.py"
+            exit 1
+          fi
+          python3 "$dir/pr_body.py"
 
   # A REAL ENGINE, not a mock. D69's capability probe establishes what an engine
   # can do by executing against it, so a test suite with no engine cannot
