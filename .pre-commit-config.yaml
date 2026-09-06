@@ -121,10 +121,11 @@ repos:
       # thing it is testing. Measured, not predicted: that is exactly how they
       # failed on the first run of this hook.
       #
-      # `d80_portability.py` parses YAML too and is NOT a reason this line
-      # exists, because nothing in `scripts/tests/` spawns it — it has no test
-      # at all. It will need this the day it gets one. Pinned to the same 6.0.3
-      # the `portability` job installs in `ci-pr.yaml`.
+      # `d80_portability.py` parses YAML too, and ledger 731 gave it the test
+      # this comment used to say it lacked — so it is now a second reason for
+      # this line rather than a future one. Its suite spawns the gate AND a stub
+      # `helm` written in the same interpreter, which parses YAML as well.
+      # Pinned to the same 6.0.3 the `portability` job installs in `ci-pr.yaml`.
       - id: pytest-scripts
         name: pytest scripts/tests
         language: python
