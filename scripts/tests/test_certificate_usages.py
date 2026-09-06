@@ -408,3 +408,45 @@ def test_a_trailing_comment_does_not_hide_a_templated_certificate(tmp_path):
     assert result.returncode == 1, result.stdout + result.stderr
     assert "chart/templates/cert.yaml" in result.stdout
     assert "never read" in result.stdout
+
+
+def test_a_templated_certificate_does_not_hide_a_real_violation(tmp_path):
+    """Both findings, or the operator fixes one and meets the other blind.
+
+    The templated refusal used to `return 1` before `problems` was printed, so
+    a leaf naming both directions was found, counted, and never mentioned. The
+    exit code was right and the report was not.
+    """
+    write(tmp_path, "infra/certificates.yaml", SERVING_WITH_COMMENT_GAP, EDGE)
+    write(tmp_path, "infra/client.yaml", CLIENT, AUTHORITY)
+    write(
+        tmp_path,
+        "infra/poison.yaml",
+        "apiVersion: cert-manager.io/v1\nkind: Certificate\nmetadata:\n"
+        "  name: poison\nspec:\n  usages:\n    - server auth\n    - client auth\n",
+    )
+    write(
+        tmp_path,
+        "chart/templates/cert.yaml",
+        "apiVersion: cert-manager.io/v1\nkind: Certificate\n"
+        "metadata:\n  name: {{ .Release.Name }}\n"
+        "spec:\n  usages:\n    - server auth\n",
+    )
+    result = run(tmp_path)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "chart/templates/cert.yaml" in result.stdout
+    assert "`poison` names both" in result.stdout
+
+
+def test_a_floor_does_not_hide_a_real_violation(tmp_path):
+    """Same shape, the other early return. One tree, both messages."""
+    write(
+        tmp_path,
+        "infra/poison.yaml",
+        "apiVersion: cert-manager.io/v1\nkind: Certificate\nmetadata:\n"
+        "  name: poison\nspec:\n  usages:\n    - server auth\n    - client auth\n",
+    )
+    result = run(tmp_path)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "is the fewest this can inspect" in result.stdout
+    assert "`poison` names both" in result.stdout
