@@ -84,3 +84,18 @@ repos:
         additional_dependencies: ["prettier@3.9.6"]
         entry: prettier --write --ignore-unknown
         types_or: [markdown, json, yaml]
+      # LEDGER 686. Nothing ran scripts/tests/ anywhere before this hook — not
+      # in CI, not here. `language: python` rather than `system`, so this
+      # provisions its own venv and needs no binary already on the machine or
+      # CI runner. That is the failure class the actionlint hook above exists
+      # to catch for a compiled binary; a self-provisioned interpreter hook
+      # cannot have it. Kept as a second, independent guard alongside the
+      # standalone `pytest` job in `ci-self.yaml` — see that job's comment for
+      # why neither replaces the other.
+      - id: pytest-scripts
+        name: pytest scripts/tests
+        language: python
+        additional_dependencies: ["pytest==9.1.1"]
+        entry: pytest scripts/tests/ -q
+        pass_filenames: false
+        files: ^scripts/
