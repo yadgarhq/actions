@@ -42,14 +42,13 @@ enumeration is what justifies the narrowness:
     depend on the live Service's shape rather than on the field alone. Left out
     deliberately. If a chart ever renders `spec.type`, measure which transitions
     the apiserver refuses and extend `ALWAYS` then; do not guess.
-  * `Deployment.spec.selector` -- immutable in `apps/v1`, and rendered by all
-    six. It renders `app: {{ .Chart.Name }}`, so it moves only when the chart is
-    renamed, which renames the Deployment too and is therefore a create rather
-    than an update. Out of scope for want of a way to reach it.
-  * `PodDisruptionBudget.spec.selector` and `ScaledObject.spec.scaleTargetRef` --
-    same `{{ .Chart.Name }}` argument, and neither was measured for
-    immutability. Out of scope for the same reason and not because they are
-    known safe.
+  * `Deployment.spec.selector`, `PodDisruptionBudget.spec.selector` and
+    `ScaledObject.spec.scaleTargetRef` -- rendered by all six, and every one of
+    them renders `{{ .Chart.Name }}`. So each moves only when the CHART is
+    renamed, which renames the object too and makes the sync a create rather
+    than an update. That is the whole reason they are out of scope: none of the
+    three was established to be immutable here, and none needs to be, because
+    the gate would have nothing to fire on either way.
   * `StatefulSet.spec.serviceName` and `.volumeClaimTemplates`,
     `PersistentVolumeClaim.spec.resources`, `Job.spec.template` -- NO chart in
     this estate renders any of these kinds. Nothing renders them, so there is

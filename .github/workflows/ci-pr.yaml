@@ -774,6 +774,16 @@ jobs:
   # the working tree and deliberately does not. Folding them together would give
   # every D80 run a full-history fetch to serve one of them.
   #
+  # MERGING THIS JOB REDDENS IN-FLIGHT CONSUMER RUNS ONCE, and that is the merge
+  # window `ci_verdict.py` already documents rather than a new defect. A run
+  # dispatched before this merge built its `toJSON(needs)` from the OLD
+  # `passed.needs`, while its `passed` step re-checks out `@main` minutes later
+  # and reads a `passed.needs` that now lists this job. `ci_verdict.py` refuses
+  # BOTH directions of that disagreement on purpose — "no result was reported
+  # for 'service_immutable'" — so any consumer pull request open across the
+  # merge needs one re-run. It is a one-time cost of adding a gated job, it
+  # fails loudly rather than passing quietly, and a re-run clears it.
+  #
   # WHY NOT A PRE-COMMIT HOOK. It needs PyYAML, which a published
   # `language: script` hook cannot install — every hook in
   # `.pre-commit-hooks.yaml` is stdlib-only for that reason. And it needs a BASE
