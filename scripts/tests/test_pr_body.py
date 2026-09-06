@@ -260,3 +260,148 @@ def test_the_gate_reads_the_wrapped_flag():
     text = body(changelog=WRAPPED_CHANGELOG)
     assert run(text, wrapped="false").returncode == 1
     assert run(text, wrapped="true").returncode == 0
+
+
+# ------------------------------------------------ what the wrap can and cannot
+#
+# THE ARITHMETIC IS THE WHOLE OF THIS SECTION. GitHub wraps at 72 COLUMNS on
+# word boundaries and starts continuations at column 0, so a continuation line
+# can begin with a one-character word only when the line above it is already 71
+# or 72 columns — there was no room for even a `-`. That makes "could this line
+# be a wrap artifact" a question about the PREVIOUS line's length rather than a
+# guess, and the fixtures below pin both answers.
+
+# 72 columns, so the line after it beginning `- ` is explained by the wrap.
+FULL = "- chore: run clippy over the whole workspace with the lint profile names"
+
+# 20 columns, so nothing after it is explained by the wrap.
+SHORT = "- fix: a short entry"
+
+
+def test_the_fixtures_are_the_widths_this_section_claims():
+    """The tests below are arithmetic, so the arithmetic is asserted first."""
+    assert len(FULL) == 72
+    assert len(SHORT) == 20
+    assert pr_body.WRAP == 72
+
+
+def test_a_dash_token_at_a_wrap_boundary_is_not_a_malformed_bullet():
+    """Ledger 687(a). `- W for warnings` mid-sentence, landed at a boundary.
+
+    Read strictly this is a bullet with no Conventional Commits type, and the
+    gate reds the push to main for a body two humans reviewed and `ci /
+    template` passed. The wrap is what put the dash there.
+    """
+    text = body(changelog=FULL + "\n- W for warnings among them, so it fails")
+    problems, bump, count = pr_body.review(text, wrapped=True)
+    assert problems == []
+    assert (bump, count) == ("patch", 1)
+
+
+def test_a_dash_line_the_wrap_cannot_explain_is_still_refused():
+    """The absorption is not a blanket amnesty for unparseable bullets."""
+    text = body(changelog=SHORT + "\n- W for warnings among them, so it fails")
+    problems, _, _ = pr_body.review(text, wrapped=True)
+    assert any("Conventional Commits" in p for p in problems)
+
+
+def test_a_bullet_the_wrap_could_have_produced_is_ambiguous():
+    """Ledger 687(c). The two readings derive different bumps, so neither wins.
+
+    Read strictly these are two entries and the second one carries a `!`, so
+    the tag cut from this message is a MAJOR. Read as the wrap explains it,
+    the second line continues the first and the release is a patch. A parser
+    cannot tell, and this one is the last thing between a reviewed patch and
+    an immutable major nobody can withdraw.
+    """
+    text = body(changelog=FULL + "\n- feat!: and the bump the two readings imply differs")
+    problems, bump, count = pr_body.review(text, wrapped=True)
+    assert any("ambiguous" in p for p in problems)
+    assert any("major" in p and "patch" in p for p in problems)
+    assert (bump, count) == (None, 0)
+
+
+def test_a_bullet_the_wrap_cannot_explain_is_read_as_an_entry():
+    """The other side of it: a real second bullet is still a real second bullet."""
+    text = body(changelog=SHORT + "\n- feat!: a genuine second entry")
+    problems, bump, count = pr_body.review(text, wrapped=True)
+    assert problems == []
+    assert (bump, count) == ("major", 2)
+
+
+def test_a_disagreement_that_does_not_change_the_bump_is_not_a_problem():
+    """Measured 12 of 288 real wrapped bodies; 0 of them changed the bump.
+
+    Refusing on a differing COUNT would red main on four percent of merges for
+    a reading that implies the same release. The bump is what gets cut, so the
+    bump is what has to agree.
+    """
+    text = body(changelog=FULL + "\n- docs: a line the readings disagree about")
+    problems, bump, count = pr_body.review(text, wrapped=True)
+    assert problems == []
+    assert (bump, count) == ("patch", 2)
+
+
+def test_the_first_entry_of_a_block_is_never_absorbed():
+    """The invariant that keeps the two readings comparable.
+
+    Nothing precedes the first line of a paragraph, so it cannot be anybody's
+    continuation. Without it the lenient reading could empty a Changelog the
+    strict one reads, and `bump_for([])` answers `patch` rather than refusing.
+    """
+    assert not pr_body.is_wrap_continuation(None, "- feat: a thing")
+    assert not pr_body.is_wrap_continuation("", "- feat: a thing")
+
+
+def test_a_wrap_continuation_is_decided_by_the_previous_line_length():
+    assert pr_body.is_wrap_continuation("x" * 72, "- feat: a thing")
+    assert pr_body.is_wrap_continuation("x" * 71, "- feat: a thing")
+    assert not pr_body.is_wrap_continuation("x" * 70, "- feat: a thing")
+
+
+def test_a_line_wider_than_the_wrap_was_not_produced_by_the_wrap():
+    """The upper half of the bound, and the corpus is what found it.
+
+    A repository whose squash message is not the pull request body reaches
+    history unwrapped, so its bullets are single lines far wider than 72. With
+    a one-sided bound every one of them absorbs the next, and the nine-entry
+    Changelogs in `yadgarhq/iam-db` and `yadgarhq/task-db` read as one patch.
+    """
+    assert not pr_body.is_wrap_continuation("x" * 73, "- feat: a thing")
+    assert not pr_body.is_wrap_continuation("x" * 200, "- feat: a thing")
+
+
+def test_an_unwrapped_commit_message_keeps_every_entry():
+    long_bullets = "\n".join(
+        f"- {t}: " + "a description wide enough that no wrap could have made it " * 2
+        for t in ("chore", "feat", "fix")
+    )
+    problems, bump, count = pr_body.review(body(changelog=long_bullets), wrapped=True)
+    assert problems == []
+    assert (bump, count) == ("minor", 3)
+
+
+def test_the_real_wrapped_fixture_holds_no_ambiguity():
+    """`yadgarhq/store` 2198a4f again: the change must be a no-op on it.
+
+    Its three bullet boundaries follow lines of 10, 27 and 69 columns, none of
+    which is full, so every one of its four entries survives both readings.
+    """
+    problems, bump, count = pr_body.review(body(changelog=WRAPPED_CHANGELOG), wrapped=True)
+    assert problems == []
+    assert (bump, count) == ("major", 4)
+
+
+def test_an_unwrapped_body_is_read_exactly_as_before():
+    """The absorption belongs to wrapped mode. A pull request body is verbatim."""
+    text = body(changelog=FULL + "\n- feat!: and the bump the two readings imply differs")
+    problems, bump, count = pr_body.review(text, wrapped=False)
+    assert problems == []
+    assert (bump, count) == ("major", 2)
+
+
+def test_the_gate_is_red_on_an_ambiguous_message():
+    text = body(changelog=FULL + "\n- feat!: and the bump the two readings imply differs")
+    result = run(text, wrapped="true")
+    assert result.returncode == 1
+    assert "ambiguous" in result.stdout + result.stderr

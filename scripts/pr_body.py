@@ -13,8 +13,15 @@ no re-check, because `on: pull_request` without `types:` subscribes to `opened`,
 `synchronize` and `reopened` and NOT to `edited`. Closing that adds a second
 reader of the body — the push-to-main assertion in the `version` job — and a
 second reader that disagrees with the first is worse than the gap. So the
-`version` job's assertion and its derivation share this module; the two agree
-because there is only one of them.
+`version` job's assertion and its derivation share this module.
+
+ONE REGEX IS NOT ONE VERDICT, and ledger 687 is the correction. Sharing the
+bullet pattern stops the two readers disagreeing about what a bullet LOOKS like;
+it does not stop them disagreeing about what a body MEANS, because they read
+different text — one reads what the author typed and the other reads what the
+wrap made of it. So the wrapped reader now derives BOTH readings of the message
+in front of it and refuses when they imply different releases, rather than
+picking one and cutting a tag nobody can withdraw.
 
 THE TWO MODES, and the reason there are two. GitHub HARD-WRAPS the pull request
 body at about 72 columns when it writes the squash commit message. Measured, not
@@ -28,7 +35,15 @@ only when there is no entry above it to continue.
 WHAT WRAPPED MODE CANNOT SEE, said here rather than discovered later: prose
 appended directly under a bullet with no blank line between them is exactly what
 a wrapped continuation looks like, and no parser can tell them apart. The
-pull-request-time check, reading the unwrapped body, can and does.
+pull-request-time check, reading the unwrapped body, can and does. So wrapped
+mode ACCEPTS bodies the template REJECTS, which is why the step that runs it is
+named for the Changelog it can read rather than for the template.
+
+WHERE IT CAN TELL THEM APART IT DOES, on arithmetic rather than on a guess: see
+`is_wrap_continuation`. A greedy wrap at a known column says exactly which lines
+it could have produced, and that is enough to stop `- W for warnings` mid-
+sentence reading as a malformed bullet and to notice when `- feat!:` mid-
+sentence would turn a reviewed patch into a major.
 
 Tests: `python3 -m pytest scripts/tests/ -q`.
 """
@@ -50,7 +65,46 @@ BULLET = re.compile(
 # bullet.
 STARTS_ENTRY = re.compile(r"^\s*[-*][ \t]")
 
+# THE COLUMN GITHUB WRAPS AT, measured rather than assumed and the same fixture
+# the tests use: `yadgarhq/store` pull request 15 against commit `2198a4f`, whose
+# longest line is 72 CHARACTERS and 74 bytes. Characters, so an em-dash costs
+# one. Every wrap in it is greedy and breaks on a word boundary.
+WRAP = 72
+
 REQUIRED = ("What", "Why", "Changelog", "Verification", "Risk")
+
+
+def is_wrap_continuation(previous, line, width=WRAP):
+    """Whether the wrap alone explains `line` beginning where it does.
+
+    LEDGER 687(a) AND (c), AND IT IS ARITHMETIC RATHER THAN A GUESS. GitHub
+    wraps greedily on word boundaries and starts continuations at column 0, so a
+    line is a possible continuation only when its first word did not FIT on the
+    line above. For a line opening `- ` that first word is one character, so the
+    line above has to be 71 or 72 columns already — anything shorter had room
+    for the dash, and the author must have typed the break.
+
+    THE BOUND IS TWO-SIDED, and the upper half was found by replaying it over
+    601 real commit messages rather than reasoned out. A line LONGER than the
+    wrap column was not produced by the wrap at all — the body reached history
+    unwrapped, which happens whenever a repository's squash message is not the
+    pull request body. Without the upper bound every bullet in such a message
+    looks like a continuation of the bullet above it, and `yadgarhq/iam-db` and
+    `yadgarhq/task-db` both carry a nine-entry Changelog that collapsed to one.
+    A test alone would not have caught that; the corpus did.
+
+    Nothing precedes the first line of a paragraph, so it is never anybody's
+    continuation. That is the invariant that keeps the two readings comparable:
+    the lenient one can never empty a Changelog the strict one reads.
+    """
+    if not (previous or "").strip():
+        return False
+    words = line.split()
+    if not words:
+        return False
+    if len(previous) > width:
+        return False
+    return len(previous) + 1 + len(words[0]) > width
 
 
 # A BOT IDENTITY, in the three shapes this is handed one. GitHub appends `[bot]`
@@ -104,8 +158,14 @@ def bump_for(matches):
     return "major" if "major" in kinds else "minor" if "minor" in kinds else "patch"
 
 
-def changelog_entries(lines, wrapped):
-    """Split a `## Changelog` section into (offending lines, parsed bullets)."""
+def changelog_entries(lines, wrapped, absorb=False):
+    """Split a `## Changelog` section into (offending lines, parsed bullets).
+
+    `absorb` is the LENIENT reading of a wrapped body: a dash line the wrap
+    alone explains continues the entry above it instead of opening one. The
+    strict reading — every dash line opens an entry — is the same call with
+    `absorb=False`, and `review` below runs both and compares what they imply.
+    """
     bad, matches = [], []
     if not wrapped:
         for line in (l for l in lines if l.strip()):
@@ -113,18 +173,51 @@ def changelog_entries(lines, wrapped):
             (matches if match else bad).append(match or line.strip())
         return bad, matches
 
-    open_entry = False
+    open_entry, previous = False, None
     for line in lines:
         if not line.strip():
-            open_entry = False
+            open_entry, previous = False, None
             continue
         if STARTS_ENTRY.match(line):
+            if absorb and open_entry and is_wrap_continuation(previous, line):
+                previous = line
+                continue
             match = BULLET.match(line)
             (matches if match else bad).append(match or line.strip())
             open_entry = True
         elif not open_entry:
             bad.append(line.strip())
+        previous = line
     return bad, matches
+
+
+def ambiguity(strict, lenient):
+    """The refusal, naming both readings and the line they part company on.
+
+    LEDGER 687(c). This is the one divergence that cannot be lived with: read
+    strictly, a `- feat!:` the wrap pushed to column 0 is a second entry and the
+    tag cut from this message is a MAJOR; read as the wrap explains it, the same
+    two lines are one patch. Nobody can withdraw or move a tag once it is cut,
+    and the commit it was derived from is immutable, so the cheaper mistake is
+    to cut nothing and say why.
+
+    IT REFUSES ON THE BUMP AND NOT ON THE COUNT, and that is measured. Across
+    288 real wrapped Changelog sections in eighteen repositories the two
+    readings disagree about the COUNT twelve times and about the BUMP zero
+    times. Refusing on the count would redden four merges in a hundred for a
+    disagreement that implies the same release.
+    """
+    kept = [m.group(0) for m in lenient]
+    parted = [m.group(0).strip() for m in strict if m.group(0) not in kept]
+    return (
+        "the wrap makes this Changelog ambiguous, so no version is derived from "
+        f"it. Read strictly it is {len(strict)} entries implying a "
+        f"**{bump_for(strict)}** bump; read as GitHub's {WRAP}-column wrap "
+        f"explains it, {len(lenient)} entries implying a "
+        f"**{bump_for(lenient)}**. The line they part company on: "
+        + "; ".join(f"`{p[:60]}`" for p in parted[:4])
+        + ". Cut the tag by hand if the strict reading is the intended one."
+    )
 
 
 def review(text, wrapped):
@@ -155,15 +248,21 @@ def review(text, wrapped):
     bump, count = None, 0
     lines = found.get("Changelog", [])
     if any(l.strip() for l in lines):
-        bad, matches = changelog_entries(lines, wrapped)
+        # BOTH READINGS OF THE SAME TEXT, because in wrapped mode they can
+        # differ and only one of them can be released. `absorb=wrapped` keeps a
+        # pull request body verbatim: what the author typed is what it says.
+        bad, lenient = changelog_entries(lines, wrapped, absorb=wrapped)
+        _, strict = changelog_entries(lines, wrapped)
         if bad:
             problems.append(
                 "every Changelog entry must be a Conventional Commits bullet, "
                 "e.g. `- fix: a metadata leak in the audit relay`. Offending: "
                 + "; ".join(f"`{b[:60]}`" for b in bad[:4])
             )
+        elif wrapped and bump_for(strict) != bump_for(lenient):
+            problems.append(ambiguity(strict, lenient))
         else:
-            bump, count = bump_for(matches), len(matches)
+            bump, count = bump_for(strict), len(strict)
     return problems, bump, count
 
 

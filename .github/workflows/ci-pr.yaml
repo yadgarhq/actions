@@ -40,7 +40,19 @@ permissions:
 # WHAT RUNS WHEN, and the push case is the interesting one.
 #
 #   pull_request  everything. This is the gate.
+#   an edited PR  the template job ONLY. Ledger 685.
 #   push to main  the version job ONLY.
+#
+# LEDGER 685, AND IT IS AFFORDABILITY RATHER THAN CORRECTNESS. Closing ledger
+# 630's other half means each consumer subscribing to `edited`, which no change
+# here can do for them — this workflow is `workflow_call` only, so activity types
+# live in each caller's own `ci.yaml`. What a caller CANNOT choose is how much
+# `edited` re-runs, and the answer today is everything: one body edit on
+# `yadgarhq/actions` pull request 49 produced ten fresh check runs, and in the
+# Rust repositories that includes `test` with a database service container. So
+# the sweep across seventeen repositories would make every body typo re-run the
+# full matrix seventeen times over. This short-circuit is INERT until a caller
+# subscribes, which is why it lands first.
 #
 # Validation on push to main would re-run exactly what the pull request just
 # passed, on code already merged, with nobody watching the result. The ruleset
@@ -60,6 +72,7 @@ jobs:
     outputs:
       rust: ${{ steps.d.outputs.rust }}
       proto: ${{ steps.d.outputs.proto }}
+      text_edit: ${{ steps.e.outputs.text_edit }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -100,6 +113,37 @@ jobs:
             exit 1
           fi
 
+      # LEDGER 685. ONE PREDICATE, COMPUTED ONCE, because six jobs read it and
+      # six copies of an expression are six things to keep in agreement by hand
+      # — the argument this job already makes for detection itself.
+      #
+      # `github.event.changes` IS THE WHOLE OF IT, and `base` is the reason this
+      # is not simply `action == 'edited'`. GitHub fires `edited` for a changed
+      # TITLE, a changed BODY and a changed BASE BRANCH, and the last one alters
+      # what the pull request proposes WITHOUT changing its head sha — no
+      # `synchronize` follows it. Short-circuiting there would wave through a
+      # diff nothing had ever tested. `changes` carries only what changed, so
+      # its `base` key present means retarget and absent means text.
+      - id: e
+        name: whether this run is a text-only edit
+        env:
+          # Through the environment rather than interpolated, for the reason the
+          # template job gives at length: a title is attacker-controlled text.
+          ACTION: ${{ github.event.action }}
+          BASE_CHANGED: ${{ github.event.changes.base != null }}
+        run: |
+          set -euo pipefail
+          if [ "$ACTION" = edited ] && [ "$BASE_CHANGED" = false ]; then
+            echo "text_edit=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "- **text-only edit**: the pull request's title or body changed"
+              echo "  and its head did not, so only \`template\` re-reads it. The"
+              echo "  code on this sha was checked by the run that preceded this one."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "text_edit=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # ONE definition of "is this repository clean": the hooks. CI installs what
   # they need and runs all of them.
   #
@@ -111,8 +155,9 @@ jobs:
   # It also makes D55's argument true one level up: what a developer runs is
   # exactly what CI runs, not something resembling it.
   precommit:
+    # Ledger 685: a text-only edit re-reads the body and nothing else.
     needs: detect
-    if: github.event_name != 'push'
+    if: github.event_name != 'push' && needs.detect.outputs.text_edit != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -250,7 +295,9 @@ jobs:
   # NOT hook-covered, and that is the line: pre-commit owns what pre-commit can
   # define. These need a runner and network, so they are jobs.
   workflows:
-    if: github.event_name != 'push'
+    # Ledger 685: a text-only edit re-reads the body and nothing else.
+    needs: detect
+    if: github.event_name != 'push' && needs.detect.outputs.text_edit != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -278,7 +325,9 @@ jobs:
             --no-online-audits --persona=regular --config /tmp/zizmor.yml .
 
   vulnerabilities:
-    if: github.event_name != 'push'
+    # Ledger 685: a text-only edit re-reads the body and nothing else.
+    needs: detect
+    if: github.event_name != 'push' && needs.detect.outputs.text_edit != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -397,8 +446,11 @@ jobs:
   # Pinned by digest, never by tag (D61). 11.8 is the first LTS carrying the
   # VECTOR type the probe checks for.
   test:
+    # Ledger 685: a text-only edit re-reads the body and nothing else.
     needs: detect
-    if: github.event_name != 'push' && needs.detect.outputs.rust == 'true'
+    if: >-
+      github.event_name != 'push' && needs.detect.outputs.rust == 'true' &&
+      needs.detect.outputs.text_edit != 'true'
     runs-on: ubuntu-latest
     services:
       mariadb:
@@ -538,8 +590,11 @@ jobs:
   # like a substitute for it. This job answers exactly one question — does the
   # vendored copy match the pin?
   proto:
+    # Ledger 685: a text-only edit re-reads the body and nothing else.
     needs: detect
-    if: needs.detect.outputs.proto == 'true'
+    if: >-
+      needs.detect.outputs.proto == 'true' &&
+      needs.detect.outputs.text_edit != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -851,7 +906,9 @@ jobs:
   # output. No grep finds that. It is a question for a human and it is in the
   # pull request template's `## Risk` section.
   portability:
-    if: github.event_name != 'push'
+    # Ledger 685: a text-only edit re-reads the body and nothing else.
+    needs: detect
+    if: github.event_name != 'push' && needs.detect.outputs.text_edit != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1020,7 +1077,16 @@ jobs:
       # or a dropped `!` — passes both this and the pull-request check, because
       # both bodies are valid. Only a reader notices, from the bump the
       # `edited` re-run reports.
-      - name: the message this version is derived from is one the template accepts
+      #
+      # LEDGER 687(b), AND THE NAME IS THE CORRECTION. This step used to be
+      # called "is one the template accepts", which is false in wrapped mode and
+      # falsely reassuring: wrapped mode accepts bodies the template REJECTS.
+      # Measured rather than reasoned: a paragraph of prose appended directly
+      # under a bullet with no blank line between them is refused unwrapped and
+      # passes wrapped as one `patch` entry, because that is exactly what a
+      # wrapped continuation looks like. The name now claims only what the step
+      # enforces: the sections are there, and the Changelog parses.
+      - name: the message this version is derived from carries a Changelog this can read
         id: gate
         env:
           UNDER_REVIEW: ${{ github.repository }}
@@ -1065,7 +1131,7 @@ jobs:
           import os, re, subprocess, sys
 
           sys.path.insert(0, os.environ["GATE_DIR"])
-          from pr_body import BULLET, bump_for
+          from pr_body import BULLET, bump_for, is_wrap_continuation
 
           def sh(*a):
               return subprocess.run(a, capture_output=True, text=True).stdout.strip()
@@ -1081,14 +1147,25 @@ jobs:
           rng = f"{last}..HEAD" if last else "HEAD"
           log = sh("git", "log", rng, "--format=%B%x00")
 
-          entries, matches = [], []
+          # BOTH READINGS OVER THE WHOLE RANGE, and the range is why the gate
+          # above is not enough on its own. That gate reads HEAD only, so it
+          # refuses the ambiguous message on the push that lands it — and the
+          # NEXT push, with a clean HEAD, still has the ambiguous commit sitting
+          # in `last..HEAD` and would cut the major from it. Refusing here is
+          # what makes 687(c) closed rather than delayed by one merge.
+          entries, matches, lenient = [], [], []
           for commit in [c for c in log.split("\0") if c.strip()]:
+              previous = None
               for line in commit.splitlines():
                   m = BULLET.match(line)
                   if not m:
+                      previous = line
                       continue
                   entries.append(line.strip())
                   matches.append(m)
+                  if not is_wrap_continuation(previous, line):
+                      lenient.append(m)
+                  previous = line
 
           base = SEMVER.match(last) if last else None
           nxt, note = "", ""
@@ -1103,6 +1180,21 @@ jobs:
                       "Cut a plain one by hand to start the sequence again."]
           elif not entries:
               out += [f"No parseable Changelog entries since `{last}`. Nothing to release."]
+          elif bump_for(matches) != bump_for(lenient):
+              # NO TAG AND NO GUESS, which is this step's rule everywhere else
+              # too. A `- feat!:` the wrap pushed to column 0 is a second entry
+              # to one reading and prose to the other, and the two imply
+              # different releases. Nobody can withdraw a tag, so the cheaper
+              # mistake is to cut none and name both readings. It does not
+              # self-heal the way the HEAD gate does — the commit stays in the
+              # range — so the way out is a tag cut by hand, which is already
+              # how the first tag of every repository is cut.
+              out += [f"The Changelog since `{last}` is ambiguous under GitHub's",
+                      "72-column wrap, so no version was derived and nothing was",
+                      f"tagged. Read strictly: {len(matches)} entries implying a",
+                      f"**{bump_for(matches)}** bump. Read as the wrap explains",
+                      f"it: {len(lenient)} entries implying a",
+                      f"**{bump_for(lenient)}**. Cut the intended tag by hand."]
           else:
               bump = bump_for(matches)
               major, minor, patch = (int(g) for g in base.groups())
@@ -1320,6 +1412,27 @@ jobs:
       #   proto                                    skips when proto is false, which
       #                                            detect now refuses to report
       #                                            while `proto/` is still there.
+      #   all seven but template                   skip on a text-only edit —
+      #                                            ledger 685, and the trade is
+      #                                            below rather than incidental.
+      #
+      # WHAT A TEXT-ONLY EDIT ACTUALLY PROVES, said plainly because `ci / passed`
+      # is the required context and this is the run that will satisfy it. On
+      # such a run only `detect` and `template` execute, so this check reports
+      # success having re-read the body and nothing else. The code is not
+      # unchecked: `edited` cannot change the head sha, and the run that
+      # preceded this one checked THAT SHA in full. Two facts make relying on
+      # that safe rather than hopeful — no `ci.yaml` or `ci-pr.yaml` in the
+      # estate declares a `concurrency` group, so an edit landing mid-run
+      # cancels nothing; and an edit that changes the base branch, which alters
+      # the diff without changing the sha, is excluded from the short-circuit by
+      # detect's `changes.base` test.
+      #
+      # WHAT IT COSTS, equally plainly: a reviewer reading the logs of the
+      # LATEST `ci / passed` on a merged pull request sees two jobs rather than
+      # eight. The evidence for the code is one run further back. That is the
+      # price of not re-running seventeen repositories' test matrices for a
+      # typo, and it is a price rather than a free lunch.
       - name: no upstream job failed
         run: |
           set -euo pipefail
