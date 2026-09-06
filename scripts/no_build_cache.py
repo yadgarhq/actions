@@ -63,11 +63,24 @@ ANY `with:` KEY CONTAINING `cache` IS REFUSED, not the two names known today.
 `cache-from` and `cache-to` are what buildx offers now; an input added later
 under a third name would slip past a two-name denylist while doing exactly what
 those two do. An unknown cache-ish input therefore fails SAFE, the same way
-`d80_portability.py` treats an unknown API group as CRD-bearing. This is also
-why the subject is `docker/build-push-action` alone and not every step:
-`docker/setup-buildx-action` takes a `cache-binary` input, which caches the
-BUILDX BINARY DOWNLOAD and not a single image layer, and a rule cast wide enough
-to catch it would be a rule people learn to work around.
+`d80_portability.py` treats an unknown API group as CRD-bearing.
+
+WITH ONE EXCEPTION, AND IT IS THE OPPOSITE INPUT. This action also takes
+`no-cache` and `no-cache-filters`, which DISABLE a cache rather than declare
+one. A rule matching the substring alone refuses them — so the first thing a
+maintainer would reach for to GUARANTEE the apt `RUN` re-executes is refused by
+the gate that exists to keep it re-executing, under a message saying it declared
+a cache. That is a gate blocking its own reinforcement, and it is how a rule
+becomes one people learn to work around rather than trust. Keys beginning
+`no-cache` are therefore allowed, by prefix rather than by name, so a
+`no-cache-*` sibling added later is allowed for the same reason its siblings
+are. Nothing else is: `layer-cache-backend` still fails safe.
+
+THE SUBJECT IS `docker/build-push-action` ALONE and not every step, which is the
+same trade one level up. `docker/setup-buildx-action` takes a `cache-binary`
+input that caches the BUILDX BINARY DOWNLOAD and not a single image layer; a
+rule cast wide enough to reach it would be refusing another benign name on
+another action.
 
 THE FLOOR EXISTS BECAUSE A GATE WITH NOTHING TO CHECK REPORTS SUCCESS. There
 are five build steps today across three workflows; below two this file is a
@@ -108,6 +121,12 @@ MINIMUM_SITES = 2
 # this is a substring over one action's inputs rather than a list of names.
 CACHE = "cache"
 
+# ...and the prefix that marks one as the OPPOSITE. `no-cache` and
+# `no-cache-filters` disable a cache; refusing them would refuse the very input
+# that guarantees the apt layer re-executes. Matched as a PREFIX so a
+# `no-cache-*` sibling added later is allowed for the same reason these are.
+NOT_A_CACHE = "no-cache"
+
 
 def steps_of(document):
     """Every step in a parsed workflow, as (job id, index, step)."""
@@ -136,7 +155,12 @@ def build_sites(paths):
                 continue
             with_ = step.get("with")
             keys = sorted(with_) if isinstance(with_, dict) else []
-            cached = [key for key in keys if CACHE in str(key).lower()]
+            cached = [
+                key
+                for key in keys
+                if CACHE in str(key).lower()
+                and not str(key).lower().startswith(NOT_A_CACHE)
+            ]
             where = f"{path}: job `{job_id}`, step {index + 1}"
             sites.append((where, cached))
     return sites

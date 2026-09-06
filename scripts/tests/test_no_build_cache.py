@@ -26,6 +26,13 @@ two-name denylist passes it while the cache it names does exactly what
 `cache-from` does, so that test is what fails if anybody narrows the rule to the
 names buildx happens to use this year.
 
+AND THE EXCEPTION IS PINNED TOO, because it points the other way.
+`docker/build-push-action` takes `no-cache` and `no-cache-filters`, which
+DISABLE a cache. A gate matching the substring alone refuses them — refusing the
+very input that guarantees the apt layer re-executes, under a message saying it
+declared a cache. `test_disabling_the_cache_is_not_declaring_one` is what fails
+if that comes back.
+
 Run: python3 -m pytest scripts/tests/ -q
 """
 
@@ -250,6 +257,41 @@ def test_the_buildx_binary_cache_is_not_a_layer_cache(tmp_path):
     assert result.returncode == 1
     assert "`cache-from`" in result.stdout
     assert "cache-binary" not in result.stdout
+
+
+def test_disabling_the_cache_is_not_declaring_one(tmp_path):
+    """THE GATE MUST NOT BLOCK ITS OWN REINFORCEMENT, paired with a real cache.
+
+    `no-cache` is the input a maintainer reaches for to GUARANTEE the apt `RUN`
+    re-executes — the exact property this gate exists to protect. A rule
+    matching the substring `cache` alone refuses it, under a message saying it
+    declared a cache, which is how a rule becomes one people work around. It is
+    fed here beside a genuine `cache-from`: the gate must refuse and name the
+    `cache-from` ALONE. A tree with `no-cache` by itself would pass whether the
+    gate works or not.
+    """
+    root = write(
+        tmp_path,
+        a__yaml=workflow(
+            step(no_cache="true"),
+            step(no_cache_filters="apt"),
+            step(cache_from="type=gha"),
+        ),
+    )
+    result = run(root)
+    assert result.returncode == 1
+    assert "`cache-from`" in result.stdout
+    assert "no-cache" not in result.stdout
+
+
+def test_a_tree_that_only_disables_the_cache_is_green(tmp_path):
+    """The other half: `no-cache` on its own must not redden anything."""
+    root = write(
+        tmp_path,
+        a__yaml=workflow(step(no_cache="true"), step(no_cache_filters="apt")),
+    )
+    result = run(root)
+    assert result.returncode == 0, result.stdout
 
 
 def test_ordinary_build_inputs_do_not_redden(tmp_path):
