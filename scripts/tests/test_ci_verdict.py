@@ -53,6 +53,7 @@ GATED = [
     "test",
     "proto",
     "portability",
+    "service_immutable",
 ]
 
 
