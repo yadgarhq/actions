@@ -972,22 +972,104 @@ jobs:
           # Needs tags and history to know what has happened since the last one.
           fetch-depth: 0
 
+      # THE GATE IS A CHECKED-IN SCRIPT, staged the way the `portability` job
+      # stages its own and for the same reason: `ci-pr.yaml` is a reusable
+      # workflow, so the checkout above is the CALLING repository and nothing
+      # from `yadgarhq/actions` is on disk. `@main` because that is what every
+      # consumer pins the workflow at, so the script and the workflow that calls
+      # it move together.
+      - if: github.repository != 'yadgarhq/actions'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: yadgarhq/actions
+          ref: main
+          path: .ci-actions
+
+      # LEDGER 630, THE HALF THAT CANNOT BE OUTRUN. `ci / template` reads the
+      # body from the pull request EVENT PAYLOAD, and `on: pull_request` without
+      # `types:` does not subscribe to `edited` — so a body edited after the
+      # check went green reaches `main` unread, and the version below is derived
+      # from text no gate ever saw. Adding `edited` to a caller closes that
+      # BEFORE the merge and is the better half; it is a per-repository change
+      # and it loses a seconds-wide race. This one reads the message that
+      # actually landed, so nothing outruns it.
+      #
+      # IT DEMANDS A FINDING. The step below already refuses three ways — no
+      # tag, no plain baseline, no entries — and "no parseable Changelog entries"
+      # was reachable by a body edit that deleted the section, reported as
+      # `Nothing to release` and green. An absence read as benign is the class
+      # this organisation has now shipped four times. With this step in front of
+      # it that sentence becomes true again: a conformant HEAD always yields at
+      # least one bullet, so the only way to reach it is a bot-authored commit.
+      #
+      # HEAD ONLY, NEVER THE RANGE. A range-scoped assertion is not idempotent:
+      # one bad commit would redden every merge after it until a tag is cut, and
+      # this job is what cuts the tag. HEAD-scoped it self-heals — the release is
+      # delayed by one merge and the entries are picked up by the next.
+      #
+      # BOTS ARE EXEMPT, and dependabot is not the load-bearing case. `yadgarhq/
+      # argocd` takes a commit per release from `ci-release.yaml`, written by the
+      # release App as `ci: <module> <version>` — one line, no sections. Without
+      # the exemption every release in the estate would redden argocd's main.
+      # Verified against argocd's history rather than assumed: those commits are
+      # authored by `yadgarhq-bot[bot]`.
+      #
+      # WHAT IT CANNOT SEE, said here rather than implied away: an edit that
+      # keeps the body parseable but changes what it means — `feat:` to `fix:`,
+      # or a dropped `!` — passes both this and the pull-request check, because
+      # both bodies are valid. Only a reader notices, from the bump the
+      # `edited` re-run reports.
+      - name: the message this version is derived from is one the template accepts
+        id: gate
+        env:
+          UNDER_REVIEW: ${{ github.repository }}
+          SUBJECT: the commit message this version is derived from
+          # GitHub HARD-WRAPS the body at about 72 columns on its way into the
+          # squash commit, so a bullet that was one line in the pull request
+          # arrives as a bullet plus continuations. Measured, not assumed:
+          # `yadgarhq/store` pull request 15 against commit `2198a4f`.
+          WRAPPED: "true"
+        run: |
+          set -euo pipefail
+          # THE REPOSITORY NAME DECIDES, never the presence of the file, so that
+          # no repository under review can supply its own gate.
+          if [ "$UNDER_REVIEW" = "yadgarhq/actions" ]; then
+            dir=scripts
+          else
+            dir=.ci-actions/scripts
+          fi
+          if [ ! -f "$dir/pr_body.py" ]; then
+            echo "::error::the body gate is missing at $dir/pr_body.py"
+            exit 1
+          fi
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          BODY=$(git log -1 --format=%B)
+          AUTHOR=$(git log -1 --format='%an <%ae>')
+          export BODY AUTHOR
+          python3 "$dir/pr_body.py"
+
       # THE DERIVATION, and its output is now a tag rather than a sentence, so
       # every path that cannot be certain writes an EMPTY `next` and the tagging
       # step below skips. There is no default and no best guess.
       - name: what the next version is
         id: v
+        env:
+          # ONE PARSER FOR BOTH READERS OF A BODY. The step above asserts the
+          # contract and this one derives from it; two copies of the bullet
+          # regex would be two things to keep in agreement by hand, and the
+          # disagreement would surface as a version nobody can explain.
+          GATE_DIR: ${{ steps.gate.outputs.dir }}
         run: |
           python3 - <<'PY'
-          import os, re, subprocess
+          import os, re, subprocess, sys
+
+          sys.path.insert(0, os.environ["GATE_DIR"])
+          from pr_body import BULLET, bump_for
 
           def sh(*a):
               return subprocess.run(a, capture_output=True, text=True).stdout.strip()
 
-          TYPES = "build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test"
-          BULLET = re.compile(
-              rf"^\s*[-*]\s+(?P<type>{TYPES})(?P<scope>\([^)]+\))?(?P<bang>!)?:\s+(?P<desc>\S.*)$"
-          )
           # A BASELINE THIS REFUSES TO COUNT FROM, rather than one it mangles.
           # `yadgarhq/yadgar` carries `v0.1.0a6` (ADR-0498's prerelease), and
           # `int("0a6")` raised — which merely reddened a report before and would
@@ -999,19 +1081,14 @@ jobs:
           rng = f"{last}..HEAD" if last else "HEAD"
           log = sh("git", "log", rng, "--format=%B%x00")
 
-          entries, bumps = [], []
+          entries, matches = [], []
           for commit in [c for c in log.split("\0") if c.strip()]:
               for line in commit.splitlines():
                   m = BULLET.match(line)
                   if not m:
                       continue
                   entries.append(line.strip())
-                  if m.group("bang"):
-                      bumps.append("major")
-                  elif m.group("type") == "feat":
-                      bumps.append("minor")
-                  else:
-                      bumps.append("patch")
+                  matches.append(m)
 
           base = SEMVER.match(last) if last else None
           nxt, note = "", ""
@@ -1027,7 +1104,7 @@ jobs:
           elif not entries:
               out += [f"No parseable Changelog entries since `{last}`. Nothing to release."]
           else:
-              bump = "major" if "major" in bumps else "minor" if "minor" in bumps else "patch"
+              bump = bump_for(matches)
               major, minor, patch = (int(g) for g in base.groups())
 
               # PRE-1.0 IS NOT THE SAME RULE, and getting it wrong publishes a

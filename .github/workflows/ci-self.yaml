@@ -8,8 +8,31 @@ name: ci-self
 # It is a separate file because a workflow cannot call itself. The job is named
 # `ci` so the reported check is `ci / passed`, identical to every other
 # repository, which is what lets one ruleset serve all of them.
+# `edited` IS THE HALF OF LEDGER 630 THAT LIVES IN THE CALLER, and it cannot
+# live anywhere else. `ci-pr.yaml` is `workflow_call` only, so the activity types
+# are declared here and in each consumer's own `ci.yaml`; no change to the shared
+# workflow can add one to a repository that has not asked for it.
+#
+# WITHOUT IT THE BODY IS VALIDATED ONCE AND THEN FREELY MUTABLE. `on:
+# pull_request` with no `types:` subscribes to `opened`, `synchronize` and
+# `reopened`. A body edited after `ci / passed` went green retriggers nothing, so
+# the text that becomes the squash commit message — and the release — is not the
+# text any check read. `gh run rerun` does not close it either: a re-run replays
+# the ORIGINAL event payload, so it re-reads the stale body and reports the
+# stale verdict.
+#
+# THE VERDICT IS RE-EVALUATED, which is what makes this a gate rather than a
+# report. The `edited` run creates a new `ci / passed` check run on the same head
+# sha, the ruleset requires that context, and GitHub gates on the latest one.
+#
+# ITS RESIDUAL, named rather than left to be discovered: between the edit and the
+# new check run appearing as pending there are a few seconds in which the stale
+# green still satisfies the gate. An edit-then-merge fast enough to fit inside
+# that window is caught after the fact by the `version` job's assertion, on the
+# message that actually landed.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
 
