@@ -326,3 +326,46 @@
   entry: hooks/no_compiled_in_defaults.sh
   always_run: true
   pass_filenames: false
+
+# LEDGER 720. The EKU wall — a cert-manager leaf names `server auth` XOR
+# `client auth` — published so the rule stops being one repository's local hook.
+#
+# It replaces `yadgarhq/deploy`'s `repo: local` `scripts/check-certificate-usages.py`,
+# and the reason is not tidiness. That hook was scoped `files: ^infra/.*\.yaml$`
+# and to `issuerRef.name == "yadgar-internal-ca"`, and both scopings fail OPEN.
+# Measured by running it on 2026-09-06: a Certificate naming BOTH directions
+# under the internal CA passes when committed at the repository root, and passes
+# inside `infra/` when the issuer is renamed. `--all-files` does not save it —
+# `files:` filters that list too.
+#
+# ADOPTED IN `deploy` ALONE TODAY, and that is a measurement rather than a
+# preference: `deploy` is the only repository in the estate that declares a
+# `kind: Certificate` at all (all eighteen swept, 2026-09-06). Publication makes
+# the check AVAILABLE rather than switching it on — ADR-0577 — so this entry
+# exists for the repository that declares the next leaf, the same way
+# `run-block-size` above waits for the first real `run:` block.
+#
+# `always_run` WITH `pass_filenames: false`, because the subject is every
+# Certificate in the tree and not the file somebody touched. That is what closes
+# the `files:` hole above, and it is the reason `no-compiled-in-defaults` below
+# makes the same choice.
+#
+# THE SCRIPT ASSERTS IT INSPECTED SOMETHING and prints the count, twice over: a
+# floor on the Certificates found, and a second floor on the ones the wall
+# actually judged. The second exists because an issuer rename could once turn
+# every leaf into an exemption, and a gate reporting success having judged
+# nothing is the defect this estate has now measured four times in a week.
+#
+# `language: script`, NOT python — the reason `complexity`, `observe-coverage`
+# and `no-compiled-in-defaults` all record: a python-language hook pip-installs
+# this repository, which is not a package, and the error is raised in the
+# CONSUMING repo where nothing explains it. That makes the script stdlib-only,
+# so it carries a hand-written YAML scan; `scripts/tests/test_certificate_usages.py`
+# asserts that scan extracts the same tuples as PyYAML over a corpus carrying
+# both traps the real files contain.
+- id: certificate-usages
+  name: a leaf names exactly one direction (server auth XOR client auth)
+  language: script
+  entry: hooks/certificate_usages.py
+  always_run: true
+  pass_filenames: false
