@@ -697,10 +697,16 @@ def main(argv=None):
     # run's answer to be read by another — and `_DEFERRED` never holds a
     # resolver built from facts that have gone stale.
     #
-    # `REQUIRED_CHECK` IS AN OVERRIDE RATHER THAN A SETTING. It exists so a
-    # repository whose caller job is not named `ci` can still be gated; the
-    # value comes from `ci-pr.yaml`, which a pull request under review cannot
-    # edit for the run that gates it, because every consumer pins `@main`.
+    # `REQUIRED_CHECK` IS AN OVERRIDE RATHER THAN A SETTING, and it is SAFE BY
+    # DIRECTION rather than by who can write it. In the seventeen consumers the
+    # value comes from `ci-pr.yaml@main`, which a pull request under review
+    # cannot edit for the run that gates it. In THIS repository it can: the
+    # caller uses a local path, exactly so a change to a shared workflow is
+    # gated by the version in the pull request. What that buys an author is
+    # nothing, because every wrong value fails CLOSED — a check name with no
+    # check runs on this commit produces no standing verdict, and no standing
+    # verdict refuses. There is no value of this variable that turns a red
+    # commit green.
     register_deferred_reference(
         TEXT_EDIT_REF,
         make_text_edit_resolver(
