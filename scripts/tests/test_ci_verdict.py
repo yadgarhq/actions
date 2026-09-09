@@ -1113,3 +1113,35 @@ def test_no_token_refuses_before_it_asks():
     with pytest.raises(ci_verdict.Refused) as exc:
         ci_verdict.fetch_check_runs("https://api.github.com/x", "")
     assert "Absence is not success" in str(exc.value)
+
+
+def test_the_685_bypass_against_the_predicate_it_replaced(capsys):
+    """THE BEFORE AND THE AFTER, on ONE matrix — the pair to read first here.
+
+    The same `toJSON(needs)` a text-only edit produces, run through both
+    predicates, with a RED verdict standing on the commit:
+
+        the shell loop `ci_verdict.py` replaced   success
+        this gate                                 refuses
+
+    The loop is not wrong about the results it reads. `precommit`, `workflows`,
+    `vulnerabilities`, `test`, `proto`, `portability` and `service_immutable` all
+    genuinely reported `skipped`, and `skipped` genuinely is a legitimate result
+    for jobs whose condition was false. What it cannot ask is what the skips were
+    bought with, and on this matrix they were bought with a description edit on a
+    commit whose checks had failed.
+
+    Printed rather than asserted blind, so the failure is legible.
+    """
+    ctx = edited_needs()
+    assert legacy_predicate(ctx, "pull_request") is True
+
+    with pytest.raises(ci_verdict.Refused) as exc:
+        gate(ctx, payload(check_run("34007298356", "failure")))
+
+    print("the matrix both predicates were given:")
+    for job in GATED:
+        print(f"  {job:<18} {ctx[job]['result']}")
+    print("\nthe verdict standing on this commit: ci / passed = failure")
+    print(f"\nthe loop this gate replaced: success\nthis gate: {exc.value}")
+    assert "no green verdict to carry forward" in str(exc.value)
