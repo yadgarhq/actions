@@ -29,6 +29,7 @@ import json
 import pathlib
 import subprocess
 import sys
+import urllib.error
 
 import pytest
 
@@ -345,28 +346,29 @@ def synthetic(tmp_path, condition, name="probe"):
     return path
 
 
-def test_ledger_685s_short_circuit_is_refused_until_it_is_registered(tmp_path):
-    """THE INTERLOCK. Pull request 52's condition, evaluated by this gate.
+def test_an_unregistered_detect_output_is_refused(tmp_path):
+    """THE INTERLOCK, on the next reference somebody adds rather than on the last.
 
-    52 gives six jobs a `needs.detect.outputs.text_edit != 'true'` conjunct so a
-    text-only pull request edit re-reads the body and nothing else. Against the
-    predicate this replaced, the six resulting `skipped` results read as success
-    and a red `ci / passed` is superseded by a green one on the same head sha.
+    This test used to read `text_edit`, because `text_edit` was the reference
+    nobody had registered — and registering it, together with the assertion that
+    earns it, is what ledger 685 did. The property being pinned was never about
+    that name: it is that a conjunct added to a job's `if:` cannot buy a skip
+    just by existing. A NEW `detect` output — the shape the next affordability
+    argument will take — still refuses, because `_FACTS` is a list of full
+    reference names rather than a pattern over `needs.detect.outputs.*`.
 
-    Against this gate the run REFUSES, because `text_edit` is not a registered
-    reference. That is what makes 685 buildable rather than blocked: the work it
-    has left is to register the reference together with the assertion that earns
-    it — a prior completed `ci / passed` on this sha concluded success — rather
-    than to discover afterwards that the skip proved nothing.
+    Written against a name that is deliberately plausible. `docs_only` is exactly
+    the conjunct somebody reaches for next, and it must cost the same deliberate
+    decision `text_edit` cost.
     """
     wf = synthetic(
         tmp_path,
-        "github.event_name != 'push' && needs.detect.outputs.text_edit != 'true'",
+        "github.event_name != 'push' && needs.detect.outputs.docs_only != 'true'",
     )
     proc = run({"probe": {"result": "skipped", "outputs": {}}}, workflow=wf)
     assert proc.returncode == 1
     assert "refused to report a verdict" in proc.stderr
-    assert "text_edit" in proc.stderr
+    assert "docs_only" in proc.stderr
     assert "justified by nothing" in proc.stderr
 
 
@@ -538,12 +540,34 @@ def test_every_condition_in_the_real_workflow_is_evaluable():
     not been taught what they wrote — before the change reaches a consumer, rather
     than as a refused merge in seventeen repositories at once.
     """
-    resolve = ci_verdict.make_resolver(
-        "pull_request", "User", "yadgarhq/actions",
-        {"detect": {"result": "success", "outputs": {"rust": "true", "proto": "true"}}},
+    ctx = {
+        "detect": {
+            "result": "success",
+            # `text_edit` false, so no check run is read: an ordinary pull
+            # request evaluates every condition without touching the API.
+            "outputs": {"rust": "true", "proto": "true", "text_edit": "false"},
+        }
+    }
+    ci_verdict.register_deferred_reference(
+        ci_verdict.TEXT_EDIT_REF,
+        ci_verdict.make_text_edit_resolver(
+            needs=ctx,
+            repo="yadgarhq/actions",
+            sha=SHA,
+            run_id="1",
+            check_name="ci / passed",
+            token="",
+            fetch=no_fetch,
+        ),
     )
-    for job, condition in ci_verdict.load_conditions(CI_PR, "passed"):
-        assert isinstance(ci_verdict.evaluate(condition, resolve), bool), job
+    try:
+        resolve = ci_verdict.make_resolver(
+            "pull_request", "User", "yadgarhq/actions", ctx
+        )
+        for job, condition in ci_verdict.load_conditions(CI_PR, "passed"):
+            assert isinstance(ci_verdict.evaluate(condition, resolve), bool), job
+    finally:
+        ci_verdict._DEFERRED.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -722,3 +746,370 @@ def test_the_release_deployment_gate_is_the_reference_shape():
 
     jobs = yaml.safe_load(CI_RELEASE.read_text(encoding="utf-8"))["jobs"]
     assert "needs.image.result == 'success'" in jobs["deployment"]["if"]
+
+
+# ---------------------------------------------------------------------------
+# Ledger 685: what a text-only edit's skips have to be worth
+# ---------------------------------------------------------------------------
+#
+# THE BYPASS THIS BLOCK EXISTS FOR, in one sentence: a job fails, the author
+# edits the description, the head sha does not move, seven jobs skip, and the
+# `ci / passed` those skips produce SUPERSEDES the red one — GitHub gates on the
+# latest check run for a context, the ruleset on `main` requires exactly that
+# context with `required_approving_review_count: 0` and `bypass_actors: []`, so
+# nobody is required to look. `yadgarhq/actions` already carries five
+# `ci / passed` check runs on the single commit
+# `7c3afdeaa439e1f19e53027593f5e6af0e8f1e73`, so the supersede is measured
+# rather than argued.
+#
+# EVERY GREEN CASE BELOW IS PAIRED WITH A RED ONE ON THE SAME MATRIX, which is
+# this file's discipline: "a text-only edit passes" also passes when the
+# assertion is dead, so each such case is fed alongside the mutation that must
+# redden it.
+
+SHA = "7c3afdeaa439e1f19e53027593f5e6af0e8f1e73"
+
+# THIS RUN. Every fixture's own check run carries it, because the whole subtlety
+# is that the run asking the question is itself an answer to it.
+OWN_RUN = "34009000000"
+
+
+def check_run(run_id, conclusion="success", status="completed", at="2026-09-06T02:46:12Z"):
+    """One entry shaped like the live endpoint's, fields this gate reads included.
+
+    `details_url` is transcribed from a real response rather than invented —
+    `https://github.com/yadgarhq/actions/actions/runs/34007636330/job/101417713159`
+    — because the self-exclusion matches on the `/runs/<id>/` segment inside it
+    and a made-up shape would pin nothing.
+    """
+    return {
+        "id": int(run_id) % 1000000 + (0 if status == "completed" else 1),
+        "name": "ci / passed",
+        "status": status,
+        "conclusion": conclusion,
+        "completed_at": at if status == "completed" else None,
+        "details_url": (
+            f"https://github.com/yadgarhq/actions/actions/runs/{run_id}"
+            f"/job/10141{run_id[-4:]}"
+        ),
+    }
+
+
+def payload(*runs, total=None):
+    return {"total_count": len(runs) if total is None else total, "check_runs": list(runs)}
+
+
+def no_fetch(url):  # pragma: no cover - the point is that it is never called
+    raise AssertionError(f"the gate read {url} on a run that is not a text-only edit")
+
+
+# The jobs that skip on a text-only edit. Asserted against the workflow in
+# `test_every_short_circuited_job_carries_the_conjunct` rather than trusted here.
+SHORT_CIRCUITED = [
+    "precommit",
+    "workflows",
+    "vulnerabilities",
+    "test",
+    "proto",
+    "portability",
+    "service_immutable",
+]
+
+
+def edited_needs(text_edit="true", **override):
+    """The `toJSON(needs)` a text-only edit produces: seven skips and two runs.
+
+    `detect` and `template` execute — `template` is the job that re-reads the
+    edited body, which is the entire point of the short-circuit — and everything
+    else reports `skipped`.
+    """
+    ctx = {}
+    for job in GATED:
+        default = "skipped" if job in SHORT_CIRCUITED else "success"
+        ctx[job] = {"result": override.get(job, default), "outputs": {}}
+    ctx["detect"]["outputs"] = {
+        "rust": "false",
+        "proto": "false",
+        "text_edit": text_edit,
+    }
+    return ctx
+
+
+def gate(ctx, response, run_id=OWN_RUN, repo="yadgarhq/actions", sha=SHA, token="t"):
+    """The real workflow's real conditions, with the check-runs endpoint stubbed.
+
+    IN-PROCESS RATHER THAN THROUGH THE SUBPROCESS, and deliberately: there is no
+    way to hand a stubbed API to the gate from the environment, and there must
+    not be, or the assertion would be a suggestion. What the subprocess covers
+    is that no reference resolves without registration; what this covers is what
+    the registration then asserts.
+    """
+    urls = []
+
+    def fetch(url):
+        urls.append(url)
+        return response
+
+    ci_verdict.register_deferred_reference(
+        ci_verdict.TEXT_EDIT_REF,
+        ci_verdict.make_text_edit_resolver(
+            needs=ctx,
+            repo=repo,
+            sha=sha,
+            run_id=run_id,
+            check_name="ci / passed",
+            token=token,
+            fetch=fetch,
+        ),
+    )
+    try:
+        resolve = ci_verdict.make_resolver("pull_request", "User", repo, ctx)
+        conditions = ci_verdict.load_conditions(CI_PR, "passed")
+        ok, rows = ci_verdict.verdict(conditions, ctx, resolve)
+        return ok, rows, urls
+    finally:
+        ci_verdict._DEFERRED.clear()
+
+
+def test_every_short_circuited_job_carries_the_conjunct():
+    """`SHORT_CIRCUITED` is read off the workflow, not kept in step with it by hand.
+
+    The fixtures above would otherwise describe a run the workflow no longer
+    produces the day a job is added to or removed from the short-circuit — which
+    is the failure mode `test_the_gate_covers_every_job_it_needs` exists for one
+    level up.
+    """
+    conditions = dict(ci_verdict.load_conditions(CI_PR, "passed"))
+    carries = [
+        job
+        for job, cond in conditions.items()
+        if cond is not None and "text_edit" in str(cond)
+    ]
+    assert sorted(carries) == sorted(SHORT_CIRCUITED)
+    # THE TWO THAT MUST NOT CARRY IT. `template` re-reads the edited body, which
+    # is the only work a text-only edit has; `detect` computes the predicate.
+    assert "template" not in carries
+    assert "detect" not in carries
+
+
+def test_a_text_only_edit_carries_a_standing_green_verdict_forward():
+    """THE LEGITIMATE EDIT, which the assertion must not break.
+
+    A typo fixed in a description on a commit whose checks passed still
+    short-circuits and still reports success. If this reddened, the whole
+    short-circuit would be worthless — every consumer would re-run its full
+    matrix for every body edit, which is the cost ledger 685 exists to avoid.
+    """
+    ctx = edited_needs()
+    ok, rows, urls = gate(ctx, payload(check_run("34007298356", "success")))
+    assert ok, [r for r in rows if not r[4]]
+    skipped = {r[0] for r in rows if not r[1]}
+    assert skipped == set(SHORT_CIRCUITED)
+    assert len(urls) == 1, "the standing verdict is read once, not once per job"
+
+
+def test_a_text_only_edit_cannot_turn_a_red_run_green():
+    """THE BYPASS, CONSTRUCTED AND THEN REFUSED — the pair to the test above.
+
+    Identical job matrix, identical event, identical commit. The only difference
+    is the verdict standing on that commit, and that is the whole security
+    property: a description edit may carry a green verdict forward and may not
+    manufacture one.
+    """
+    ctx = edited_needs()
+    with pytest.raises(ci_verdict.Refused) as exc:
+        gate(ctx, payload(check_run("34007298356", "failure")))
+    assert "text-only edit" in str(exc.value)
+    assert "'failure'" in str(exc.value)
+    assert "editing the description cannot make a red run green" in str(exc.value)
+
+
+@pytest.mark.parametrize("conclusion", ["failure", "cancelled", "timed_out", "action_required", "neutral", "stale", "skipped"])
+def test_only_success_carries_forward(conclusion):
+    """Every conclusion that is not `success` refuses, rather than only `failure`.
+
+    A predicate of the shape `!= 'failure'` is the defect this estate has already
+    paid for once — `ci-release.yaml`'s `chart` job published from a CANCELLED
+    image until ledger 729. Pinned as a matrix so the narrower form cannot be
+    written here without a test going red.
+    """
+    ctx = edited_needs()
+    with pytest.raises(ci_verdict.Refused):
+        gate(ctx, payload(check_run("34007298356", conclusion)))
+
+
+def test_absence_is_not_success():
+    """No prior completed verdict at all — an edit that raced the first run.
+
+    Refused rather than allowed, and the message says why in the words the
+    specification used. An author who hits this pushes the branch again; a gate
+    that guessed here would be green on a commit nothing had ever checked.
+    """
+    ctx = edited_needs()
+    with pytest.raises(ci_verdict.Refused) as exc:
+        gate(ctx, payload())
+    assert "Absence is not success" in str(exc.value)
+
+
+def test_the_most_recent_verdict_decides_rather_than_the_best_one():
+    """An older green does not rescue a commit whose latest full run went red.
+
+    This is TIGHTER than "a prior completed run concluded success", and the
+    difference is reachable: `vulnerabilities` re-runs the same tree against a
+    feed that moves, so a commit that passed on Monday can fail on Tuesday with
+    no code change. Under the looser rule a body edit would then supersede
+    Tuesday's red with Monday's green.
+    """
+    ctx = edited_needs()
+    with pytest.raises(ci_verdict.Refused) as exc:
+        gate(
+            ctx,
+            payload(
+                check_run("34007298356", "success", at="2026-09-06T02:46:12Z"),
+                check_run("34007360583", "failure", at="2026-09-06T02:47:18Z"),
+            ),
+        )
+    assert "'failure'" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# The self-exclusion, and what it is load-bearing against
+# ---------------------------------------------------------------------------
+
+
+def naive_latest_not_red(response):
+    """The assertion MINUS the self-exclusion, and nothing else — run, not described.
+
+    Deliberately the closest possible neighbour to the real one: same endpoint,
+    same `filter=all`, same "read the most recent" rule. The endpoint returns
+    newest first, which is what the live probe showed, so this takes entry zero
+    and accepts anything that did not conclude `failure`.
+
+    The one line it is missing is the exclusion.
+    """
+    latest = response["check_runs"][0]
+    return latest.get("conclusion") != "failure"
+
+
+def test_without_the_self_exclusion_the_assertion_reads_its_own_answer():
+    """THE SELF-EXCLUSION, DEMONSTRATED RATHER THAN ASSERTED.
+
+    One response, two predicates. It holds this run's own `ci / passed` — created
+    when this job started, same name, same commit, newest of the three — and it
+    holds the red verdict that actually stands.
+
+    The naive predicate passes, and it passes BECAUSE of the entry belonging to
+    the run whose legitimacy is the question. That entry is the newest
+    `ci / passed` on the commit — this job created it when it started — and a
+    check run that is still running has a NULL conclusion, so "the most recent
+    one did not fail" is satisfied by the fact that this run has not finished
+    rather than by anything anybody checked. The assertion reads its own answer,
+    and the bypass survives the fix that was meant to close it.
+
+    `standing_verdict` refuses the same response, because it drops that entry
+    twice over — by state (`status != 'completed'`) and by identity
+    (`/runs/<this run id>/` inside `details_url`) — and then reads the newest of
+    what is left, which is the red one.
+    """
+    response = payload(
+        check_run(OWN_RUN, None, status="in_progress"),
+        check_run("34007298356", "failure", at="2026-09-06T02:46:12Z"),
+    )
+
+    assert naive_latest_not_red(response) is True, (
+        "the naive predicate should pass here — that is the bypass surviving"
+    )
+
+    latest = ci_verdict.standing_verdict(response, OWN_RUN, "ci / passed")
+    assert latest["conclusion"] == "failure"
+    assert OWN_RUN not in latest["details_url"]
+
+
+def test_this_runs_own_check_run_is_not_a_standing_verdict():
+    """The response holds nothing BUT this run's own entry, which is the live shape.
+
+    `filter=all` is what makes the prior entries visible at all; with the
+    endpoint's DEFAULT — `filter=latest`, one check run per name — the response
+    on a live run holds exactly this: the current run's own. Measured on
+    `yadgarhq/actions`, where the default returned `total_count: 1` for a commit
+    that carries five.
+
+    So the gate must refuse here rather than resolve, and it does: nothing
+    completed, therefore no standing verdict, therefore no skip is earned.
+    """
+    response = payload(check_run(OWN_RUN, None, status="in_progress"))
+    with pytest.raises(ci_verdict.Refused) as exc:
+        ci_verdict.standing_verdict(response, OWN_RUN, "ci / passed")
+    assert "Absence is not success" in str(exc.value)
+
+
+def test_a_completed_check_run_of_this_same_run_is_still_excluded():
+    """The identity test, exercised where the state test cannot help.
+
+    A re-run of THIS run reuses the run id and completes its earlier attempt, so
+    an entry can be both `completed` and this run's own. Excluded by
+    `details_url` rather than by status, which is why both tests are there.
+    """
+    response = payload(check_run(OWN_RUN, "success", status="completed"))
+    with pytest.raises(ci_verdict.Refused):
+        ci_verdict.standing_verdict(response, OWN_RUN, "ci / passed")
+
+
+def test_filter_all_is_in_the_query():
+    """`filter=all`, pinned. The endpoint's default returns the latest only."""
+    url = ci_verdict.check_runs_url("yadgarhq/actions", SHA, "ci / passed")
+    assert "filter=all" in url
+    assert f"/commits/{SHA}/check-runs" in url
+    assert "check_name=ci%20%2F%20passed" in url
+
+
+def test_a_truncated_response_is_refused():
+    """More check runs exist than were returned, so the newest may not be here."""
+    with pytest.raises(ci_verdict.Refused) as exc:
+        ci_verdict.standing_verdict(
+            payload(check_run("34007298356", "success"), total=101),
+            OWN_RUN,
+            "ci / passed",
+        )
+    assert "may not be among them" in str(exc.value)
+
+
+def test_an_ordinary_pull_request_reads_no_check_runs():
+    """`text_edit` false: the API is not touched, so the permission is not exercised.
+
+    An outage, a rate limit or a missing `checks: read` cannot redden a run that
+    is checking everything anyway — only one that is checking almost nothing.
+    """
+    ctx = edited_needs(text_edit="false")
+    for job in SHORT_CIRCUITED:
+        ctx[job]["result"] = "success"
+    ctx["test"]["result"] = "skipped"
+    ctx["proto"]["result"] = "skipped"
+    ok, rows, urls = gate(ctx, payload(), token="")
+    assert ok, [r for r in rows if not r[4]]
+    assert urls == []
+
+
+def test_a_missing_permission_reddens_the_gate(monkeypatch):
+    """HTTP 403 — a caller that never granted `checks: read` — refuses, loudly.
+
+    THE FAILURE MOST LIKELY TO HAPPEN IN PRACTICE, because a called workflow's
+    token can only be narrowed by its caller: declaring `checks: read` in
+    `ci-pr.yaml` does nothing for a consumer whose `uses:` line grants only
+    `contents: read`. That consumer must not merge on a run it could not verify.
+    """
+
+    def boom(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 403, "Forbidden", {}, None)
+
+    monkeypatch.setattr(ci_verdict.urllib.request, "urlopen", boom)
+    with pytest.raises(ci_verdict.Refused) as exc:
+        ci_verdict.fetch_check_runs("https://api.github.com/x", "token")
+    assert "HTTP 403" in str(exc.value)
+    assert "checks: read" in str(exc.value)
+
+
+def test_no_token_refuses_before_it_asks():
+    with pytest.raises(ci_verdict.Refused) as exc:
+        ci_verdict.fetch_check_runs("https://api.github.com/x", "")
+    assert "Absence is not success" in str(exc.value)

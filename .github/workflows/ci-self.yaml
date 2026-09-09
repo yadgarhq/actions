@@ -131,6 +131,12 @@ jobs:
   ci:
     if: github.event_name == 'pull_request'
     uses: ./.github/workflows/ci-pr.yaml
+    # THE CONSUMER SHAPE, mirrored deliberately. All seventeen consumers
+    # pin `permissions: contents: read` on this call, which CAPS the
+    # callee's token. Without this line ci-self would test a permission
+    # arrangement no consumer has.
+    permissions:
+      contents: read
 
   # THE PASSTHROUGH EVERY OTHER REPOSITORY NEEDS TOO, written here first because
   # this repository is a caller like any other. A reusable workflow cannot read a

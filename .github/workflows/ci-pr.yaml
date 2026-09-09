@@ -36,6 +36,35 @@ on:
 # never fire and the release would silently not happen.
 permissions:
   contents: read
+  # CHECKS: READ IS LEDGER 685'S PRICE, AND IT IS PAID BY EVERY JOB IN THIS FILE.
+  # Said here rather than left to be discovered: this block is the workflow's,
+  # so the permission reaches `precommit`, `test`, `proto` and the rest in all
+  # eighteen repositories that call this file, not only the `passed` job that
+  # reads it. That is a real widening and it was accepted deliberately.
+  #
+  # WHAT IT BUYS. On a text-only pull request edit seven jobs skip and the body
+  # is the only thing re-read, so `ci / passed` would otherwise report success
+  # having checked almost nothing — and GitHub gates on the LATEST check run for
+  # a context, so that report SUPERSEDES the red one on the same commit. The
+  # gate closes it by reading the verdict that stands on this commit before it
+  # accepts those skips, through
+  # `GET /repos/{owner}/{repo}/commits/{sha}/check-runs`, which is what needs
+  # the permission. `scripts/ci_verdict.py` holds the assertion.
+  #
+  # WHY READ RATHER THAN WRITE, and why the widening is narrow in the way that
+  # matters: `checks: read` cannot create, update or conclude a check run. A job
+  # holding it can see what other jobs reported and nothing else, so the worst a
+  # compromised step gains is knowledge of results that are already public on a
+  # public repository.
+  #
+  # A CALLER CAN ONLY NARROW THIS, NEVER WIDEN IT. Declaring it here does not
+  # grant it: each caller's `uses:` line carries its own `permissions:` block and
+  # that block is the cap. Every consumer pins `contents: read` there today, so
+  # the assertion refuses loudly in those repositories rather than passing
+  # quietly — which is safe, because the short-circuit is inert until a caller
+  # also subscribes to `edited`. The sweep that adds `edited` must add
+  # `checks: read` on the same line.
+  checks: read
 
 # WHAT RUNS WHEN, and the push case is the interesting one.
 #
@@ -1083,7 +1112,9 @@ jobs:
   # the base or skip, and a gate that skips is the failure this repository has
   # already recorded several times.
   service_immutable:
-    if: github.event_name != 'push'
+    # Ledger 685: a text-only edit re-reads the body and nothing else.
+    needs: detect
+    if: github.event_name != 'push' && needs.detect.outputs.text_edit != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1637,6 +1668,20 @@ jobs:
           EVENT: ${{ github.event_name }}
           AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
           REPO: ${{ github.repository }}
+          # LEDGER 685: what the gate reads the STANDING VERDICT with, on the
+          # one path where seven jobs skip and the body is all that was checked.
+          #
+          # THE HEAD SHA RATHER THAN `github.sha`, and the difference is not
+          # cosmetic. On a `pull_request` event `github.sha` is the ephemeral
+          # MERGE commit, which carries no check runs at all; the checks live on
+          # the pull request's head, which is also the commit an `edited` event
+          # cannot change. Reading the wrong one would refuse every edit.
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # This run's own id, so its own in-progress `ci / passed` — created
+          # when this job started, same name, same commit, newest of them all —
+          # is not read as the prior verdict it is asking about.
+          RUN_ID: ${{ github.run_id }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # THE REPOSITORY NAME DECIDES, never the presence of the file, so that
