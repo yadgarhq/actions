@@ -312,7 +312,7 @@ def register_deferred_reference(ref, resolver):
     written for: the resolver does not report what `text_edit` says, it reports
     what `text_edit` has EARNED. `make_text_edit_resolver` below returns the
     value only after establishing that the standing `ci / passed` on this commit
-    concluded success, and raises `Refused` otherwise — so the six skips a
+    concluded success, and raises `Refused` otherwise — so the seven skips a
     text-only edit produces are accepted only on a run that has a green verdict
     to carry forward.
 
@@ -327,12 +327,12 @@ def register_deferred_reference(ref, resolver):
 # Ledger 685: the fact that earns a text-only edit's skips
 # ---------------------------------------------------------------------------
 
-# THE REFERENCE THE SIX CONDITIONS READ. Written once here rather than spelled
+# THE REFERENCE THE SEVEN CONDITIONS READ. Written once here rather than spelled
 # out at each use, because the string is the join between `ci-pr.yaml`'s job
 # conditions and this gate's whitelist and a typo in either is a silent refusal.
 TEXT_EDIT_REF = "needs.detect.outputs.text_edit"
 
-# THE ONE CONTEXT THE RULESET REQUIRES, in this repository and in all seventeen
+# THE ONE CONTEXT THE RULESET REQUIRES, in this repository and in all eighteen
 # consumers: `<caller job id> / <callee job id>`, where the caller job is named
 # `ci` precisely so that one ruleset serves every repository. A repository that
 # renamed it would not be gated by this name at all, so its pull requests block
@@ -343,12 +343,31 @@ DEFAULT_REQUIRED_CHECK = "ci / passed"
 def check_runs_url(repo, sha, check_name):
     """The check runs named `check_name` on `sha` — ALL of them, not the latest.
 
-    `filter=all` IS LOAD-BEARING and its default is the trap. The endpoint
-    defaults to `filter=latest`, which returns exactly ONE check run per name:
-    on a live run that one is this run's own, still in progress, and the prior
-    verdict this gate exists to read is not in the response at all. Measured on
-    `yadgarhq/actions` rather than read from the documentation — the default
-    returned `total_count: 1` for a commit that carries five.
+    `filter=all` IS A SUPERSET RATHER THAN THE THING THAT CARRIES THE LOAD, and
+    saying so corrects what this docstring claimed before. It claimed the
+    endpoint's default returns exactly one check run per NAME, so that a live
+    run would see only its own. That is false. Re-measured on `yadgarhq/actions`
+    on 2026-09-09, `check_name=ci / passed`, `total_count` under the default,
+    `&filter=all` and `&filter=latest` in turn:
+
+        7c3afde   5   5   5
+        b893dc9   4   4   4
+        ed8b334   2   2   2
+
+    `filter=latest` dedups per check SUITE, not per name, and every workflow run
+    opens its own suite — the five entries on `7c3afde` carry five DISTINCT
+    `check_suite.id` values. So prior completed verdicts come back either way.
+
+    THE PARAMETER STAYS, because a superset cannot lose the entry this gate
+    needs and it costs one query string. What actually stops this run reading
+    its own answer is `standing_verdict`'s self-exclusion by workflow RUN ID
+    below, and the tests that pin the property say so.
+
+    THE CAVEAT, said here rather than left for the next reader to fall into:
+    those three measurements were taken after the fact, on commits whose every
+    run had completed. What the endpoint returns DURING a live in-progress run
+    was not observed, so this records what was measured and claims nothing past
+    it.
 
     `per_page=100` with the truncation check in `standing_verdict` below rather
     than pagination: a hundred `ci / passed` runs on one commit is a situation to
@@ -476,8 +495,8 @@ def make_text_edit_resolver(needs, repo, sha, run_id, check_name, token, fetch=N
 
     THE VALUE IS RETURNED ONLY WHEN IT HAS BEEN EARNED. `text_edit` is `true`
     exactly when this run is a pull request edit that changed the title or the
-    body and not the base, and the six conditions that read it then evaluate
-    FALSE — which tells this gate that six `skipped` results are what the
+    body and not the base, and the seven conditions that read it then evaluate
+    FALSE — which tells this gate that seven `skipped` results are what the
     workflow asked for. That is the merge-gate bypass pull request 52 was held
     on, and it stops being one here: the value is handed back only after the
     standing `ci / passed` on this same commit is shown to have concluded
@@ -698,7 +717,7 @@ def main(argv=None):
     # resolver built from facts that have gone stale.
     #
     # `REQUIRED_CHECK` IS AN OVERRIDE RATHER THAN A SETTING, and it is SAFE BY
-    # DIRECTION rather than by who can write it. In the seventeen consumers the
+    # DIRECTION rather than by who can write it. In the eighteen consumers the
     # value comes from `ci-pr.yaml@main`, which a pull request under review
     # cannot edit for the run that gates it. In THIS repository it can: the
     # caller uses a local path, exactly so a change to a shared workflow is

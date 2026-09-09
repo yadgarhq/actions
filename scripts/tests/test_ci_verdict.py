@@ -538,7 +538,7 @@ def test_every_condition_in_the_real_workflow_is_evaluable():
 
     This is the test that fails when somebody edits a job's `if:` and the gate has
     not been taught what they wrote — before the change reaches a consumer, rather
-    than as a refused merge in seventeen repositories at once.
+    than as a refused merge in eighteen repositories at once.
     """
     ctx = {
         "detect": {
@@ -1028,11 +1028,18 @@ def test_without_the_self_exclusion_the_assertion_reads_its_own_answer():
 def test_this_runs_own_check_run_is_not_a_standing_verdict():
     """The response holds nothing BUT this run's own entry, which is the live shape.
 
-    `filter=all` is what makes the prior entries visible at all; with the
-    endpoint's DEFAULT — `filter=latest`, one check run per name — the response
-    on a live run holds exactly this: the current run's own. Measured on
-    `yadgarhq/actions`, where the default returned `total_count: 1` for a commit
-    that carries five.
+    THIS IS THE SELF-EXCLUSION'S CASE, NOT THE FILTER'S, and the distinction is
+    a correction to what this docstring used to say. It claimed the endpoint's
+    default returns one check run per NAME, so that `filter=all` is what makes
+    prior entries visible. Re-measured on `yadgarhq/actions` on 2026-09-09, that
+    is false: `7c3afde` returns `total_count: 5` under the default and under
+    `filter=all` alike, because `filter=latest` dedups per check SUITE and each
+    workflow run opens its own. `check_runs_url`'s docstring carries the numbers
+    and the caveat.
+
+    What produces the shape below is therefore a commit whose only `ci / passed`
+    is the one this run created when it started — the first run on a fresh push,
+    or an edit that raced it.
 
     So the gate must refuse here rather than resolve, and it does: nothing
     completed, therefore no standing verdict, therefore no skip is earned.
@@ -1056,7 +1063,13 @@ def test_a_completed_check_run_of_this_same_run_is_still_excluded():
 
 
 def test_filter_all_is_in_the_query():
-    """`filter=all`, pinned. The endpoint's default returns the latest only."""
+    """`filter=all`, pinned as a SUPERSET rather than as the load-bearing part.
+
+    Measurement says the default already returns the prior verdicts here, so
+    this pins belt-and-braces rather than the property the gate rests on. The
+    property is the self-exclusion, and the tests above it are the ones that
+    would go red if it were removed.
+    """
     url = ci_verdict.check_runs_url("yadgarhq/actions", SHA, "ci / passed")
     assert "filter=all" in url
     assert f"/commits/{SHA}/check-runs" in url
@@ -1145,3 +1158,227 @@ def test_the_685_bypass_against_the_predicate_it_replaced(capsys):
     print("\nthe verdict standing on this commit: ci / passed = failure")
     print(f"\nthe loop this gate replaced: success\nthis gate: {exc.value}")
     assert "no green verdict to carry forward" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# What makes "text-only" a FACT rather than an inference
+# ---------------------------------------------------------------------------
+#
+# THE MUTATION THIS BLOCK EXISTS FOR fails OPEN, which is why it is here rather
+# than filed as a nicety. Delete the `[ "$BASE_CHANGED" = false ]` conjunct from
+# the `detect` step below and every other test in this file stays green — the
+# gate would then read `text_edit=true` on a BASE RETARGET, seven jobs would
+# skip, and the standing verdict carried forward would belong to a pull request
+# that proposed a different diff. GitHub fires `edited` for a changed title, a
+# changed body AND a changed base branch, and only the last one alters what the
+# pull request proposes without moving its head sha.
+#
+# THE STEP IS EXECUTED RATHER THAN GREPPED. A regex over the script would pass
+# against a conjunct that had been rewritten into something weaker; running the
+# real lines under `bash` cannot. The `env:` block is asserted separately,
+# because the execution supplies `ACTION` and `BASE_CHANGED` directly and so
+# cannot see where the workflow reads them from.
+
+
+def detect_predicate_step():
+    """The `detect` job's `text_edit` step, parsed out of the real workflow."""
+    import yaml
+
+    steps = yaml.safe_load(CI_PR.read_text(encoding="utf-8"))["jobs"]["detect"]["steps"]
+    matching = [s for s in steps if s.get("id") == "e"]
+    assert len(matching) == 1, (
+        "the `detect` job no longer has exactly one step with `id: e`, so this "
+        "block is asserting against a workflow that no longer exists"
+    )
+    return matching[0]
+
+
+def run_detect_predicate(tmp_path, action, base_changed):
+    """Run the step's script verbatim and hand back the `text_edit` it wrote."""
+    import os
+    import shutil
+
+    script = tmp_path / "detect_predicate.sh"
+    script.write_text(detect_predicate_step()["run"], encoding="utf-8")
+    output = tmp_path / "github_output"
+    summary = tmp_path / "github_step_summary"
+    output.write_text("", encoding="utf-8")
+    summary.write_text("", encoding="utf-8")
+    proc = subprocess.run(
+        [shutil.which("bash") or "/bin/bash", str(script)],
+        env={
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "ACTION": action,
+            "BASE_CHANGED": base_changed,
+            "GITHUB_OUTPUT": str(output),
+            "GITHUB_STEP_SUMMARY": str(summary),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    written = dict(
+        line.split("=", 1)
+        for line in output.read_text(encoding="utf-8").splitlines()
+        if "=" in line
+    )
+    assert "text_edit" in written, output.read_text(encoding="utf-8")
+    return written["text_edit"]
+
+
+@pytest.mark.parametrize(
+    ("action", "base_changed", "expected"),
+    [
+        # The edit the short-circuit exists for: a title or a body changed.
+        ("edited", "false", "true"),
+        # THE ONE THAT FAILS OPEN WITHOUT THE CONJUNCT. `edited` fired, and the
+        # base branch is what changed, so the pull request now proposes a diff
+        # against a base nothing on this sha was ever checked against.
+        ("edited", "true", "false"),
+        # Everything else is an ordinary run and checks everything.
+        ("synchronize", "false", "false"),
+        ("opened", "false", "false"),
+        ("reopened", "false", "false"),
+        ("", "false", "false"),
+    ],
+)
+def test_the_predicate_requires_both_an_edit_and_an_unchanged_base(
+    tmp_path, action, base_changed, expected
+):
+    """`ACTION = edited` AND `BASE_CHANGED = false`, both, run rather than read.
+
+    Delete either conjunct from `ci-pr.yaml`'s `detect` step and one row here
+    goes red naming the row that broke. The `edited`/`true` row is the one that
+    matters: it is the only row whose expected value is `false` while the
+    action alone would say `true`, so it is the row that the
+    `BASE_CHANGED = false` conjunct — and nothing else in this suite — holds up.
+    """
+    assert run_detect_predicate(tmp_path, action, base_changed) == expected, (
+        f"action={action!r} base_changed={base_changed!r} must produce "
+        f"text_edit={expected!r}; the `detect` step's predicate must require "
+        f"BOTH `$ACTION = edited` AND `$BASE_CHANGED = false`"
+    )
+
+
+def test_the_predicate_reads_the_event_rather_than_being_told():
+    """WHERE the two values come from, which executing the script cannot show.
+
+    `run_detect_predicate` supplies `ACTION` and `BASE_CHANGED` itself, so a
+    workflow that computed `BASE_CHANGED` as `github.event.changes.base == null`
+    — the guard inverted — would leave every row above green. Pinned by exact
+    string rather than by substring: `github.sha` contains `sha` too.
+    """
+    env = detect_predicate_step().get("env") or {}
+    assert env.get("ACTION") == "${{ github.event.action }}"
+    assert env.get("BASE_CHANGED") == "${{ github.event.changes.base != null }}"
+
+
+# ---------------------------------------------------------------------------
+# The remaining halves of the assertion, each pinned on its own
+# ---------------------------------------------------------------------------
+
+
+def test_an_unfinished_check_run_belonging_to_ANOTHER_run_is_not_a_verdict():
+    """`status == "completed"`, pinned where the self-exclusion cannot stand in.
+
+    Every other test of an in-progress entry uses THIS run's own, which the
+    identity test drops anyway — so the state test had no case of its own and
+    deleting it changed no result. A concurrent full run that has not finished
+    is the case that separates them: a foreign `details_url`, no conclusion yet,
+    and nothing whatever proved about the commit.
+    """
+    with pytest.raises(ci_verdict.Refused) as exc:
+        ci_verdict.standing_verdict(
+            payload(check_run("34007298356", None, status="in_progress")),
+            OWN_RUN,
+            "ci / passed",
+        )
+    assert "Absence is not success" in str(exc.value)
+
+
+def test_the_newest_FINISHED_verdict_decides_rather_than_the_newest_entry():
+    """The pair to the test above: an unfinished newer entry does not displace it.
+
+    A push, then an edit while the new full run is still going, is exactly this
+    shape. The verdict that stands is the completed one.
+    """
+    latest = ci_verdict.standing_verdict(
+        payload(
+            check_run("34009111111", None, status="in_progress"),
+            check_run("34007298356", "success", at="2026-09-06T02:46:12Z"),
+        ),
+        OWN_RUN,
+        "ci / passed",
+    )
+    assert latest["conclusion"] == "success"
+
+
+def test_a_text_only_edit_racing_an_unfinished_run_refuses():
+    """The same case through the resolver, with the MESSAGE asserted.
+
+    A bare `pytest.raises` would pass either way here: with the state test gone
+    the resolver reads a `None` conclusion, finds it is not `success` and
+    refuses with different words. The words are what tells the two apart.
+    """
+    ctx = edited_needs()
+    with pytest.raises(ci_verdict.Refused) as exc:
+        gate(ctx, payload(check_run("34007298356", None, status="in_progress")))
+    assert "Absence is not success" in str(exc.value)
+
+
+def test_an_unknown_run_id_refuses_rather_than_reading_the_prior_entry():
+    """No run id means no self-exclusion, and no self-exclusion means no verdict.
+
+    An empty `RUN_ID` makes the exclusion match nothing, so every entry —
+    including this run's own — reads as a prior one. Refused up front instead,
+    and this is the only test of that refusal: deleting it otherwise changes
+    nothing any other test looks at.
+    """
+    with pytest.raises(ci_verdict.Refused) as exc:
+        ci_verdict.standing_verdict(
+            payload(check_run("34007298356", "success")), "", "ci / passed"
+        )
+    assert "cannot be told apart" in str(exc.value)
+
+
+def gate_step():
+    """The `passed` job's step that runs the gate, found by the input it takes."""
+    import yaml
+
+    steps = yaml.safe_load(CI_PR.read_text(encoding="utf-8"))["jobs"]["passed"]["steps"]
+    matching = [s for s in steps if "NEEDS" in (s.get("env") or {})]
+    assert len(matching) == 1, "the `passed` job no longer has one gate step"
+    return matching[0]
+
+
+def test_the_gate_is_given_the_commit_the_check_runs_actually_live_on():
+    """`HEAD_SHA`, `RUN_ID` and `GH_TOKEN`, pinned by exact string.
+
+    Each is a silent hole rather than a loud one. `github.sha` on a
+    `pull_request` event is the ephemeral MERGE commit, which carries no check
+    runs, so the gate would refuse every edit and the short-circuit would be
+    dead weight nobody noticed. A missing `RUN_ID` or `GH_TOKEN` refuses too.
+    All three fail CLOSED, which is why they are pinned here rather than
+    demonstrated with a constructed bypass — but a gate nobody can satisfy gets
+    deleted, and the deletion is the hole.
+
+    Exact equality rather than substring: `github.sha` contains `sha`.
+    """
+    env = gate_step().get("env") or {}
+    assert env.get("HEAD_SHA") == "${{ github.event.pull_request.head.sha }}"
+    assert env.get("RUN_ID") == "${{ github.run_id }}"
+    assert env.get("GH_TOKEN") == "${{ github.token }}"
+
+
+def test_the_workflow_grants_the_permission_the_read_needs():
+    """`checks: read`, declared. Without it the gate 403s and refuses every edit.
+
+    Declaring it here does not GRANT it — a called workflow's token can only be
+    narrowed by its caller — but dropping it caps every caller at nothing, and
+    that is a change no test would otherwise report.
+    """
+    import yaml
+
+    permissions = yaml.safe_load(CI_PR.read_text(encoding="utf-8"))["permissions"]
+    assert permissions.get("checks") == "read"
+    assert permissions.get("contents") == "read"

@@ -51,6 +51,16 @@ permissions:
   # `GET /repos/{owner}/{repo}/commits/{sha}/check-runs`, which is what needs
   # the permission. `scripts/ci_verdict.py` holds the assertion.
   #
+  # WHAT MAKES THAT READ CORRECT is the self-exclusion by workflow RUN ID, not
+  # the `filter=all` on the query string. This job's own `ci / passed` exists
+  # while the step runs, so the gate drops any check run whose `details_url`
+  # carries `/runs/<this run id>/` and then reads the newest of what is left.
+  # An earlier note here implied the filter did that work: re-measured on
+  # 2026-09-09, the endpoint's default returns the prior verdicts anyway,
+  # because `filter=latest` dedups per check SUITE and each workflow run opens
+  # its own. The filter stays as a superset. The measurements were post-hoc,
+  # with every run completed, so live in-progress behaviour is unobserved.
+  #
   # WHY READ RATHER THAN WRITE, and why the widening is narrow in the way that
   # matters: `checks: read` cannot create, update or conclude a check run. A job
   # holding it can see what other jobs reported and nothing else, so the worst a
@@ -80,8 +90,8 @@ permissions:
 # `yadgarhq/actions` pull request 49, which is subscribed: four runs on ONE head
 # sha, each of them eleven jobs with seven executing. In the Rust repositories
 # that seven includes `test`, which starts a database service container. So the
-# sweep across seventeen repositories would make every body typo re-run the full
-# matrix seventeen times over. This short-circuit is INERT until a caller
+# sweep across eighteen repositories would make every body typo re-run the full
+# matrix eighteen times over. This short-circuit is INERT until a caller
 # subscribes, which is why it can land before the sweep.
 #
 # Validation on push to main would re-run exactly what the pull request just
@@ -143,8 +153,9 @@ jobs:
             exit 1
           fi
 
-      # LEDGER 685. ONE PREDICATE, COMPUTED ONCE, because six jobs read it and
-      # six copies of an expression are six things to keep in agreement by hand
+      # LEDGER 685. ONE PREDICATE, COMPUTED ONCE, because seven jobs read it and
+      # seven copies of an expression are seven things to keep in agreement by
+      # hand
       # — the argument this job already makes for detection itself.
       #
       # `github.event.changes` IS THE WHOLE OF IT, and `base` is the reason this
