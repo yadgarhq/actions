@@ -41,12 +41,60 @@ MAX_FN_LINES = 120
 # is the test-quality audit, which asks whether they assert anything.
 TEST_PATHS = ("/tests/", "/benches/")
 
+# `TEST_PATHS` matches an integration-test *directory*. It does not match
+# Rust's own convention for a unit-test *submodule*: a file literally named
+# `tests.rs` (or `test.rs`), wired into its parent with `#[cfg(test)] mod
+# tests;`. That convention is why `iam/src/service/tests.rs` and
+# `gateway/src/http/tests.rs` were measured as production code -- neither
+# path contains a `/tests/` segment or ends in `_test.rs`.
+#
+# Matching on the bare filename widens the exemption further than a
+# directory segment does, so a whole-file exemption on the name alone is not
+# enough: it is additionally required that the file carry a real `#[test]`
+# (or `#[tokio::test]`, `#[async_std::test]`, ...) attribute. A file named
+# `tests.rs`/`test.rs` holding no test function at all is not test code by
+# any definition this gate can check, and stays measured. Smuggling
+# production code past this predicate requires BOTH naming the file
+# `tests.rs`/`test.rs` -- already unidiomatic for anything else in Rust --
+# AND adding a `#[test]`-attributed function to it, which a reviewer sees
+# immediately and which must itself compile and pass in CI.
+TEST_FILE_NAMES = ("tests.rs", "test.rs")
+
 FN_START = re.compile(r"^\s*(pub(\([^)]*\))?\s+)?(async\s+)?fn\s+(\w+)")
 
+# A function actually marked as a test, wherever it lives -- including a
+# `#[cfg(test)] mod tests { ... }` block inline in an otherwise-production
+# file, which the whole-file exemptions above do not reach. `\btest\b`
+# requires a word boundary immediately after "test", so `#[test_case(...)]`
+# and similar non-test attributes do not match.
+TEST_ATTR = re.compile(r"^\s*#\[\s*(\w+::)?test\b")
 
-def _is_test_file(path: Path) -> bool:
+
+def _has_test_attr(lines: list[str]) -> bool:
+    return any(TEST_ATTR.match(line) for line in lines)
+
+
+def _is_test_file(path: Path, lines: list[str]) -> bool:
     p = path.as_posix()
-    return any(t in f"/{p}" for t in TEST_PATHS) or p.endswith("_test.rs")
+    if any(t in f"/{p}" for t in TEST_PATHS) or p.endswith("_test.rs"):
+        return True
+    return path.name in TEST_FILE_NAMES and _has_test_attr(lines)
+
+
+def _is_test_fn(lines: list[str], fn_line_index: int) -> bool:
+    """Whether the function starting at 0-indexed `fn_line_index` carries a
+    test attribute directly on it, walking upward past any other attributes
+    or doc comments stacked above the `fn` line."""
+    i = fn_line_index - 1
+    while i >= 0:
+        stripped = lines[i].strip()
+        if TEST_ATTR.match(lines[i]):
+            return True
+        if stripped.startswith("#[") or stripped.startswith(("///", "//!")):
+            i -= 1
+            continue
+        break
+    return False
 
 
 def _function_spans(lines: list[str]) -> list[tuple[str, int, int]]:
@@ -88,7 +136,7 @@ def check(path: Path) -> list[str]:
         return []
 
     problems: list[str] = []
-    if _is_test_file(path):
+    if _is_test_file(path, lines):
         return problems
 
     if len(lines) > MAX_FILE_LINES:
@@ -99,7 +147,7 @@ def check(path: Path) -> list[str]:
         )
 
     for name, line_no, length in _function_spans(lines):
-        if length > MAX_FN_LINES:
+        if length > MAX_FN_LINES and not _is_test_fn(lines, line_no - 1):
             problems.append(
                 f"{path}:{line_no}: fn {name} is {length} lines, over the "
                 f"{MAX_FN_LINES} ceiling."
