@@ -131,6 +131,25 @@ jobs:
   ci:
     if: github.event_name == 'pull_request'
     uses: ./.github/workflows/ci-pr.yaml
+    # THE CALLER'S GRANT IS THE CAP, AND IT IS NOT OPTIONAL — measured rather
+    # than reasoned, on run 34396529822 of this very branch. `ci-pr.yaml`
+    # declares `checks: read` for ledger 685's merge-gate assertion, this job
+    # granted only `contents: read`, and the run did not start:
+    #
+    #   The workflow is not valid. .github/workflows/ci-self.yaml (Line: 131,
+    #   Col: 3): Error calling workflow '...ci-pr.yaml@14d2f05'. The workflow is
+    #   requesting 'checks: read', but is only allowed 'checks: none'.
+    #
+    # A `startup_failure`, not a red job — so `ci / passed` NEVER REPORTS, and
+    # with `bypass_actors: []` on the ruleset every pull request blocks on a
+    # required check stuck pending. All seventeen consumers pin
+    # `permissions: contents: read` on this line today, so `ci-pr.yaml` cannot
+    # reach `@main` until they grant this too. Granting it early is inert: a
+    # caller may hand over more than the callee declares, and the callee
+    # narrows.
+    permissions:
+      contents: read
+      checks: read
 
   # THE PASSTHROUGH EVERY OTHER REPOSITORY NEEDS TOO, written here first because
   # this repository is a caller like any other. A reusable workflow cannot read a
@@ -149,6 +168,12 @@ jobs:
   main:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     uses: ./.github/workflows/ci-pr.yaml
+    # THE PUSH PATH NEEDS IT TOO, and forgetting it here would be the same
+    # `startup_failure` a merge later — on `main`, where nobody is watching a
+    # pull request for it.
+    permissions:
+      contents: read
+      checks: read
     secrets:
       RELEASE_APP_CLIENT_ID: ${{ secrets.RELEASE_APP_CLIENT_ID }}
       RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}

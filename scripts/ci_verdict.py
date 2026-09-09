@@ -58,17 +58,26 @@ not been taught refuses the run with a message naming what it saw. A gate that
 guessed would be worse than the loop it replaces: it would report a verdict about
 a condition nobody had read.
 
-That refusal is also the interlock this file was written for. Pull request 52
-(ledger 685) short-circuits a text-only pull request edit by giving six jobs a
-`needs.detect.outputs.text_edit != 'true'` conjunct, and it is HELD because the
-loop above maps the resulting skips to success — a red `ci / passed` superseded
-by a green one on the same head sha, with no code change and no human. Against
-this file that change does not silently pass: `text_edit` is not a whitelisted
-reference, so the gate refuses until somebody teaches it the reference AND the
-reason a `text_edit` skip is legitimate, which is the assertion 52 names — a
-PRIOR COMPLETED `ci / passed` on this sha concluded success, read through
-`GET /repos/{owner}/{repo}/commits/{sha}/check-runs`, which needs `checks: read`.
-`register_deferred_reference` below is where that lands.
+That refusal is also the interlock this file was written for, and ledger 685 is
+what came through it. Pull request 52 short-circuits a text-only pull request
+edit by giving seven jobs a `needs.detect.outputs.text_edit != 'true'` conjunct.
+Under the shell loop above the resulting skips read as success — a red
+`ci / passed` superseded by a green one on the same head sha, with no code change
+and no human. Under this file they do not, because `text_edit` resolves through
+`make_text_edit_resolver` rather than through the whitelist, and that resolver
+hands back `true` ONLY after establishing the fact that makes the skips a reason:
+the STANDING `ci / passed` on this same commit — the most recent completed one,
+this run's own excluded — concluded success. Anything else raises `Refused`, so
+absence, a red predecessor and an unreadable API all redden the merge gate.
+
+WHAT THAT COSTS, stated here because it is the trade rather than a detail. The
+read is `GET /repos/{owner}/{repo}/commits/{sha}/check-runs`, which needs
+`checks: read`. `ci-pr.yaml` declares it at the workflow block, so every job in
+the shared workflow carries it in all eighteen repositories that call the file.
+A called workflow's token can only be NARROWED by its caller, never widened, so
+each caller must grant it on its own `uses:` line as well — which is why the
+assertion is inert, and refuses loudly rather than passing quietly, in any
+repository that has not.
 
 WHY A `needs.<job>.result` REFERENCE IS REFUSED RATHER THAN RESOLVED, since the
 JSON handed to this script contains every one of them. A condition that reads
@@ -96,6 +105,9 @@ import json
 import os
 import re
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 
 import yaml
 
@@ -296,14 +308,242 @@ _DEFERRED = {}
 def register_deferred_reference(ref, resolver):
     """Teach the gate one further reference, with the assertion that earns it.
 
-    THIS IS LEDGER 685'S LANDING SPOT. Pull request 52 adds
-    `needs.detect.outputs.text_edit` to six job conditions; until it is
-    registered here the gate refuses the run rather than accepting six skips.
-    Registering it means writing the resolver that also asserts the prior
-    `ci / passed` on this sha concluded success — the fact that makes a
-    text-only edit's skip a reason rather than a bypass.
+    LEDGER 685 LANDED HERE, and the shape it landed in is the one this hook was
+    written for: the resolver does not report what `text_edit` says, it reports
+    what `text_edit` has EARNED. `make_text_edit_resolver` below returns the
+    value only after establishing that the standing `ci / passed` on this commit
+    concluded success, and raises `Refused` otherwise — so the seven skips a
+    text-only edit produces are accepted only on a run that has a green verdict
+    to carry forward.
+
+    The registration happens in `main()` rather than at import, so that a
+    resolver is always built against ONE run's facts and no test can leave a
+    stale one behind for the next.
     """
     _DEFERRED[ref] = resolver
+
+
+# ---------------------------------------------------------------------------
+# Ledger 685: the fact that earns a text-only edit's skips
+# ---------------------------------------------------------------------------
+
+# THE REFERENCE THE SEVEN CONDITIONS READ. Written once here rather than spelled
+# out at each use, because the string is the join between `ci-pr.yaml`'s job
+# conditions and this gate's whitelist and a typo in either is a silent refusal.
+TEXT_EDIT_REF = "needs.detect.outputs.text_edit"
+
+# THE ONE CONTEXT THE RULESET REQUIRES, in this repository and in all eighteen
+# consumers: `<caller job id> / <callee job id>`, where the caller job is named
+# `ci` precisely so that one ruleset serves every repository. A repository that
+# renamed it would not be gated by this name at all, so its pull requests block
+# on a check that never reports rather than merge on one this gate misread.
+DEFAULT_REQUIRED_CHECK = "ci / passed"
+
+
+def check_runs_url(repo, sha, check_name):
+    """The check runs named `check_name` on `sha` — ALL of them, not the latest.
+
+    `filter=all` IS A SUPERSET RATHER THAN THE THING THAT CARRIES THE LOAD, and
+    saying so corrects what this docstring claimed before. It claimed the
+    endpoint's default returns exactly one check run per NAME, so that a live
+    run would see only its own. That is false. Re-measured on `yadgarhq/actions`
+    on 2026-09-09, `check_name=ci / passed`, `total_count` under the default,
+    `&filter=all` and `&filter=latest` in turn:
+
+        7c3afde   5   5   5
+        b893dc9   4   4   4
+        ed8b334   2   2   2
+
+    `filter=latest` dedups per check SUITE, not per name, and every workflow run
+    opens its own suite — the five entries on `7c3afde` carry five DISTINCT
+    `check_suite.id` values. So prior completed verdicts come back either way.
+
+    THE PARAMETER STAYS, because a superset cannot lose the entry this gate
+    needs and it costs one query string. What actually stops this run reading
+    its own answer is `standing_verdict`'s self-exclusion by workflow RUN ID
+    below, and the tests that pin the property say so.
+
+    THE CAVEAT, said here rather than left for the next reader to fall into:
+    those three measurements were taken after the fact, on commits whose every
+    run had completed. What the endpoint returns DURING a live in-progress run
+    was not observed, so this records what was measured and claims nothing past
+    it.
+
+    `per_page=100` with the truncation check in `standing_verdict` below rather
+    than pagination: a hundred `ci / passed` runs on one commit is a situation to
+    refuse, not to page through.
+    """
+    return (
+        "https://api.github.com/repos/"
+        f"{repo}/commits/{sha}/check-runs"
+        f"?check_name={urllib.parse.quote(check_name, safe='')}"
+        "&filter=all&per_page=100"
+    )
+
+
+def fetch_check_runs(url, token):
+    """`GET` the URL as JSON, or refuse. Every failure path refuses.
+
+    A GATE THAT CANNOT READ THE ANSWER HAS NOT GOT A GREEN ONE. The 403 a
+    missing `checks: read` produces is the failure most likely to happen in
+    practice — a consumer that subscribes to `edited` without granting the
+    permission on its `uses:` line gets exactly it — and it must redden the
+    merge gate rather than wave the run through.
+    """
+    if not token:
+        raise Refused(
+            "no token was given to read this commit's check runs with, so the "
+            "standing verdict cannot be established. Absence is not success."
+        )
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "yadgarhq-actions/ci_verdict",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        hint = ""
+        if exc.code in (403, 404):
+            hint = (
+                " This is what a missing `checks: read` looks like: the "
+                "permission must be granted on the CALLER's `uses:` line as "
+                "well as declared here, because a called workflow's token can "
+                "only be narrowed by the caller, never widened."
+            )
+        raise Refused(
+            f"reading this commit's check runs returned HTTP {exc.code}.{hint}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise Refused(
+            f"this commit's check runs could not be read: {exc.reason}"
+        ) from exc
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise Refused(f"the check runs response is not JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise Refused("the check runs response is not an object.")
+    return payload
+
+
+def standing_verdict(payload, run_id, check_name):
+    """The most recent COMPLETED `check_name` on this commit, THIS RUN'S OWN EXCLUDED.
+
+    THE SELF-EXCLUSION IS THE SUBTLE PART, and without it the assertion is not
+    merely weak — it reads its own answer. This job's check run for
+    `check_name` already exists while this step runs, because GitHub creates it
+    when the job starts. It carries the same name, it sits on the same commit,
+    and it is the newest one there. So a query that does not exclude it hands
+    back the entry belonging to the very run whose legitimacy is in question.
+
+    EXCLUDED TWICE, BY STATE AND BY IDENTITY, because the two fail differently.
+    `status != "completed"` drops it structurally — a running job's check run
+    cannot be completed — and a `details_url` carrying `/runs/<this run id>/`
+    drops it by name. If GitHub ever completed a check run before its job's last
+    step, the first test would stop working and the second would not.
+
+    THE MOST RECENT RATHER THAN ANY, and this is a tightening on what pull
+    request 52 asked for. "Some prior run concluded success" would let a commit
+    whose LATEST full run went red — a newly published advisory that `trivy`
+    now finds, a test that is not deterministic — be waved through by a body
+    edit, because an older green would still be sitting there. A text-only edit
+    may CARRY FORWARD the verdict that stands, never improve on it.
+    """
+    runs = payload.get("check_runs")
+    if not isinstance(runs, list):
+        raise Refused("the check runs response carries no `check_runs` array.")
+    total = payload.get("total_count")
+    if isinstance(total, int) and total > len(runs):
+        raise Refused(
+            f"this commit carries {total} `{check_name}` check runs and the "
+            f"response holds {len(runs)}, so the most recent one may not be "
+            f"among them."
+        )
+    mine = f"/runs/{run_id}/"
+    if not run_id:
+        raise Refused(
+            "this run's own id is unknown, so its own check run cannot be told "
+            "apart from the prior one it would be read as."
+        )
+    prior = [
+        r
+        for r in runs
+        if mine not in str(r.get("details_url") or "")
+        and r.get("status") == "completed"
+    ]
+    if not prior:
+        raise Refused(
+            f"no COMPLETED `{check_name}` on this commit predates this run, so "
+            f"there is no standing verdict for a text-only edit to carry "
+            f"forward. Absence is not success."
+        )
+    prior.sort(
+        key=lambda r: (str(r.get("completed_at") or ""), int(r.get("id") or 0)),
+        reverse=True,
+    )
+    return prior[0]
+
+
+def make_text_edit_resolver(needs, repo, sha, run_id, check_name, token, fetch=None):
+    """Resolve `text_edit`, and on `true` assert the verdict that makes it a reason.
+
+    THE VALUE IS RETURNED ONLY WHEN IT HAS BEEN EARNED. `text_edit` is `true`
+    exactly when this run is a pull request edit that changed the title or the
+    body and not the base, and the seven conditions that read it then evaluate
+    FALSE — which tells this gate that seven `skipped` results are what the
+    workflow asked for. That is the merge-gate bypass pull request 52 was held
+    on, and it stops being one here: the value is handed back only after the
+    standing `ci / passed` on this same commit is shown to have concluded
+    success.
+
+    ON `false` NOTHING IS READ AT ALL. An ordinary pull request does not touch
+    the API, so the permission is exercised only on the path that needs it and
+    an outage cannot redden a run that is checking everything anyway.
+    """
+    if fetch is None:
+
+        def fetch(url):
+            return fetch_check_runs(url, token)
+
+    cache = {}
+
+    def resolve(expr):
+        outputs = (needs.get("detect") or {}).get("outputs") or {}
+        value = str(outputs.get("text_edit", ""))
+        if value != "true":
+            # Not a text-only edit, so this reference is justifying no skip and
+            # there is nothing for it to earn. `detect` skipped on a push to
+            # `main` renders as the empty string, exactly as `_FACTS` does.
+            return value
+        if not repo or not sha:
+            raise Refused(
+                "a text-only edit was reported, but the commit whose standing "
+                "verdict it would carry forward was not named."
+            )
+        if "run" not in cache:
+            cache["run"] = standing_verdict(
+                fetch(check_runs_url(repo, sha, check_name)), run_id, check_name
+            )
+        latest = cache["run"]
+        conclusion = str(latest.get("conclusion") or "")
+        if conclusion != "success":
+            raise Refused(
+                f"this run is a text-only edit, so it checked the body and "
+                f"nothing else. The standing `{check_name}` on {sha} concluded "
+                f"'{conclusion}' ({latest.get('details_url')}), so there is no "
+                f"green verdict to carry forward and these skips prove nothing. "
+                f"Fix the commit, or push it again to re-run the checks — "
+                f"editing the description cannot make a red run green."
+            )
+        return value
+
+    return resolve
 
 
 def make_resolver(event, author_type, repository, needs):
@@ -470,6 +710,33 @@ def main(argv=None):
     event = env.get("EVENT") or ""
     if not event:
         raise Refused("EVENT is empty; every condition here keys off the event.")
+
+    # LEDGER 685, REGISTERED PER RUN. The resolver closes over this run's
+    # commit, this run's id and this run's token, so there is no way for one
+    # run's answer to be read by another — and `_DEFERRED` never holds a
+    # resolver built from facts that have gone stale.
+    #
+    # `REQUIRED_CHECK` IS AN OVERRIDE RATHER THAN A SETTING, and it is SAFE BY
+    # DIRECTION rather than by who can write it. In the eighteen consumers the
+    # value comes from `ci-pr.yaml@main`, which a pull request under review
+    # cannot edit for the run that gates it. In THIS repository it can: the
+    # caller uses a local path, exactly so a change to a shared workflow is
+    # gated by the version in the pull request. What that buys an author is
+    # nothing, because every wrong value fails CLOSED — a check name with no
+    # check runs on this commit produces no standing verdict, and no standing
+    # verdict refuses. There is no value of this variable that turns a red
+    # commit green.
+    register_deferred_reference(
+        TEXT_EDIT_REF,
+        make_text_edit_resolver(
+            needs=needs,
+            repo=env.get("REPO") or "",
+            sha=env.get("HEAD_SHA") or "",
+            run_id=env.get("RUN_ID") or "",
+            check_name=env.get("REQUIRED_CHECK") or DEFAULT_REQUIRED_CHECK,
+            token=env.get("GH_TOKEN") or "",
+        ),
+    )
 
     resolve = make_resolver(
         event=event,
