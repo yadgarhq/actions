@@ -19,6 +19,53 @@ exactly like a module nobody called — which is the reading that would break D1
 retirement rule, and D51 already established the pattern of enforcing a call that
 is otherwise easy to skip.
 
+THE UNIT OF ANALYSIS IS THE CRATE, NOT THE FILE, and that is the whole of ledger
+824. This hook used to resolve everything file-locally, so it COLLIDED with the
+`complexity` hook's 500-line ceiling: a repository forced to split a large file
+then failed observability, and no split satisfied both gates. Measured twice on
+2026-09-10, by two independent mechanisms:
+
+  - `iam`. A Rust trait impl cannot span files and `impl IamService for Iam` was
+    865 lines, so the handler bodies had to move out. Each handler then delegated
+    — `self.login_inner(req, call).await` — and the check was a plain substring
+    scan of the wrapper body that followed nothing at all. Even the HTTP side's
+    search could not have followed it: its call pattern excluded any identifier
+    preceded by `.`, so a method call was invisible by construction.
+  - `gateway`. Splitting a 2553-line `src/http.rs` moved six handler bodies into
+    sibling modules while the `.route(...)` registrations stayed behind, and the
+    hook refused all six as "not defined in this file".
+
+Both repositories shipped a workaround. Both workarounds are correct, and neither
+is the point: the next repository to cross the ceiling meets the same wall, and
+the estate plans fifty more. So resolution is now crate-wide — a callee, a route
+handler and a label constant are all looked up across every module of the crate
+the file belongs to.
+
+WHAT CRATE-WIDE RESOLUTION MUST NOT DO is pass a handler that is not
+instrumented. Rust resolves a name through modules and imports; this does not,
+because a `use`-graph is a compiler's job. It uses a LADDER instead, and the
+bottom rung is what keeps the rule honest:
+
+  1. a module qualifier, when the call site carries one — `dispatch::routes()`
+     picks the `routes` in `http::dispatch` out of the three this crate defines;
+  2. the same file, which is where a name resolves in Rust more often than not;
+  3. a name that is unique in the crate;
+  4. otherwise NOTHING IS FOLLOWED. An ambiguous name fails closed and the
+     message says so.
+
+Rung 4 is the one that matters. Following every same-named candidate and passing
+on any one of them would let an unrelated function's `Call::start` certify a
+handler that has none, which is this hook's only real failure mode — a green that
+means nothing. A false red is loud and gets fixed; a false green is the silent
+failure the hook exists to prevent.
+
+TEST SOURCES ARE OUT OF THE INDEX, not merely out of the scan. A crate-flat name
+table that included them would let a test harness's `Call::start` certify the
+production handler it shares a name with, and would make an ordinary test double
+`fn login` an ambiguity that reddens a green tree. Both directions are wrong, so
+`tests.rs`, anything under `tests/`, and any inline `#[cfg(test)]` item are
+blanked out before anything is indexed.
+
 TWO TRANSPORTS, ONE QUESTION.
 
   gRPC  — a handler is `async fn name(&self, ...)` inside a generated tonic
@@ -27,6 +74,12 @@ TWO TRANSPORTS, ONE QUESTION.
           `gateway` and checked nothing in the one service whose numbers D67
           exists for: bytes and words returned TO THE CALLER. Every other hop
           sees protobuf, which answers a different question.
+
+BOTH TRANSPORTS NOW RUN THROUGH THE SAME SEARCH. The gRPC side used to be a
+substring test on the wrapper's own text, which is what made `iam`'s delegation
+invisible; it now follows calls exactly as the HTTP side does, and accepts the
+same written-down exemption. Two rules for one question was the reason a split
+could break one transport and not the other.
 
 WHAT COUNTS AS AN HTTP HANDLER, and why it is not "the function the router
 names". The router registration is a SCOPE GATE, not the unit — it says which
@@ -41,6 +94,14 @@ So, inside a route-registered function:
     each ARM with a bounded label is the handler unit;
   - otherwise the function itself is the unit, which is the ordinary REST shape.
 
+A ROUTER ANYWHERE IN THE CRATE OPENS EVERY FILE OF IT. The gate used to be "this
+file contains `Router::new(`", which is what let `gateway`'s split hide six
+handlers: the registrations and the router lived in one file and the bodies in
+another. `gateway` answers that today with a `pub(super) fn routes()` per module
+merged in the root `router()`, and that shape needs no special case here — a
+`.route(...)` is a registration wherever it is written, and the merge is just
+Rust.
+
 A CATCH-ALL ARM IS NEVER A HANDLER, and this is the load-bearing exclusion rather
 than a convenience. Its only available label is the string the caller invented,
 and D67's cardinality rule means a caller must not be able to mint a Prometheus
@@ -48,6 +109,15 @@ series. `gateway`'s unknown-method arm is left uninstrumented on purpose for
 precisely that reason; a rule that demanded a record there would be demanding a
 D67 violation. The omission stays visible in the code because a catch-all arm is
 visibly a catch-all.
+
+A LABEL IS COSMETIC AND A VERDICT IS NOT, so the two resolve differently. An
+ambiguous callee fails closed (above); an ambiguous or absent label constant
+falls back to the identifier the code uses and NEVER to a failure. Resolving
+constants across the crate is what turns `gateway`'s `DISCOVER` and `TOOLS_LIST`
+into `server/discover` and `tools/list` in a message an operator reads — those
+constants stayed in `src/http.rs` when the dispatch moved to
+`src/http/dispatch.rs` (ledger 827). Making a naming defect able to redden a tree
+would be trading a real gate for a cosmetic one.
 
 WHAT IT MUST NOT DO is fire on something that is not a handler. An earlier
 version flagged every `async fn` in a file once a service impl appeared anywhere
@@ -59,24 +129,26 @@ for malformed JSON, a failed `validate` and a header cross-check: no bounded
 method label has been read yet at that point, so there is nothing to record
 under, which is the same D67 reason the catch-all is excluded.
 
-FITTED TO ONE SHAPE, DELIBERATELY. There is exactly one `Router::new()` in the
-organisation today. A rule fitted to the one HTTP dispatch shape that exists — and
-silent on every file that does not match it — is worth more than a general rule
-that guesses. When a second HTTP service lands, extend this with a real second
-example in hand rather than an imagined one.
+FITTED TO THE SHAPES THAT EXIST, DELIBERATELY. The calls this search follows are
+a bare `name(...)`, `self.name(...)`, `Self::name(...)` and a module-qualified
+`a::b::name(...)`. A method call on some other receiver — `bucket.start(...)` —
+is NOT followed, even though the crate table would often resolve it, because that
+is the form most likely to collide with a std method and certify a handler by
+accident. When a repository delegates through a field rather than through `self`,
+extend this with that real example in hand rather than an imagined one.
 """
 
+import os
 import re
 import sys
 
 # --------------------------------------------------------------------------
-# gRPC — unchanged. tonic gives a closed set of named methods; take it.
+# gRPC — tonic gives a closed set of named methods; take it.
 # --------------------------------------------------------------------------
 
-# An RPC handler in a tonic service impl: `async fn name(&self, ...)`.
-HANDLER = re.compile(r"^\s*async fn (\w+)\s*\(\s*$|^\s*async fn (\w+)\s*\(&self", re.M)
 # The impl blocks we care about — a generated tonic server trait.
 SERVICE_IMPL = re.compile(r"impl\s+\w*Service\s+for\s+\w+")
+ASYNC_FN = re.compile(r"\basync\s+fn\s+(\w+)\s*\(")
 
 
 # A test module defines FAKE services to test against, and its own test
@@ -92,57 +164,13 @@ def _is_test_source(path: str) -> bool:
     still fails on a handler with its `Call::start` removed; it did not, and the
     hook would have passed everything forever while looking like it worked.
 
-    Scoping `handlers_in` to the impl block is what makes the narrow rule safe:
-    a test module inside a production file is no longer scanned anyway.
+    A `#[cfg(test)]` module written INLINE in a production file is a different
+    question and is handled differently — see `_blank_cfg_test`. Skipping the
+    whole file for one is the mistake above; leaving its contents in a crate-wide
+    name table is the mistake ledger 824 could have introduced.
     """
-    return path.endswith("tests.rs") or "/tests/" in f"/{path}"
-
-
-def handlers_in(text: str):
-    """Yield (name, body) for each handler INSIDE a service impl.
-
-    Scoped to the impl block, not the file. The first version searched the whole
-    file once a service impl appeared anywhere in it, so an ordinary `async fn`
-    elsewhere — a helper, a constructor — was reported as an uninstrumented
-    handler. That is a check firing on something it was never about, which is
-    worse than one that misses: it teaches people the check is noise.
-    """
-    m = SERVICE_IMPL.search(text)
-    if not m:
-        return
-    lines = text.splitlines()
-
-    # Find the impl block's extent by brace depth from its opening line.
-    start = text[: m.start()].count("\n")
-    depth = 0
-    started = False
-    end = len(lines)
-    for i in range(start, len(lines)):
-        depth += lines[i].count("{") - lines[i].count("}")
-        if "{" in lines[i]:
-            started = True
-        if started and depth <= 0:
-            end = i + 1
-            break
-
-    for i, line in enumerate(lines):
-        if not (start <= i < end):
-            continue
-        m = re.match(r"\s*async fn (\w+)\(", line)
-        if not m:
-            continue
-        # Body runs to the next handler or the end — enough to look for the call.
-        body = []
-        depth = 0
-        started = False
-        for l in lines[i:]:
-            depth += l.count("{") - l.count("}")
-            body.append(l)
-            if "{" in l:
-                started = True
-            if started and depth <= 0:
-                break
-        yield m.group(1), "\n".join(body)
+    norm = path.replace(os.sep, "/")
+    return norm.endswith("tests.rs") or "/tests/" in f"/{norm}"
 
 
 # --------------------------------------------------------------------------
@@ -197,10 +225,14 @@ def _exempt_reason(text: str, idx: int):
 # --------------------------------------------------------------------------
 
 ROUTER = re.compile(r"\bRouter::new\s*\(")
-# `post(handle)` in a `.route(...)`. The negative lookbehind on `.` is what keeps
-# `headers.get(...)` and `.iter().any(...)` out: a METHOD call is not a route.
+# `post(handle)` or `post(dispatch::handle)` in a `.route(...)`. The negative
+# lookbehind on `.` is what keeps `headers.get(...)` and `.iter().any(...)` out:
+# a METHOD call is not a route. The optional path lets a registration name a
+# handler in another module, which is how a split writes it before the module
+# grows a `routes()` of its own.
 METHOD_ROUTER = re.compile(
-    r"(?<![\w.])(?:get|post|put|delete|patch|head|options|trace|any)\s*\(\s*(\w+)\s*\)"
+    r"(?<![\w.])(?:get|post|put|delete|patch|head|options|trace|any)"
+    r"\s*\(\s*((?:\w+\s*::\s*)*\w+)\s*\)"
 )
 # `.fallback(...)` is deliberately NOT here. A fallback answers "no route
 # matched", so it has no bounded route label to record under — the same reason
@@ -218,8 +250,42 @@ DISPATCH = re.compile(r"\bmatch\b[^{;]*\.method\b[^{;]*\{")
 # `const TOOLS_LIST: &str = "tools/list";` — so a failure can name the method an
 # operator recognises instead of the identifier the code happens to use.
 CONST_STR = re.compile(r'\bconst\s+(\w+)\s*:\s*&(?:\'static\s+)?str\s*=\s*"([^"]*)"')
-BARE_CALL = re.compile(r"(?<![\w:.])(\w+)\s*\(")
-NOT_A_CALL = {"if", "while", "for", "match", "return", "fn", "let", "else"}
+# The call forms the search follows. `self.name(` first, because `self` also
+# reads as a bare word and the qualified branch would otherwise swallow it.
+# `a::b::name(` carries a module hint; a bare `name(` carries none.
+#
+# AN ATTRIBUTE IS NOT A CALL, and `#[expect(...)]` reads exactly like one — four
+# of them in `iam` were reported as the place the search gave up, which is how a
+# useful hint becomes noise. The two lookbehinds are what tell `#[expect(` from
+# `expect(`; `.expect(` was already excluded by the `.` in the first one.
+CALL_SITE = re.compile(
+    r"\bself\s*\.\s*(?P<method>\w+)\s*\("
+    r"|(?<![\w:.])(?<!#\[)(?<!#!\[)(?P<path>(?:\w+\s*::\s*)+)?(?P<fn>\w+)\s*\("
+)
+NOT_A_CALL = {
+    "if",
+    "while",
+    "for",
+    "match",
+    "return",
+    "fn",
+    "let",
+    "else",
+    "as",
+    "in",
+    "move",
+    "unsafe",
+    "async",
+    "await",
+    "impl",
+    "where",
+    "dyn",
+}
+SNAKE = re.compile(r"[a-z_][a-z0-9_]*")
+CFG_TEST = re.compile(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]")
+# How deep the search follows a chain of calls. A cycle is already impossible —
+# every callee is visited once — so this only bounds a pathological fan-out.
+MAX_DEPTH = 16
 
 
 def _blank_noncode(text: str) -> str:
@@ -231,6 +297,11 @@ def _blank_noncode(text: str) -> str:
     comment or a comma in a string literal stops being able to move an arm
     boundary. `format!("unknown method: {other}")` is exactly that case, and it
     sits inside the arm this hook must classify correctly.
+
+    It also decides what counts as a `Call::start`. Searching the raw text meant
+    a doc comment MENTIONING `Call::start` satisfied the check — `iam-db`'s
+    `service.rs` and two `build.rs` files carry exactly such a sentence — so the
+    search runs on this text and a comment can no longer certify anything.
     """
     out = list(text)
     i, n = 0, len(text)
@@ -319,14 +390,47 @@ def _match_brace(blank: str, open_idx: int) -> int:
     return -1
 
 
-def _functions(text: str, blank: str) -> dict:
-    """name -> (decl_start, body_start, body_end) for every `fn` in the file.
+def _blank_cfg_test(blank: str) -> str:
+    """`blank` with every inline `#[cfg(test)]` item blanked as well.
+
+    An inline test module lives in a production file, so the path filter cannot
+    see it — and a crate-wide name table that contained its functions would be
+    wrong in both directions at once: a test double's `Call::start` could certify
+    the production handler it shadows, and a test double named after a real
+    handler would be an ambiguity that reddens a green tree.
+
+    `#[cfg(test)] mod tests;` — the DECLARATION every service file here ends with
+    — has no body to blank and is left alone; the file it names is caught by
+    `_is_test_source`. `#[cfg(not(test))]` does not match, deliberately: that
+    code ships.
+    """
+    out = list(blank)
+    for m in CFG_TEST.finditer(blank):
+        i = m.end()
+        while i < len(blank) and blank[i] not in "{;":
+            i += 1
+        if i >= len(blank) or blank[i] == ";":
+            continue
+        end = _match_brace(blank, i)
+        if end < 0:
+            continue
+        for k in range(m.start(), end):
+            if out[k] != "\n":
+                out[k] = " "
+    return "".join(out)
+
+
+def _functions(blank: str):
+    """(name, decl_start, body_start, body_end) for every `fn` in the file.
+
+    A LIST rather than a dict: one file may define two functions of the same
+    name in two modules, and a dict silently kept the last.
 
     `decl_start` is the `fn` keyword rather than the opening brace, because that
     is where an exemption comment sits — above the signature, which for
     `tools_call` is five lines long.
     """
-    out = {}
+    out = []
     for m in re.finditer(r"\bfn\s+(\w+)", blank):
         # Walk to the `{` that opens the body: the first one outside the
         # parameter list, so `impl FnOnce() -> Value` as a parameter type cannot
@@ -348,16 +452,406 @@ def _functions(text: str, blank: str) -> dict:
             continue
         end = _match_brace(blank, brace)
         if end > 0:
-            out[m.group(1)] = (m.start(), brace, end)
+            out.append((m.group(1), m.start(), brace, end))
     return out
 
 
+# --------------------------------------------------------------------------
+# The crate index — built once per crate, because that is now the unit.
+# --------------------------------------------------------------------------
+
+AMBIGUOUS = object()
+
+
+class Fn:
+    """One `fn` definition, and enough about it to be resolved and then read."""
+
+    __slots__ = ("name", "path", "decl", "lo", "hi", "module")
+
+    def __init__(self, name, path, decl, lo, hi, module):
+        self.name = name
+        self.path = path
+        self.decl = decl
+        self.lo = lo
+        self.hi = hi
+        self.module = module
+
+
+class Crate:
+    """Every module of one crate, indexed by name.
+
+    THE RESOLUTION LADDER lives in `resolve`, and the reason it stops rather than
+    guesses is in this module's docstring: a wrong follow is a false green, and a
+    false green is the only outcome this hook cannot afford.
+    """
+
+    def __init__(self, root):
+        self.root = root
+        self.files = {}  # path -> (text, blank)
+        self.fns = {}  # name -> [Fn]
+        self.consts = {}  # name -> [(path, value)]
+        self.sources = []  # scan order, deterministic
+        self.has_router = False
+
+    def add(self, path: str) -> None:
+        if path in self.files or _is_test_source(path):
+            return
+        try:
+            text = open(path, encoding="utf-8").read()
+        except (OSError, UnicodeDecodeError):
+            return
+        blank = _blank_cfg_test(_blank_noncode(text))
+        self.files[path] = (text, blank)
+        self.sources.append(path)
+        module = _module_of(self.root, path)
+        for name, decl, lo, hi in _functions(blank):
+            self.fns.setdefault(name, []).append(Fn(name, path, decl, lo, hi, module))
+        for name, value in CONST_STR.findall(text):
+            self.consts.setdefault(name, []).append((path, value))
+        if ROUTER.search(blank):
+            self.has_router = True
+
+    def resolve(self, name: str, module_hint, frm: str):
+        """A callee, or None (not in this crate), or AMBIGUOUS (do not guess)."""
+        cands = self.fns.get(name)
+        if not cands:
+            return None
+        if module_hint:
+            hit = [
+                c
+                for c in cands
+                if c.module is not None
+                and (c.module == module_hint or c.module.endswith("::" + module_hint))
+            ]
+            if len(hit) == 1:
+                return hit[0]
+            if len(hit) > 1:
+                return AMBIGUOUS
+            # No module of that name defines it. Fall through rather than refuse:
+            # the qualifier may name a TYPE (`Self::`, `Iam::`), which this does
+            # not model, and the rungs below are still sound.
+        same = [c for c in cands if c.path == frm]
+        if same:
+            return same[0]
+        if len(cands) == 1:
+            return cands[0]
+        return AMBIGUOUS
+
+    def const_value(self, name: str, frm: str):
+        """A `const NAME: &str`'s value, or None when the code must speak for it.
+
+        Same-file first, then a value the whole crate agrees on. A DISAGREEMENT
+        returns None and the caller keeps the identifier — a label is cosmetic
+        and must never be able to fail a tree.
+        """
+        cands = self.consts.get(name)
+        if not cands:
+            return None
+        same = [v for p, v in cands if p == frm]
+        if same:
+            return same[0]
+        values = {v for _, v in cands}
+        return values.pop() if len(values) == 1 else None
+
+
+def _module_of(root, path: str):
+    """`src/http/dispatch.rs` -> `http::dispatch`, or None when it is not a module.
+
+    `src/lib.rs`, `src/main.rs` and any `mod.rs` name the module their directory
+    is. A file outside `src/` — a `build.rs` — is not part of the crate's module
+    tree, so it gets no name and no module qualifier can ever select it.
+    """
+    if root is None:
+        return None
+    rel = os.path.relpath(path, root).replace(os.sep, "/")
+    if not rel.startswith("src/"):
+        return None
+    parts = rel[len("src/") :].split("/")
+    leaf = parts[-1][:-3] if parts[-1].endswith(".rs") else parts[-1]
+    parts = parts[:-1] if leaf in ("lib", "main", "mod") else parts[:-1] + [leaf]
+    return "::".join(parts)
+
+
+def _crate_root(path: str):
+    """The nearest ancestor directory whose `Cargo.toml` declares a `[package]`.
+
+    A workspace manifest is not a crate — `estate` carries one with two members —
+    so the walk keeps going past it. The walk also stops at a `.git`: a
+    repository is the widest thing this hook may read, and a machine's home
+    directory is not an index.
+    """
+    d = os.path.dirname(os.path.abspath(path))
+    while True:
+        manifest = os.path.join(d, "Cargo.toml")
+        if os.path.isfile(manifest):
+            try:
+                if re.search(r"^\s*\[package\]", open(manifest, encoding="utf-8").read(), re.M):
+                    return d
+            except OSError:
+                pass
+        if os.path.exists(os.path.join(d, ".git")):
+            return None
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None
+        d = parent
+
+
+def _one_spelling(paths):
+    """`paths` as the walk below spells them: relative to the working directory.
+
+    ONE FILE MUST HAVE ONE NAME IN THE INDEX. The crate walk yields paths
+    relative to the working directory, which is how pre-commit passes them too —
+    but a caller invoking this by hand with an absolute path would have indexed
+    the same file twice under two spellings, and two identical definitions of one
+    name is an AMBIGUOUS that reddens a green tree. Normalising here is cheaper
+    than a rule about how the hook may be called.
+    """
+    cwd = os.getcwd()
+    out, seen = [], set()
+    for path in paths:
+        rel = os.path.relpath(path, cwd) if os.path.isabs(path) else os.path.normpath(path)
+        if rel not in seen:
+            seen.add(rel)
+            out.append(rel)
+    return out
+
+
+def _crates(paths):
+    """Group `paths` into crates, each indexed ONCE.
+
+    pre-commit hands over a list of changed files, and a crate-wide index read
+    once per file would report every unit as many times as the crate has changed
+    files. It would also make the numbers unreadable, which is how a measurement
+    stops being one.
+
+    A path with no crate around it is its own scope, which is exactly the
+    file-local behaviour this hook had before ledger 824 — the safe answer for a
+    stray `.rs` outside any package.
+    """
+    crates = {}
+    order = []
+    for path in _one_spelling(paths):
+        root = _crate_root(path)
+        key = root or os.path.abspath(path)
+        if key not in crates:
+            crates[key] = Crate(root)
+            order.append(key)
+            if root is not None:
+                for dirpath, dirnames, filenames in os.walk(os.path.join(root, "src")):
+                    dirnames[:] = sorted(d for d in dirnames if d != "target")
+                    for name in sorted(filenames):
+                        if name.endswith(".rs"):
+                            full = os.path.join(dirpath, name)
+                            crates[key].add(os.path.relpath(full, os.getcwd()))
+        # A passed file outside `src/` still gets checked, as it did before.
+        crates[key].add(path)
+    return [(crates[k], list(crates[k].sources)) for k in order]
+
+
+# --------------------------------------------------------------------------
+# Following the code — the same search for both transports.
+# --------------------------------------------------------------------------
+
+
+def _call_sites(blank: str):
+    """(name, module_hint) for every call this search is willing to follow.
+
+    The forms are listed in this module's docstring. A method call on a receiver
+    other than `self` is deliberately absent, and so is an associated function of
+    a type this crate does not model: `Instant::now()`, `Response::new(...)`,
+    `Duration::from_secs(...)`. Dropping those is not a convenience.
+
+    RESOLVING A TYPE-QUALIFIED CALL BY ITS BARE NAME IS THE FALSE-GREEN THIS HOOK
+    CANNOT AFFORD, measured while proving the mutation for ledger 824. `iam`
+    defines `fn new` in more than one module, so `Response::new(...)` inside a
+    handler reached the crate-wide table under the name `new` — which sent the
+    search into an unrelated constructor and named it in the message. A
+    constructor of somebody else's type is never where a `Call::start` lives, so
+    the search does not go there. `Self::` and `self.` are stripped and DO
+    resolve: those name this crate's own code.
+
+    A qualifier that is a real crate type — `Iam::helper()` — is skipped too, and
+    that is a miss rather than a hole: the unit fails for want of a `Call::start`
+    it does not have, which is the safe direction.
+    """
+    for m in CALL_SITE.finditer(blank):
+        name = m.group("method") or m.group("fn")
+        if name in NOT_A_CALL:
+            continue
+        hint = None
+        raw = m.group("path")
+        if raw:
+            segs = [s for s in raw.replace(" ", "").split("::") if s]
+            segs = [s for s in segs if s not in ("crate", "super", "self", "Self")]
+            if not all(SNAKE.fullmatch(s) for s in segs):
+                continue  # a foreign type's associated function — see above
+            if segs:
+                hint = segs[-1]
+        yield name, hint
+
+
+def _opens_call(blank: str, lo: int, hi: int, top_only: bool) -> bool:
+    """Does `blank[lo:hi]` open a `Call::start`, and does it do so on every path?
+
+    A HELPER THAT INSTRUMENTS ONLY ITS REFUSALS DOES NOT INSTRUMENT ITS CALLER,
+    and `top_only` is that rule. It is what stops crate-wide following from being
+    a weakening rather than a fix, and it comes from two real shapes in `gateway`
+    rather than from taste:
+
+      - `dispatch::measured` opens its `Call` as the first statement of its body,
+        on every path. Two label arms delegate to it and nothing else, and they
+        are instrumented BY it — a `Call` the caller cannot avoid.
+      - `gate::guard` opens one inside the arms of a `match` that decide a
+        REFUSAL. Its success path opens none. Measured: deleting
+        `admin_create_user`'s own `Call::start` left the handler green, because
+        the search reached `guard`'s. That is exactly the silent stop-emitting
+        this hook exists to catch, so a nested `Call` no longer counts for a
+        caller.
+
+    `top_only` is False for the unit's OWN body, unchanged: a handler that opens
+    its `Call` inside an `if` has still made a decision about its own paths, and
+    demanding otherwise would redden trees over a rule about somebody else's
+    function.
+    """
+    i = blank.find(CALL, lo, hi)
+    while i >= 0:
+        if not top_only:
+            return True
+        # `lo` is the callee's opening brace, so depth 1 means "directly in the
+        # body" — not inside a match arm, an `if`, or a closure.
+        depth = 0
+        for c in blank[lo:i]:
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+        if depth == 1:
+            return True
+        i = blank.find(CALL, i + 1, hi)
+    return False
+
+
+def _instrumented(crate: Crate, path: str, lo: int, hi: int, own=True, seen=None, depth=0):
+    """Is `Call::start` reachable from `path[lo:hi]` through calls in this crate?
+
+    Returns (True, None) or (False, hint) where `hint` is (kind, name) naming
+    where the search stopped — a callee outside the crate, or a name the crate
+    defines more than once. That is not a separate failure: the unit has already
+    failed for want of a `Call::start`. It only makes the message say WHERE the
+    search stopped instead of implying the code is empty.
+
+    `own` distinguishes the unit's own body from a function it delegates to — see
+    `_opens_call`, which is where that distinction is spent.
+
+    `seen` is keyed by DEFINITION, not by name. Keying it by name was correct
+    while the search was file-local and is not now: `gateway` defines three
+    `routes`, and one visit would have blocked the other two.
+    """
+    blank = crate.files[path][1]
+    if _opens_call(blank, lo, hi, top_only=not own):
+        return True, None
+    if depth >= MAX_DEPTH:
+        return False, None
+    seen = seen if seen is not None else set()
+    hint = None
+    for name, module_hint in _call_sites(blank[lo:hi]):
+        target = crate.resolve(name, module_hint, path)
+        if target is AMBIGUOUS:
+            hint = hint or ("ambiguous", name)
+            continue
+        if target is None:
+            # Only a snake_case name is worth naming as a dead end. `Some(..)`
+            # and `Outcome { .. }` are constructors, not calls the search failed
+            # to follow, and reporting them as such makes the hint noise.
+            if SNAKE.fullmatch(name):
+                hint = hint or ("unfollowed", name)
+            continue
+        key = (target.path, target.lo)
+        if key in seen:
+            continue
+        seen.add(key)
+        ok, deeper = _instrumented(
+            crate, target.path, target.lo, target.hi, False, seen, depth + 1
+        )
+        if ok:
+            return True, None
+        hint = hint or deeper
+    return False, hint
+
+
+def _check(path: str, label: str, lo: int, hi: int, idx: int, crate: Crate):
+    """The one verdict point, for both transports."""
+    text = crate.files[path][0]
+    ok, hint = _instrumented(crate, path, lo, hi)
+    if ok:
+        return
+    reason = _exempt_reason(text, idx)
+    if reason is not None:
+        if not reason:
+            yield f"{path}: `{label}` is marked exempt with no reason"
+        return
+    tail = ""
+    if hint and hint[0] == "unfollowed":
+        tail = f" (the search could not follow the call to `{hint[1]}`)"
+    elif hint and hint[0] == "ambiguous":
+        tail = (
+            f" (the search stopped at `{hint[1]}`, which this crate defines in more "
+            "than one module — qualify the call with its module)"
+        )
+    yield f"{path}: `{label}` opens no observe::Call{tail}"
+
+
+# --------------------------------------------------------------------------
+# gRPC handlers.
+# --------------------------------------------------------------------------
+
+
+def _grpc_handlers(blank: str):
+    """(name, decl, body_start, body_end) for each handler in a service impl.
+
+    Scoped to the impl blocks, not the file. The first version searched the whole
+    file once a service impl appeared anywhere in it, so an ordinary `async fn`
+    elsewhere — a helper, a constructor — was reported as an uninstrumented
+    handler. That is a check firing on something it was never about, which is
+    worse than one that misses: it teaches people the check is noise.
+
+    EVERY impl block, not the first. `search` stopped at one, so a second service
+    in one file went unchecked — and a file holding two is exactly what the
+    500-line ceiling encourages.
+
+    Structure comes off the BLANKED text now. It used to be counted on the raw
+    lines, so a brace inside a doc comment could end a handler body early and the
+    search would then look for `Call::start` in the wrong extent.
+    """
+    fns = _functions(blank)
+    for impl in SERVICE_IMPL.finditer(blank):
+        open_idx = blank.find("{", impl.end())
+        if open_idx < 0:
+            continue
+        end = _match_brace(blank, open_idx)
+        if end < 0:
+            continue
+        for name, decl, lo, hi in fns:
+            if not open_idx < decl < end:
+                continue
+            head = blank.rfind("async", max(0, decl - 16), decl)
+            if head < 0 or not ASYNC_FN.match(blank, head):
+                continue
+            yield name, decl, lo, hi
+
+
+# --------------------------------------------------------------------------
+# HTTP handlers.
+# --------------------------------------------------------------------------
+
+
 def _arms(text: str, blank: str, open_idx: int):
-    """Yield (pattern_src, pattern_idx, body_src) for a match block's arms.
+    """Yield (pattern_src, pattern_idx, body_span) for a match block's arms.
 
     Arm extents are found on the blanked text by depth, so a nested closure's
     `=>` and a struct literal's braces cannot end an arm early. An arm whose
-    extent cannot be determined is not silently skipped — `main` reports the
+    extent cannot be determined is not silently skipped — the caller reports the
     match as unreadable, because a parser that quietly gives up is how a check
     passes everything forever while looking like it works.
     """
@@ -409,7 +903,7 @@ def _arms(text: str, blank: str, open_idx: int):
                 l for l in raw.splitlines() if not l.strip().startswith("//")
             ).strip()
             pat_idx = arm_start + (len(raw) - len(raw.lstrip()))
-            yield pattern, pat_idx, text[j:body_end]
+            yield pattern, pat_idx, (j, body_end)
             i = body_end
             while i < end and (blank[i].isspace() or blank[i] == ","):
                 i += 1
@@ -418,7 +912,7 @@ def _arms(text: str, blank: str, open_idx: int):
         i += 1
 
 
-def _labels(pattern: str, consts: dict):
+def _labels(pattern: str, crate: Crate, frm: str):
     """The bounded labels an arm serves, or None when it is a catch-all.
 
     A CATCH-ALL IS NOT A HANDLER (D67). `_` and a binding like `other` both mean
@@ -427,9 +921,10 @@ def _labels(pattern: str, consts: dict):
     caller-mintable Prometheus series, which is the thing D67 forbids.
 
     Rust tells a const pattern from a binding by resolving the name, and this
-    does the same with the file's own `const NAME: &str` table. That distinction
-    is the whole classification: `DISCOVER` and `other` are both bare
-    identifiers, and they are opposite answers.
+    does the same with the CRATE's `const NAME: &str` table. That distinction is
+    the whole classification: `DISCOVER` and `other` are both bare identifiers,
+    and they are opposite answers. The table is crate-wide because `gateway`'s
+    constants stayed in `src/http.rs` when the dispatch moved out (ledger 827).
 
     A GUARDED arm (`"x" if ready =>`) is treated as a catch-all too. It serves
     its label only sometimes, so it is not the closed label-to-response mapping
@@ -443,100 +938,77 @@ def _labels(pattern: str, consts: dict):
         m = re.fullmatch(r'"((?:[^"\\]|\\.)*)"', part)
         if m:
             labels.append(m.group(1))
-        elif part in consts:
-            labels.append(consts[part])
+            continue
+        value = crate.const_value(part.split("::")[-1], frm)
+        if value is not None:
+            labels.append(value)
         elif re.fullmatch(r"[A-Z][A-Z0-9_]*", part) or "::" in part:
-            # A const declared elsewhere. Its value is not readable here, so the
-            # identifier is the best name a failure can carry.
+            # A const this crate does not declare, or one two modules disagree
+            # about. Its value is not readable here, so the identifier is the
+            # best name a failure can carry — never a failure of its own.
             labels.append(part)
         else:
             return None  # a binding: catch-all
     return labels or None
 
 
-def _instrumented(body: str, text: str, fns: dict, seen=None):
-    """Is `Call::start` reachable from `body` through same-file calls?
+def http_failures(crate: Crate, path: str):
+    """Every HTTP handler registered in `path` that is neither instrumented nor exempt.
 
-    Returns (True, None) or (False, unresolved) where `unresolved` names a call
-    the search could not follow — a function defined in another file, or a
-    closure passed in as a parameter. That is not a separate failure: the unit
-    has already failed for want of a `Call::start`. It only makes the message
-    say WHERE the search stopped instead of implying the code is empty.
+    The ROUTER GATE IS THE CRATE'S, not the file's — see this module's docstring.
+    A `.route(...)` is a registration wherever it is written, and the function it
+    names is resolved across every module of the crate.
     """
-    if CALL in body:
-        return True, None
-    seen = seen if seen is not None else set()
-    unresolved = None
-    for m in BARE_CALL.finditer(_blank_noncode(body)):
-        name = m.group(1)
-        if name in NOT_A_CALL or name in seen:
-            continue
-        seen.add(name)
-        if name not in fns:
-            # Only a snake_case name is worth naming as a dead end. `Some(..)`
-            # and `Outcome { .. }` are constructors, not calls the search failed
-            # to follow, and reporting them as such makes the hint noise.
-            if re.fullmatch(r"[a-z_][a-z0-9_]*", name):
-                unresolved = unresolved or name
-            continue
-        _, lo, hi = fns[name]
-        ok, deeper = _instrumented(text[lo:hi], text, fns, seen)
-        if ok:
-            return True, None
-        unresolved = unresolved or deeper
-    return False, unresolved
-
-
-def http_failures(path: str, text: str):
-    """Every HTTP handler in `path` that is not instrumented and not exempt."""
-    blank = _blank_noncode(text)
-    if not ROUTER.search(blank):
+    if not crate.has_router:
         return
-    fns = _functions(text, blank)
-    consts = dict(CONST_STR.findall(text))
+    text, blank = crate.files[path]
 
     for reg in METHOD_ROUTER.finditer(blank):
-        name = reg.group(1)
-        if name not in fns:
+        segs = [
+            s
+            for s in reg.group(1).replace(" ", "").split("::")
+            if s and s not in ("crate", "super", "self")
+        ]
+        if not segs:
+            continue
+        name = segs[-1]
+        hint = segs[-2] if len(segs) > 1 and SNAKE.fullmatch(segs[-2]) else None
+        target = crate.resolve(name, hint, path)
+        if target is None or target is AMBIGUOUS:
             reason = _exempt_reason(text, reg.start())
             if reason is None:
-                yield (
-                    f"{path}: route handler `{name}` is not defined in this file, "
-                    "so whether it is instrumented cannot be checked here"
+                what = (
+                    "this crate defines in more than one module, so which one the "
+                    "router reaches cannot be decided here"
+                    if target is AMBIGUOUS
+                    else "is not defined in this crate, so whether it is instrumented "
+                    "cannot be checked here"
                 )
+                yield f"{path}: route handler `{name}` {what}"
             elif not reason:
                 yield f"{path}: `{name}` is marked exempt with no reason"
             continue
-        decl, lo, hi = fns[name]
-        body = text[lo:hi]
-        dispatch = DISPATCH.search(blank, lo, hi)
-        if not dispatch:
-            # The ordinary REST shape: the registered function IS the handler.
-            yield from _check(path, name, body, decl, text, fns)
-            continue
-        open_idx = dispatch.end() - 1
-        if _match_brace(blank, open_idx) < 0:
-            yield f"{path}: the method dispatch in `{name}` could not be read"
-            continue
-        for pattern, pat_idx, arm in _arms(text, blank, open_idx):
-            labels = _labels(pattern, consts)
-            if labels is None:
-                continue  # a catch-all is not a handler — see `_labels`
-            for label in labels:
-                yield from _check(path, label, arm, pat_idx, text, fns)
+        yield from _registered(crate, target)
 
 
-def _check(path: str, label: str, body: str, idx: int, text: str, fns: dict):
-    ok, unresolved = _instrumented(body, text, fns)
-    if ok:
+def _registered(crate: Crate, target: Fn):
+    """The units inside one route-registered function, wherever it lives."""
+    text, blank = crate.files[target.path]
+    dispatch = DISPATCH.search(blank, target.lo, target.hi)
+    if not dispatch:
+        # The ordinary REST shape: the registered function IS the handler.
+        yield from _check(target.path, target.name, target.lo, target.hi, target.decl, crate)
         return
-    reason = _exempt_reason(text, idx)
-    if reason is not None:
-        if not reason:
-            yield f"{path}: `{label}` is marked exempt with no reason"
+    open_idx = dispatch.end() - 1
+    if _match_brace(blank, open_idx) < 0:
+        yield f"{target.path}: the method dispatch in `{target.name}` could not be read"
         return
-    tail = f" (the search could not follow the call to `{unresolved}`)" if unresolved else ""
-    yield f"{path}: `{label}` opens no observe::Call{tail}"
+    for pattern, pat_idx, (lo, hi) in _arms(text, blank, open_idx):
+        labels = _labels(pattern, crate, target.path)
+        if labels is None:
+            continue  # a catch-all is not a handler — see `_labels`
+        for label in labels:
+            yield from _check(target.path, label, lo, hi, pat_idx, crate)
 
 
 # --------------------------------------------------------------------------
@@ -544,21 +1016,20 @@ def _check(path: str, label: str, body: str, idx: int, text: str, fns: dict):
 
 def main(paths):
     failures = []
-    for path in paths:
-        try:
-            text = open(path, encoding="utf-8").read()
-        except (OSError, UnicodeDecodeError):
-            continue
-        if _is_test_source(path):
-            continue
-        for name, body in handlers_in(text):
-            if CALL not in body:
-                failures.append(f"{path}: `{name}` opens no observe::Call")
-        failures.extend(http_failures(path, text))
+    for crate, sources in _crates(paths):
+        for path in sources:
+            for name, decl, lo, hi in _grpc_handlers(crate.files[path][1]):
+                failures.extend(_check(path, name, lo, hi, decl, crate))
+            failures.extend(http_failures(crate, path))
 
-    if failures:
+    # A handler registered on two routes is one handler. Reporting it twice makes
+    # a reader count instead of read.
+    seen = set()
+    unique = [f for f in failures if not (f in seen or seen.add(f))]
+
+    if unique:
         print("observe-coverage: uninstrumented handlers\n")
-        for f in failures:
+        for f in unique:
             print(f"  {f}")
         print(
             "\nEvery handler must open a `Call::start(...)` (D67). The Call\n"
@@ -566,6 +1037,10 @@ def main(paths):
             "one is the whole requirement.\n\n"
             "A module that quietly stops emitting looks exactly like a module\n"
             "nobody called, which is the reading that would break D15.\n\n"
+            "The search follows calls ACROSS the modules of a crate, so a handler\n"
+            "that delegates is instrumented wherever its `Call::start` really is.\n"
+            "It refuses to guess between two same-named functions: qualify the call\n"
+            "with its module and the search follows it.\n\n"
             "An omission that is deliberate is written down, above the arm or the\n"
             "function, WITH A REASON:\n\n"
             "    // observe-coverage: exempt — why this one records nothing\n"

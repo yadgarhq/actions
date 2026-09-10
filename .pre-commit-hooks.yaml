@@ -257,8 +257,25 @@
 # a handler. A catch-all arm is not, because its label would be the caller's own
 # string and D67 forbids a caller minting a Prometheus series.
 #
+# THE UNIT OF ANALYSIS IS THE CRATE, NOT THE FILE (ledger 824). File-local
+# resolution COLLIDED with the `complexity` ceiling above: a repository forced to
+# split a large file then failed this check, and no split satisfied both. Measured
+# twice on 2026-09-10 — `iam`, whose handlers had to delegate to `_inner` methods
+# in sibling modules because a trait impl cannot span files, and `gateway`, whose
+# `.route(...)` registrations stayed in `src/http.rs` when six handler bodies
+# moved out. Both shipped a workaround; the next repository to cross the ceiling
+# would have met the same wall. So a callee, a route handler and a label constant
+# are resolved across every module of the crate the file belongs to.
+#
+# IT REFUSES TO GUESS, which is what keeps that a fix rather than a loosening. A
+# name the crate defines in two modules is not followed at all unless the call
+# site names its module: passing a handler on the strength of an unrelated
+# function's `Call::start` would be a green that means nothing. Test sources are
+# out of the INDEX for the same reason, inline `#[cfg(test)]` blocks included.
+#
 # An omission that is deliberate is written above the arm or the function, with a
 # reason: `// observe-coverage: exempt — why`. In the code, so it is in the diff.
+# Both transports accept it now; the gRPC side used to have no way to say it.
 # `language: script`, NOT python. `language: python` makes pre-commit try to pip
 # install THIS repository, which has no pyproject.toml and is not a package —
 # the error is "Directory '.' is not installable", raised in the CONSUMING repo
