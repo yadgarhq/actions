@@ -563,7 +563,76 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo test --all-features
+
+      # LEDGER 837 — THE EXECUTION AUDIT, and the layer that reads what RAN
+      # rather than what the source says. `hooks/no_test_skips.py` also publishes
+      # a pre-commit hook that refuses a skip MARKER; the two see different facts
+      # and neither replaces the other. A marker scan cannot see a test binary
+      # that stopped being built, and this audit cannot see a marker in a
+      # repository whose suite is executed by another workflow.
+      #
+      # WHAT IT ASSERTS, and why not more. Every `test result:` line libtest
+      # prints must report `0 filtered out` and `0 measured`, at least one line
+      # must exist at all, and the run must have executed at least one test in
+      # total. It does NOT assert `0 ignored`: measured on `yadgarhq/store` job
+      # 102994206633 and `yadgarhq/estate` job 102994383710, those two report 3
+      # and 10 ignored respectively in every green run, and both sets are
+      # executed elsewhere. Whether an `#[ignore]` is a skip is a question only
+      # the pre-commit layer can answer, because only it can see the workflow
+      # that runs it. The ignored tests are printed BY NAME here so the number
+      # is never merely a number.
+      #
+      # AN AUDIT OVER ZERO BINARIES FAILS (ADR-0645). A gate that examined
+      # nothing and exited 0 is indistinguishable from a green one, so the
+      # absence of a `test result:` line is itself the finding, and the counts
+      # are printed beside every verdict including a passing one.
+      #
+      # THE SECOND CHECKOUT is what puts the gate on the runner. `ci-pr.yaml` is
+      # a reusable workflow, so the checkout above is the CALLING repository and
+      # nothing from `yadgarhq/actions` is on disk. `@main` for the reason the
+      # `portability` job's copy of this step records at length: there is no way
+      # to ask which ref this workflow was called at.
+      - if: github.repository != 'yadgarhq/actions'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: yadgarhq/actions
+          ref: main
+          path: .ci-actions
+
+      - name: stage the execution audit, then restore the tree
+        env:
+          # Through the environment, never `${{ }}` inside the script.
+          UNDER_REVIEW: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # This repository reviews itself from its OWN checkout, which is what
+          # `ci-self.yaml` exists for. The test is the repository NAME rather
+          # than whether the file happens to be present, so that no repository
+          # under review can supply its own gate.
+          if [ "$UNDER_REVIEW" = "yadgarhq/actions" ]; then
+            src=hooks/no_test_skips.py
+          else
+            src=.ci-actions/hooks/no_test_skips.py
+          fi
+          if [ ! -f "$src" ]; then
+            echo "::error::the execution audit is missing at $src"
+            exit 1
+          fi
+          cp "$src" "$RUNNER_TEMP/no_test_skips.py"
+          # DELETED BEFORE cargo RUNS. `actions/checkout` can only write inside
+          # the workspace, and a second tree inside it is a directory `cargo`
+          # and every other gate in this job would walk as if it belonged to the
+          # repository under review.
+          rm -rf .ci-actions
+
+      - name: cargo test --all-features, and an audit of what it executed
+        run: |
+          set -euo pipefail
+          cargo test --all-features 2>&1 | tee "$RUNNER_TEMP/all-features.txt"
+          python3 "$RUNNER_TEMP/no_test_skips.py" \
+            --audit-cargo "$RUNNER_TEMP/all-features.txt" 2>&1 \
+            | tee -a "$GITHUB_STEP_SUMMARY"
 
       # THE OTHER HALF OF THE FEATURE SPACE. `--all-features` turns everything
       # on, so every feature-gated off-path is compiled by nothing — and the
@@ -621,7 +690,13 @@ jobs:
             exit 0
           fi
           echo "- features declared (\`$feats\`) → running \`cargo test --no-default-features\`" >> "$GITHUB_STEP_SUMMARY"
-          cargo test --no-default-features
+          cargo test --no-default-features 2>&1 | tee "$RUNNER_TEMP/feature-off.txt"
+          # Audited too, and only inside this arm: the skip arm above exits 0
+          # before any test runs, where an audit demanding a `test result:` line
+          # would refuse a repository that correctly has nothing to measure.
+          python3 "$RUNNER_TEMP/no_test_skips.py" \
+            --audit-cargo "$RUNNER_TEMP/feature-off.txt" 2>&1 \
+            | tee -a "$GITHUB_STEP_SUMMARY"
 
       # THE SUITE THAT CAN ONLY RUN AGAINST A PRIVATE-CA ENGINE, and the fixture
       # a `services:` block cannot supply.
