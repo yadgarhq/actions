@@ -442,3 +442,56 @@
   entry: hooks/boot_reads_watched.py
   always_run: true
   pass_filenames: false
+
+# LEDGER 837. The operator's words are the specification: "i need a hard check in
+# the validation that prevents tests skips. agents usually do this to force a
+# green test. no test bending is allowed", applied to all repositories.
+#
+# THIS IS THE MARKER LAYER, AND IT IS THE WEAKER OF THE TWO. It refuses a source
+# marker or a narrowed invocation that removes a test from the run: `#[ignore]`
+# with nothing running it, a cfg no build satisfies, an environment guard as a
+# test's first statement, the pytest and unittest skip families, `addopts` and
+# `collect_ignore` narrowing collection, a `--skip`/`-k`/`--deselect` filter on an
+# invocation, and a test command whose exit code is suppressed. The STRONGER
+# layer is the execution audit the same file carries under `--audit-cargo`, wired
+# into `ci-pr.yaml`'s `test` job, which reads what actually ran. Neither replaces
+# the other, and the reason is structural rather than a matter of thoroughness: a
+# marker scan cannot see a test binary that stopped being built, and an audit
+# cannot see a marker in a repository whose ignored suite is executed by a
+# different workflow.
+#
+# THE EXEMPTION IS A FACT, NEVER A REASON STRING, and that is the whole design.
+# The estate's two legitimate `#[ignore]` sites — `store/tests/engine_tls.rs` and
+# `estate/crates/front/tests/`, thirteen tests between them — are legitimate
+# BECAUSE SOMETHING RUNS THEM, so that is what the gate asks: does a workflow in
+# this repository run this target with `--ignored`, or does the source name
+# `YADGAR_TEST_TLS_DSN` in a repository that calls `ci-pr.yaml`, whose private-CA
+# step selects a suite on exactly that name and refuses unless it measured
+# something? Both predicates die in the same edit that stops the execution.
+# Ledger 701 and ledger 729 are the precedent: key on the fact, never on a marker
+# or on a consequence of it. There is no in-code exemption comment at all, so
+# nothing here can reattach to unrelated code the way `observe-coverage`'s
+# exemption walk does once its target is edited away (ledger 838).
+#
+# `always_run` WITH `pass_filenames: false`. An `#[ignore]`'s verdict depends on
+# the WORKFLOWS beside it, not on the file somebody touched, so a hook filtered to
+# the changed file would accept an ignored test the moment the step running it was
+# deleted in a different commit. The `files:`-only trap is the same one the
+# `pytest-scripts` and `no-compiled-in-defaults` entries record.
+#
+# `language: script`, NOT python — the reason five hooks above already carry:
+# `language: python` makes pre-commit pip-install this repository, which is not a
+# package, and the failure surfaces in the consuming repository where nothing
+# explains it. Stdlib only.
+#
+# ADOPTION IS PER REPOSITORY AND IS NOT AUTOMATIC (ADR-0577, ADR-0607). Measured
+# against `origin/main` of all nineteen unarchived repositories on 2026-09-10:
+# seventeen pass, and `yadgarhq/docs` and `yadgarhq/estate` each carry one real
+# finding this gate refuses. Neither may adopt it before that finding is fixed —
+# ADR-0584 forbids shipping a gate that hard-fails a known target.
+- id: no-test-skips
+  name: ledger 837 — no test silently stops running
+  language: script
+  entry: hooks/no_test_skips.py
+  always_run: true
+  pass_filenames: false
