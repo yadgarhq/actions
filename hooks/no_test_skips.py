@@ -345,6 +345,16 @@ KNOWN_CFG = {
     "target_feature",
     "target_has_atomic",
     "feature",
+    # Not in the estate today. Admitted anyway, because each is a cfg a future
+    # adopter plausibly sets from RUSTFLAGS or a harness, and refusing one would
+    # red a correct repository over a name rather than over a skip.
+    "loom",
+    "coverage",
+    "coverage_nightly",
+    "tarpaulin",
+    "tarpaulin_include",
+    "kani",
+    "fuzzing",
 }
 
 

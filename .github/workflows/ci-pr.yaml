@@ -629,7 +629,15 @@ jobs:
       - name: cargo test --all-features, and an audit of what it executed
         run: |
           set -euo pipefail
-          cargo test --all-features 2>&1 | tee "$RUNNER_TEMP/all-features.txt"
+          # NOT `2>&1`. MEASURED: libtest writes `test result:` to STDOUT while
+          # cargo writes `Compiling`, `Running` and `Finished` to STDERR, so
+          # merging two unsynchronised descriptors into one pipe is the only way
+          # a progress line can land mid-summary — and `CARGO_RESULT` is
+          # ANCHORED, so one interleaved prefix makes that summary invisible and
+          # the audit reports "no test result line" on a healthy run. Capturing
+          # stdout alone removes the interleave surface entirely; stderr still
+          # reaches the job log, and `pipefail` still carries cargo's status.
+          cargo test --all-features | tee "$RUNNER_TEMP/all-features.txt"
           python3 "$RUNNER_TEMP/no_test_skips.py" \
             --audit-cargo "$RUNNER_TEMP/all-features.txt" 2>&1 \
             | tee -a "$GITHUB_STEP_SUMMARY"
@@ -690,7 +698,8 @@ jobs:
             exit 0
           fi
           echo "- features declared (\`$feats\`) → running \`cargo test --no-default-features\`" >> "$GITHUB_STEP_SUMMARY"
-          cargo test --no-default-features 2>&1 | tee "$RUNNER_TEMP/feature-off.txt"
+          # Stdout alone, for the reason the `--all-features` step above records.
+          cargo test --no-default-features | tee "$RUNNER_TEMP/feature-off.txt"
           # Audited too, and only inside this arm: the skip arm above exits 0
           # before any test runs, where an audit demanding a `test result:` line
           # would refuse a repository that correctly has nothing to measure.

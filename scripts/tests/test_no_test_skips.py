@@ -667,6 +667,27 @@ def test_no_test_result_line_at_all_is_refused(tmp_path):
     assert "examined" in result.stderr
 
 
+def test_a_summary_line_with_anything_before_it_is_not_counted(tmp_path):
+    """THE ANCHORING IS DELIBERATE, and this fixes it in place.
+
+    `CARGO_RESULT` is anchored with `^` and used with `.match()`, so a line that
+    merely CONTAINS the phrase is not a summary — the raw job log carries the
+    workflow's own echoed shell (`grep -E '^test result:' "$out"`), and an
+    unanchored read would count that as a test binary. The cost of anchoring is
+    that a progress line interleaved in front of a summary hides it, which is why
+    `ci-pr.yaml` captures cargo's STDOUT alone rather than merging both
+    descriptors: measured, libtest writes this line to stdout and cargo writes
+    `Compiling`/`Running`/`Finished` to stderr.
+    """
+    result = audit(
+        tmp_path,
+        "   Compiling foo v0.1.0"
+        "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
+    )
+    assert result.returncode == 1
+    assert "no `test result:` line" in result.stderr
+
+
 def test_a_missing_capture_file_is_refused(tmp_path):
     result = subprocess.run(
         [sys.executable, str(GATE), "--audit-cargo", str(tmp_path / "nope.txt")],
