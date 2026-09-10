@@ -192,9 +192,15 @@ EXEMPT = re.compile(r"//\s*observe-coverage:\s*exempt\b\s*[-—:]?\s*(.*)")
 def _exempt_reason(text: str, idx: int):
     """The exemption attached to whatever starts at `idx`, if there is one.
 
-    Looked for on the line itself and on the contiguous `//` lines above it —
-    the two places a Rust author would put it, and nowhere else, so an exemption
-    cannot drift away from the thing it exempts.
+    Looked for on the line itself and on the `//` lines above it — but the
+    backward walk SKIPS blank lines rather than stopping at them, so "above
+    it" tolerates any number of blank lines between the marker and `idx`. It
+    stops only at the first line that is neither blank nor `//`. So the
+    marker CAN drift: if the item it was written for is edited away and
+    something else ends up directly below it, separated only by blank lines
+    and other comments, the reason reattaches to that something else with no
+    warning. The bound this function actually enforces is "no non-comment
+    code between the marker and the thing it exempts", not adjacency.
 
     Returns the reason (possibly empty, which is a failure the caller reports),
     or None when there is no marker at all.
@@ -703,11 +709,22 @@ def _opens_call(blank: str, lo: int, hi: int, top_only: bool) -> bool:
         on every path. Two label arms delegate to it and nothing else, and they
         are instrumented BY it — a `Call` the caller cannot avoid.
       - `gate::guard` opens one inside the arms of a `match` that decide a
-        REFUSAL. Its success path opens none. Measured: deleting
-        `admin_create_user`'s own `Call::start` left the handler green, because
-        the search reached `guard`'s. That is exactly the silent stop-emitting
-        this hook exists to catch, so a nested `Call` no longer counts for a
-        caller.
+        REFUSAL. Its success path opens none. `top_only` stops that nested
+        `Call` from certifying `guard` ITSELF when `guard` is the callee being
+        checked — this is the ONE hop this function bounds.
+
+    **THIS RULE DOES NOT CLOSE THE CASE THAT MOTIVATED IT, and the residual is
+    measured rather than assumed.** `guard` still calls `too_many`, and
+    `too_many` opens its `Call` as the first statement of ITS OWN body — depth
+    1, unconditional. `_instrumented`'s recursion follows `guard`'s callees
+    after `_opens_call` returns False for `guard`, reaches `too_many` on the
+    next hop, and `top_only` passes it there. So deleting `admin_create_user`'s
+    own `Call::start` still leaves the handler green: the search never opens a
+    `Call` inside `guard`, but it reaches one inside `guard`'s own callee two
+    hops out. That is the silent stop-emitting this hook exists to catch, and
+    `top_only` alone does not catch it — closing it needs a rule about whether
+    a followed callee's `Call` sits in the caller's own result position, which
+    is dataflow this function does not do.
 
     `top_only` is False for the unit's OWN body, unchanged: a handler that opens
     its `Call` inside an `if` has still made a decision about its own paths, and
