@@ -1,4 +1,29 @@
-"""LEDGER 824. `hooks/observe_coverage.py` resolves across the modules of a crate.
+"""LEDGER 824 AND 838. Discovery is crate-wide; crediting is one hop and two conjuncts.
+
+LEDGER 838 IS THE SECOND HALF AND IT IS A TIGHTENING. Ledger 824 made resolution
+crate-wide, and crediting a callee across a crate LOOSENED the gate: measured on
+`gateway` on 2026-09-10, six of eight HTTP units went green with their own
+`Call::start` deleted, where the shipped file-local gate refuses. Nothing was
+wrong on the real tree — all eight are green under both rules on `origin/main` —
+so the weakening was LATENT and visible only under mutation, which is the class
+ADR-0645 governs precisely because a green tree cannot detect a loosening.
+
+A callee's `Call::start` now stands in for its caller's only when BOTH hold: the
+call is the caller's whole RESULT (its tail expression or its sole `return`), and
+the `Call::start` is the callee's FIRST STATEMENT. `gateway`'s `tools/call`
+satisfies the first and not the second, and takes a written exemption rather than
+a rule bent to fit it. The exemption walk is tightened to true adjacency in the
+same change, because Rule B depends on that hatch.
+
+Read `test_gateway_measured_arms_are_credited_and_tools_call_is_not` first: it is
+the only assertion that catches a conjunct 2 written as "at bracket depth one"
+instead of "the first statement". Both `gateway` shapes sit at depth one, so a
+depth test credits `tools_call` and the whole design silently evaporates —
+measured: the real tree returns EXIT=0 with 0 of 8 refused under that reading.
+
+--- LEDGER 824, unchanged below ---
+
+`hooks/observe_coverage.py` resolves across the modules of a crate.
 
 THE DEFECT THESE TESTS PIN. The gate used to resolve everything FILE-LOCALLY, so
 it collided with the `complexity` hook's 500-line file ceiling: a repository
@@ -23,6 +48,12 @@ which is the failure mode this hook already had once, when `#[cfg(test)]` was
 used to decide which files to skip and it silently skipped them all.
 
 The non-weakening pairs are the ones to read first:
+`test_gateway_measured_arms_are_credited_and_tools_call_is_not`,
+`test_credit_is_one_hop_and_never_two`,
+`test_the_callee_is_credited_only_from_the_unit_s_result_position`,
+`test_a_second_way_out_of_the_unit_removes_credit`,
+`test_a_marker_separated_by_a_blank_line_does_not_attach`,
+`test_a_marker_does_not_inherit_the_next_item_once_its_own_is_deleted`,
 `test_delegating_handler_with_no_call_anywhere_is_red`,
 `test_ambiguous_callee_fails_closed`,
 `test_a_sibling_test_module_cannot_certify_a_production_handler`,
@@ -531,7 +562,10 @@ pub(super) async fn handle(body: Bytes) -> Response {
     assert result.returncode == 1, result.stdout
     assert "`handle` opens no observe::Call" in result.stdout
 
-    # Same tree, same call site, the `Call` moved to the callee's first statement.
+    # MOVING THE CALLEE'S `Call` UP IS NOT ENOUGH ON ITS OWN, and that is ledger
+    # 838's correction to this very test. `guard` is called in an `if let`
+    # condition and `handle` carries on past it, so `guard`'s `Call` is not
+    # `handle`'s however unconditional it is inside `guard`.
     unconditional = """\
 use super::*;
 
@@ -550,7 +584,37 @@ pub(super) fn guard(endpoint: &'static str, d: Decision) -> Option<Response> {
         src__http__dispatch_rs=handler,
         src__http__gate_rs=unconditional,
     )
-    assert run(root).returncode == 0
+    result = run(root)
+    assert result.returncode == 1, result.stdout
+    assert "`handle` opens no observe::Call" in result.stdout
+
+    # The paired GREEN is `gateway`'s `dispatch::measured` shape, and it needs BOTH
+    # conjuncts: the callee's `Call` first, and the call as the handler's whole
+    # result.
+    measured = """\
+use super::*;
+
+pub(super) fn measured(endpoint: &'static str, build: impl FnOnce() -> Value) -> Response {
+    let call = Call::start(SERVICE, endpoint, Kind::Write, tel(request_id()));
+    let rendered = render(build());
+    call.ok();
+    reply(rendered)
+}
+"""
+    delegating = """\
+use super::*;
+
+pub(super) async fn handle(body: Bytes) -> Response {
+    measured(ENDPOINT, || answer(&body))
+}
+"""
+    root = crate(
+        tmp_path,
+        src__http_rs=_router_in_root('.route("/", post(dispatch::handle))'),
+        src__http__dispatch_rs=delegating,
+        src__http__gate_rs=measured,
+    )
+    assert run(root).returncode == 0, run(root).stdout
 
 
 def test_an_associated_function_of_a_foreign_type_is_not_followed(tmp_path):
@@ -718,3 +782,361 @@ pub(super) fn wrap() -> Response {
 """,
     )
     assert run(split).returncode == 0, run(split).stdout
+
+
+# --------------------------------------------------------------------------
+# LEDGER 838 — the two conjuncts credit travels on, and neither alone.
+#
+# THE DEFECT THESE PIN, measured on `gateway` on 2026-09-10. Crate-wide crediting
+# followed a chain of calls, so six of `gateway`'s eight HTTP units went green
+# with their OWN `Call::start` deleted, where the shipped file-local gate refuses.
+# Nothing was wrong on the real tree — all eight are green under both rules on
+# `origin/main` — which is exactly why it needed mutation to see: a loosening is
+# LATENT, and a green tree cannot detect one. ADR-0645 forbids the direction
+# whether or not it is disclosed.
+#
+# Every pair below is same-tree, one property flipped.
+# --------------------------------------------------------------------------
+
+# `gateway`'s two real shapes, side by side. `measured` opens its `Call` as its
+# first statement; `tools_call` opens one four statements down, below an early
+# `return` on the throttle path.
+GATEWAY_DISPATCH = """\
+use super::*;
+
+pub(super) fn routes() -> Router<Arc<AppState>> {
+    Router::new().route("/", post(handle))
+}
+
+pub(super) async fn handle(request: Request, state: Arc<AppState>) -> Response {
+    match request.method.as_str() {
+        DISCOVER => measured(DISCOVER, || discover(&id)),
+        TOOLS_LIST => measured(TOOLS_LIST, || tools_list(&id)),
+        "tools/call" => tools_call(state, &id, &request.params).await,
+        other => reply(200, unknown(other)),
+    }
+}
+
+pub(super) fn measured(tool: &'static str, build: impl FnOnce() -> Value) -> Response {
+    let call = Call::start(SERVICE, tool, Kind::Read, tel(request_id()));
+    let rendered = render(build());
+    call.ok();
+    reply(200, rendered)
+}
+
+pub(super) async fn tools_call(state: Arc<AppState>, id: &Value, params: &Value) -> Response {
+    let name = params.get("name").and_then(Value::as_str).unwrap_or_default();
+    let (label, module) = match resolved_tool(name, id) {
+        Ok(pair) => pair,
+        Err(refusal) => return *refusal,
+    };
+    if let Some(refusal) = throttled(&state, label, module).await {
+        record_throttled(label, observed(request_id()));
+        return refusal;
+    }
+    let call = Call::start(SERVICE, label, Kind::Write, tel(request_id()));
+    let rendered = render(work(&state, params).await);
+    call.ok();
+    reply(200, rendered)
+}
+"""
+
+GATEWAY_CONSTS = """\
+mod dispatch;
+
+pub const DISCOVER: &str = "server/discover";
+pub const TOOLS_LIST: &str = "tools/list";
+
+pub fn router(state: Arc<AppState>) -> Router {
+    Router::new().merge(dispatch::routes()).with_state(state)
+}
+"""
+
+
+def test_gateway_measured_arms_are_credited_and_tools_call_is_not(tmp_path):
+    """THE SHAPE THAT DECIDES THE WHOLE DESIGN, and it is two shapes, not one.
+
+    Both arms delegate, both delegate in result position, and only one may be
+    credited:
+
+      - `measured` opens its `Call` as the first statement of its body, so nothing
+        the arm does can avoid it. A syntactic rule can credit this soundly.
+      - `tools_call` opens its `Call` below an early `return` on the throttle path.
+        It is CONDITIONAL, and no syntactic rule can credit it soundly. It happens
+        to be correct — the early path is recorded by `record_throttled` — but
+        that is a fact a person verified, not one this file can read.
+
+    **AND `tools_call`'s `Call::start` SITS AT NET BRACKET DEPTH ONE, exactly like
+    `measured`'s.** The `match` and the `if let` above it each open and close. So a
+    conjunct-2 written as "at depth one" credits both and cannot tell them apart —
+    which is why it is written as "the first statement" instead. This assertion is
+    the only one in the suite that catches that substitution: under mutation both
+    shapes are red either way, because a deleted `Call::start` fails any reading.
+    """
+    root = crate(tmp_path, src__http_rs=GATEWAY_CONSTS, src__http__dispatch_rs=GATEWAY_DISPATCH)
+    result = run(root)
+    assert result.returncode == 1, result.stdout
+    assert "`tools/call` opens no observe::Call" in result.stdout
+    assert "is not its first statement" in result.stdout
+    # The other two arms are green with NO exemption, which is what keeps this a
+    # tightening rather than a rewrite: crate-wide discovery still finds them and
+    # `measured` still instruments them.
+    assert "`server/discover`" not in result.stdout
+    assert "`tools/list`" not in result.stdout
+
+    # Same tree, `tools_call`'s `Call` lifted above every early return.
+    lifted = GATEWAY_DISPATCH.replace(
+        "    let name = params.get(\"name\").and_then(Value::as_str).unwrap_or_default();\n",
+        "    let call = Call::start(SERVICE, TOOLS_CALL, Kind::Write, tel(request_id()));\n"
+        "    let name = params.get(\"name\").and_then(Value::as_str).unwrap_or_default();\n",
+    ).replace("    let call = Call::start(SERVICE, label, Kind::Write, tel(request_id()));\n", "")
+    root = crate(tmp_path, src__http_rs=GATEWAY_CONSTS, src__http__dispatch_rs=lifted)
+    assert run(root).returncode == 0, run(root).stdout
+
+
+def test_tools_call_takes_an_exemption_rather_than_a_rule_bent_to_fit_it(tmp_path):
+    """The one hatch Rule B needs, on the arm and carrying a reason.
+
+    A rule stretched until it accepted `tools_call`'s conditional `Call` would
+    have accepted five wrong shapes with it — the five `guard` callers. So the
+    judgement is written down as a judgement, where a reviewer reads it.
+    """
+    exempt = GATEWAY_DISPATCH.replace(
+        '        "tools/call" => tools_call',
+        "        // observe-coverage: exempt — both paths record: the throttle refusal\n"
+        "        // through `record_throttled` and every other path through the `Call`\n"
+        "        // `tools_call` opens once the label is bounded.\n"
+        '        "tools/call" => tools_call',
+    )
+    root = crate(tmp_path, src__http_rs=GATEWAY_CONSTS, src__http__dispatch_rs=exempt)
+    assert run(root).returncode == 0, run(root).stdout
+
+    # A marker with no reason is not an exemption.
+    bare = GATEWAY_DISPATCH.replace(
+        '        "tools/call" => tools_call',
+        "        // observe-coverage: exempt\n" '        "tools/call" => tools_call',
+    )
+    result = run(crate(tmp_path, src__http_rs=GATEWAY_CONSTS, src__http__dispatch_rs=bare))
+    assert result.returncode == 1, result.stdout
+    assert "marked exempt with no reason" in result.stdout
+
+
+# --------------------------------------------------------------------------
+# Conjunct 1 — result position.
+# --------------------------------------------------------------------------
+
+CREDITING_CALLEE = """\
+use super::*;
+
+pub(super) fn measured(endpoint: &'static str, build: impl FnOnce() -> Value) -> Response {
+    let call = Call::start(SERVICE, endpoint, Kind::Write, tel(request_id()));
+    let rendered = render(build());
+    call.ok();
+    reply(rendered)
+}
+"""
+
+
+def _handler(body: str) -> str:
+    return "use super::*;\n\npub(super) async fn handle(body: Bytes) -> Response {\n" + body + "}\n"
+
+
+def _verdict(tmp_path, handler_body: str):
+    root = crate(
+        tmp_path,
+        src__http_rs=_router_in_root('.route("/", post(dispatch::handle))'),
+        src__http__dispatch_rs=_handler(handler_body),
+        src__http__gate_rs=CREDITING_CALLEE,
+    )
+    return run(root)
+
+
+def test_the_callee_is_credited_only_from_the_unit_s_result_position(tmp_path):
+    """One callee, one crate, five call sites. Only the result position credits."""
+    # GREEN: the call is the whole tail expression.
+    assert _verdict(tmp_path, "    measured(ENDPOINT, || answer(&body))\n").returncode == 0
+    # GREEN: `.await` may follow it and it is still the result.
+    assert _verdict(tmp_path, "    measured(ENDPOINT, || answer(&body)).await\n").returncode == 0
+    # GREEN: a SOLE `return` is a result position too.
+    assert (
+        _verdict(tmp_path, "    return measured(ENDPOINT, || answer(&body));\n").returncode == 0
+    )
+    # RED: something else is the result — the call is an argument.
+    assert _verdict(tmp_path, "    wrap(measured(ENDPOINT, || answer(&body)))\n").returncode == 1
+    # RED: something follows the call, so the call is not the whole result.
+    assert (
+        _verdict(tmp_path, "    measured(ENDPOINT, || answer(&body)).into_response()\n").returncode
+        == 1
+    )
+    # RED: the call is a statement and the result is somebody else.
+    assert (
+        _verdict(tmp_path, "    measured(ENDPOINT, || answer(&body));\n    reply(body)\n").returncode
+        == 1
+    )
+
+
+def test_a_second_way_out_of_the_unit_removes_credit(tmp_path):
+    """Multiple exits means no credit — a `Call` on one path is not one on the others."""
+    # RED: a `?` is an exit, and an invisible one.
+    assert (
+        _verdict(tmp_path, "    let v = parse(&body)?;\n    measured(ENDPOINT, || v)\n").returncode
+        == 1
+    )
+    # RED: an early `return` beside the tail expression is a second door.
+    assert (
+        _verdict(
+            tmp_path,
+            "    if body.is_empty() {\n        return reply(body);\n    }\n"
+            "    measured(ENDPOINT, || answer(&body))\n",
+        ).returncode
+        == 1
+    )
+    # RED: a `match` result is several paths, not one.
+    assert (
+        _verdict(
+            tmp_path,
+            "    match decide(&body) {\n"
+            "        Decision::Allow => measured(ENDPOINT, || answer(&body)),\n"
+            "        Decision::Refuse => reply(body),\n"
+            "    }\n",
+        ).returncode
+        == 1
+    )
+    # GREEN pair for all three: the same callee, the same crate, one way out.
+    assert _verdict(tmp_path, "    measured(ENDPOINT, || answer(&body))\n").returncode == 0
+
+
+def test_credit_is_one_hop_and_never_two(tmp_path):
+    """LEDGER 838's measured loosening, in the shape it was measured in.
+
+    `gateway`'s `guard` opens a `Call` only on its refusal arms, so it does not
+    instrument its caller — the recursion this replaces then followed `guard`'s
+    OWN callee `too_many`, whose `Call` IS its first statement, and accepted it.
+    Two hops from a handler whose own `Call::start` had been deleted, and green.
+    """
+    chain = """\
+use super::*;
+
+pub(super) fn guard(endpoint: &'static str, d: Decision) -> Option<Response> {
+    match d {
+        Decision::Allow => None,
+        Decision::Refuse => Some(too_many(endpoint)),
+    }
+}
+
+pub(super) fn too_many(endpoint: &'static str) -> Response {
+    Call::start(SERVICE, endpoint, Kind::Write, tel(request_id())).fail("RESOURCE_EXHAUSTED");
+    text(StatusCode::TOO_MANY_REQUESTS, r#"{"error":"too many attempts"}"#)
+}
+"""
+    root = crate(
+        tmp_path,
+        src__http_rs=_router_in_root('.route("/", post(dispatch::handle))'),
+        src__http__dispatch_rs=_handler("    guard(ENDPOINT, decide(&body)).unwrap_or(reply(body))\n"),
+        src__http__gate_rs=chain,
+    )
+    result = run(root)
+    assert result.returncode == 1, result.stdout
+    assert "`handle` opens no observe::Call" in result.stdout
+
+    # ONE hop to the same `Call` is credited: `too_many` opens it as its first
+    # statement, and here it is the handler's whole result. The pair is what shows
+    # the refusal above is about the HOP COUNT and not about `too_many`.
+    root = crate(
+        tmp_path,
+        src__http_rs=_router_in_root('.route("/", post(dispatch::handle))'),
+        src__http__dispatch_rs=_handler("    too_many(ENDPOINT)\n"),
+        src__http__gate_rs=chain,
+    )
+    assert run(root).returncode == 0, run(root).stdout
+
+
+# --------------------------------------------------------------------------
+# LEDGER 838 — the exemption marker attaches only where it was written.
+# --------------------------------------------------------------------------
+
+def _grpc(marker: str, handler: str = "create") -> str:
+    return (
+        "use super::*;\n\n"
+        "#[tonic::async_trait]\n"
+        "impl TaskService for Task {\n"
+        f"{marker}"
+        f"    async fn {handler}(&self, req: Request<Create>) -> Result<Response<Reply>, Status> {{\n"
+        "        store(req).await\n"
+        "    }\n"
+        "}\n"
+    )
+
+
+MARKER = "    // observe-coverage: exempt — the caller records this one\n"
+
+
+def test_a_marker_directly_above_the_item_attaches(tmp_path):
+    """The regression guard: tightening the walk must not stop it working."""
+    assert run(crate(tmp_path, src__service__rpc_rs=_grpc(MARKER))).returncode == 0
+    # A `///` doc run counts as a comment run: a doc block above an item is that
+    # item's, and a marker written inside one belongs to it.
+    doc = "    /// Answers from the cache.\n" + MARKER + "    /// See ADR-0645.\n"
+    assert run(crate(tmp_path, src__service__rpc_rs=_grpc(doc))).returncode == 0
+
+
+def test_a_marker_separated_by_a_blank_line_does_not_attach(tmp_path):
+    """The walk used to SKIP blank lines, which is what let a marker drift."""
+    result = run(crate(tmp_path, src__service__rpc_rs=_grpc(MARKER + "\n")))
+    assert result.returncode == 1, result.stdout
+    assert "`create` opens no observe::Call" in result.stdout
+    # An attribute already stopped the walk, and still does.
+    result = run(crate(tmp_path, src__service__rpc_rs=_grpc(MARKER + "    #[allow(unused)]\n")))
+    assert result.returncode == 1, result.stdout
+
+
+def test_a_marker_does_not_inherit_the_next_item_once_its_own_is_deleted(tmp_path):
+    """THE DRIFT CASE, both directions, on one tree.
+
+    A marker written for `create` must not become `update`'s the day `create` is
+    edited away. Under the old walk it did, silently, and a stale exemption is a
+    silent green on a D67 gate.
+
+    **THE HOOK CANNOT CLOSE THIS COMPLETELY AND DOES NOT CLAIM TO.** A deletion
+    that leaves the marker directly on top of `update`, with no blank line, is
+    textually indistinguishable from a marker written for `update` — so it
+    attaches, and it must, or nothing could be exempted at all. What adjacency
+    buys is that the marker has to be MOVED, and moving it shows up in the diff.
+    The reason itself is never judged by this file, only required to exist; it is
+    a claim under human review like any other line.
+    """
+    two = (
+        "use super::*;\n\n"
+        "#[tonic::async_trait]\n"
+        "impl TaskService for Task {\n"
+        f"{MARKER}"
+        "    async fn create(&self, req: Request<Create>) -> Result<Response<Reply>, Status> {\n"
+        "        store(req).await\n"
+        "    }\n"
+        "\n"
+        "    async fn update(&self, req: Request<Update>) -> Result<Response<Reply>, Status> {\n"
+        "        let call = Call::start(SERVICE, \"Update\", Kind::Write, tel(rid()));\n"
+        "        call.ok();\n"
+        "        store(req).await\n"
+        "    }\n"
+        "}\n"
+    )
+    # BEFORE: `create` is exempt and `update` is instrumented, so the tree is green.
+    assert run(crate(tmp_path, src__service__rpc_rs=two)).returncode == 0
+
+    # AFTER: `create` is deleted, `update` loses its `Call`, and the orphaned
+    # marker is left where it was — one blank line above `update`.
+    drifted = (
+        "use super::*;\n\n"
+        "#[tonic::async_trait]\n"
+        "impl TaskService for Task {\n"
+        f"{MARKER}"
+        "\n"
+        "    async fn update(&self, req: Request<Update>) -> Result<Response<Reply>, Status> {\n"
+        "        store(req).await\n"
+        "    }\n"
+        "}\n"
+    )
+    result = run(crate(tmp_path, src__service__rpc_rs=drifted))
+    assert result.returncode == 1, result.stdout
+    assert "`update` opens no observe::Call" in result.stdout

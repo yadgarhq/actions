@@ -41,6 +41,49 @@ the estate plans fifty more. So resolution is now crate-wide — a callee, a rou
 handler and a label constant are all looked up across every module of the crate
 the file belongs to.
 
+DISCOVERY IS CRATE-WIDE AND CREDITING IS NOT, and that separation is the whole of
+ledger 838. Finding the handlers needs the crate — a `.route(..)` and the function
+it names end up in different files the moment a repository crosses the file-size
+ceiling, and enumerating them is what ledger 824 fixed. DECIDING whether a
+handler is instrumented is a different question, and following calls across a
+crate to answer it LOOSENED the gate: measured on `gateway` under mutation, six of
+eight HTTP units went green with their own `Call::start` deleted, where the
+file-local gate refuses. ADR-0645 forbids that direction whether or not it is
+disclosed. Nothing was wrong on the real tree — all eight are green under both
+rules on `origin/main` — which is the point: a loosening is LATENT and visible
+only under mutation, because a green tree cannot detect one.
+
+THE TWO CONJUNCTS a callee's `Call::start` must satisfy to stand in for its
+caller's, both of them or neither:
+
+  1. RESULT POSITION. The call is the caller's tail expression or its sole
+     `return`. `DISCOVER => measured(DISCOVER, || discover(&id))` is the whole of
+     that arm, so `measured`'s `Call` is unavoidably the arm's. A call in an `if
+     let` condition is not — `guard(..)` decides whether to refuse, and the
+     handler carries on past it.
+  2. UNCONDITIONAL IN THE CALLEE. The `Call::start` is the callee's first
+     statement, reached before any branch or early return. `measured` passes;
+     `tools_call` does not, because its `Call` sits below an early `return` on the
+     throttle path.
+
+Otherwise the unit opens a `Call` in its OWN body. `_result_span` and
+`_opens_call_unconditionally` are the two conjuncts, and both err towards
+REFUSING CREDIT — a false red, which is loud, over a false green, which is the
+silent failure this file exists to prevent.
+
+ONE HOP, NEVER TWO. The recursion that used to run here is what the measurement
+caught: it followed `guard`, declined the `Call` on its refusal arm, then followed
+`guard`'s own callee `too_many` and accepted the `Call` on ITS refusal arm — two
+hops from a handler whose own `Call::start` had been deleted. No shape in this
+estate needs a chain.
+
+AND `tools/call` TAKES A WRITTEN EXEMPTION rather than a rule bent to fit it. Its
+`Call` is conditional and no syntactic rule can soundly credit it; it is
+nonetheless correct, because the early path is recorded separately by
+`record_throttled`. That is a judgement, and it is expressed as one — a marker in
+the code, carrying a reason, which a reviewer reads. A rule stretched until it
+accepted that shape would have accepted five wrong ones with it.
+
 WHAT CRATE-WIDE RESOLUTION MUST NOT DO is pass a handler that is not
 instrumented. Rust resolves a name through modules and imports; this does not,
 because a `use`-graph is a compiler's job. It uses a LADDER instead, and the
@@ -75,11 +118,14 @@ TWO TRANSPORTS, ONE QUESTION.
           exists for: bytes and words returned TO THE CALLER. Every other hop
           sees protobuf, which answers a different question.
 
-BOTH TRANSPORTS NOW RUN THROUGH THE SAME SEARCH. The gRPC side used to be a
+BOTH TRANSPORTS NOW RUN THROUGH THE SAME RULE. The gRPC side used to be a
 substring test on the wrapper's own text, which is what made `iam`'s delegation
-invisible; it now follows calls exactly as the HTTP side does, and accepts the
-same written-down exemption. Two rules for one question was the reason a split
-could break one transport and not the other.
+invisible; it now credits a callee on exactly the two conjuncts above, and accepts
+the same written-down exemption. Two rules for one question was the reason a split
+could break one transport and not the other. Every gRPC wrapper in the estate
+opens its own `Call::start` in its own body today, so none of them needs crediting
+at all — checked across `iam`, `iam-db`, `task`, `task-db`, `project` and
+`project-db`.
 
 WHAT COUNTS AS AN HTTP HANDLER, and why it is not "the function the router
 names". The router registration is a SCOPE GATE, not the unit — it says which
@@ -129,13 +175,21 @@ for malformed JSON, a failed `validate` and a header cross-check: no bounded
 method label has been read yet at that point, so there is nothing to record
 under, which is the same D67 reason the catch-all is excluded.
 
-FITTED TO THE SHAPES THAT EXIST, DELIBERATELY. The calls this search follows are
-a bare `name(...)`, `self.name(...)`, `Self::name(...)` and a module-qualified
-`a::b::name(...)`. A method call on some other receiver — `bucket.start(...)` —
-is NOT followed, even though the crate table would often resolve it, because that
-is the form most likely to collide with a std method and certify a handler by
-accident. When a repository delegates through a field rather than through `self`,
-extend this with that real example in hand rather than an imagined one.
+FITTED TO THE SHAPES THAT EXIST, DELIBERATELY. The calls credit travels through
+are a bare `name(...)`, `self.name(...)`, `Self::name(...)` and a module-qualified
+`a::b::name(...)`, optionally followed by `.await`. A method call on some other
+receiver — `bucket.start(...)` — is NOT followed, even though the crate table
+would often resolve it, because that is the form most likely to collide with a std
+method and certify a handler by accident. When a repository delegates through a
+field rather than through `self`, extend this with that real example in hand
+rather than an imagined one.
+
+AN EXEMPTION IS A CLAIM, NOT A CHECK. This file verifies that a marker carries a
+reason; it can never verify that the reason is TRUE. So an
+`observe-coverage: exempt` line is a sentence under human review exactly like any
+other line of the diff, and the marker must sit adjacent to what it exempts —
+see `_exempt_reason`, whose walk used to skip blank lines and could therefore
+reattach a stale reason to unrelated code (ledger 838).
 """
 
 import os
@@ -192,15 +246,29 @@ EXEMPT = re.compile(r"//\s*observe-coverage:\s*exempt\b\s*[-—:]?\s*(.*)")
 def _exempt_reason(text: str, idx: int):
     """The exemption attached to whatever starts at `idx`, if there is one.
 
-    Looked for on the line itself and on the `//` lines above it — but the
-    backward walk SKIPS blank lines rather than stopping at them, so "above
-    it" tolerates any number of blank lines between the marker and `idx`. It
-    stops only at the first line that is neither blank nor `//`. So the
-    marker CAN drift: if the item it was written for is edited away and
-    something else ends up directly below it, separated only by blank lines
-    and other comments, the reason reattaches to that something else with no
-    warning. The bound this function actually enforces is "no non-comment
-    code between the marker and the thing it exempts", not adjacency.
+    ADJACENCY IS THE BOUND, and it used to be weaker than it read (ledger 838).
+    The backward walk SKIPPED blank lines rather than stopping at them, so a
+    marker separated from `idx` by any number of blank lines still attached. That
+    made a marker able to DRIFT: written for one item, it reattached with no
+    warning to whatever ended up below it once its original target was edited
+    away. A stale exemption is a silent green on a D67 gate — the one outcome
+    this file cannot afford — and Rule B needs the hatch for `gateway`'s
+    `tools/call`, so an unsound walk would have shipped alongside a rule that
+    depends on it.
+
+    So: the marker is on the item's OWN line, or on a contiguous unbroken run of
+    comment lines directly above it. A blank line ends the run, and so does any
+    line that is not a comment — an attribute (`#[...]`) already did. `///` is a
+    comment for this purpose: a doc block above an item is that item's, and a
+    marker written inside one belongs to it.
+
+    Zero markers existed anywhere in the estate when this was tightened, checked
+    across all 13 Rust repositories, so nothing was broken by tightening it.
+
+    THE REASON IS NEVER JUDGED, only required to exist. A hook cannot know
+    whether "both its paths record" is true; it can only make somebody write the
+    sentence down where a reviewer reads it. So an exemption is a claim under
+    review like any other line of the diff, not a fact this gate has checked.
 
     Returns the reason (possibly empty, which is a failure the caller reports),
     or None when there is no marker at all.
@@ -216,8 +284,9 @@ def _exempt_reason(text: str, idx: int):
         return m.group(1).strip()
     for line in reversed(lines):
         stripped = line.strip()
-        if not stripped:
-            continue
+        # A BLANK LINE STOPS THE WALK, which is the whole of the fix: `""` does
+        # not start with `//`, so the same test now ends the run that used to
+        # skip over it.
         if not stripped.startswith("//"):
             break
         m = EXEMPT.search(stripped)
@@ -256,18 +325,26 @@ DISPATCH = re.compile(r"\bmatch\b[^{;]*\.method\b[^{;]*\{")
 # `const TOOLS_LIST: &str = "tools/list";` — so a failure can name the method an
 # operator recognises instead of the identifier the code happens to use.
 CONST_STR = re.compile(r'\bconst\s+(\w+)\s*:\s*&(?:\'static\s+)?str\s*=\s*"([^"]*)"')
-# The call forms the search follows. `self.name(` first, because `self` also
-# reads as a bare word and the qualified branch would otherwise swallow it.
-# `a::b::name(` carries a module hint; a bare `name(` carries none.
+# THE ONE CALL FORM CREDIT CAN TRAVEL THROUGH, anchored at the start of the text
+# it is handed: a result position holds exactly one expression, so there is
+# nothing to scan for. `self.name(` first, because `self` also reads as a bare
+# word and the qualified branch would otherwise swallow it. `a::b::name(` carries
+# a module hint; a bare `name(` carries none.
 #
-# AN ATTRIBUTE IS NOT A CALL, and `#[expect(...)]` reads exactly like one — four
-# of them in `iam` were reported as the place the search gave up, which is how a
-# useful hint becomes noise. The two lookbehinds are what tell `#[expect(` from
-# `expect(`; `.expect(` was already excluded by the `.` in the first one.
-CALL_SITE = re.compile(
-    r"\bself\s*\.\s*(?P<method>\w+)\s*\("
-    r"|(?<![\w:.])(?<!#\[)(?<!#!\[)(?P<path>(?:\w+\s*::\s*)+)?(?P<fn>\w+)\s*\("
+# This replaced a `finditer` over every call in the body. That search is what made
+# crediting unsound: it reached a `Call::start` down any of a body's calls,
+# including one on a path the caller never takes. An anchored match cannot.
+RESULT_CALL = re.compile(
+    r"\A(?:self\s*\.\s*(?P<method>\w+)"
+    r"|(?P<path>(?:\w+\s*::\s*)+)?(?P<fn>\w+))\s*\("
 )
+# What may follow the call and still leave it the whole of the result: `.await`,
+# whitespace, and a match arm's trailing comma. `?` IS ABSENT DELIBERATELY — it
+# is a second exit, and a unit with two exits gets no credit.
+TAIL_SUFFIX = re.compile(r"\A(?:\s|,|\.\s*await\b)*\Z")
+# A control-flow expression reads as `name(` to a regex — `if (x) { .. }` — and a
+# branch is not a delegation. Also the exits: a `return` or a `break` in a
+# callee's prefix means its `Call::start` is not unconditional.
 NOT_A_CALL = {
     "if",
     "while",
@@ -286,12 +363,14 @@ NOT_A_CALL = {
     "impl",
     "where",
     "dyn",
+    "loop",
+    "break",
+    "continue",
 }
+BRANCH_KW = re.compile(r"\b(?:if|match|while|for|loop|else|return|break|continue)\b")
+RETURN_KW = re.compile(r"\breturn\b")
 SNAKE = re.compile(r"[a-z_][a-z0-9_]*")
 CFG_TEST = re.compile(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]")
-# How deep the search follows a chain of calls. A cycle is already impossible —
-# every callee is visited once — so this only bounds a pathological fan-out.
-MAX_DEPTH = 16
 
 
 def _blank_noncode(text: str) -> str:
@@ -660,141 +739,244 @@ def _crates(paths):
 # --------------------------------------------------------------------------
 
 
-def _call_sites(blank: str):
-    """(name, module_hint) for every call this search is willing to follow.
+def _match_bracket(text: str, open_idx: int) -> int:
+    """Index just past the bracket closing the one at `open_idx`, or -1.
 
-    The forms are listed in this module's docstring. A method call on a receiver
-    other than `self` is deliberately absent, and so is an associated function of
-    a type this crate does not model: `Instant::now()`, `Response::new(...)`,
-    `Duration::from_secs(...)`. Dropping those is not a convenience.
-
-    RESOLVING A TYPE-QUALIFIED CALL BY ITS BARE NAME IS THE FALSE-GREEN THIS HOOK
-    CANNOT AFFORD, measured while proving the mutation for ledger 824. `iam`
-    defines `fn new` in more than one module, so `Response::new(...)` inside a
-    handler reached the crate-wide table under the name `new` — which sent the
-    search into an unrelated constructor and named it in the message. A
-    constructor of somebody else's type is never where a `Call::start` lives, so
-    the search does not go there. `Self::` and `self.` are stripped and DO
-    resolve: those name this crate's own code.
-
-    A qualifier that is a real crate type — `Iam::helper()` — is skipped too, and
-    that is a miss rather than a hole: the unit fails for want of a `Call::start`
-    it does not have, which is the safe direction.
+    Every bracket kind counts towards one depth, so a `(` closed after a `[` or a
+    `{` inside it is still found. `_match_brace` above is the brace-only variant
+    the structural scans use; this one is for reading ONE call's argument list,
+    where the closing bracket is the end of the expression.
     """
-    for m in CALL_SITE.finditer(blank):
-        name = m.group("method") or m.group("fn")
-        if name in NOT_A_CALL:
-            continue
-        hint = None
-        raw = m.group("path")
-        if raw:
-            segs = [s for s in raw.replace(" ", "").split("::") if s]
-            segs = [s for s in segs if s not in ("crate", "super", "self", "Self")]
-            if not all(SNAKE.fullmatch(s) for s in segs):
-                continue  # a foreign type's associated function — see above
-            if segs:
-                hint = segs[-1]
-        yield name, hint
+    depth = 0
+    for i in range(open_idx, len(text)):
+        c = text[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return -1
 
 
-def _opens_call(blank: str, lo: int, hi: int, top_only: bool) -> bool:
-    """Does `blank[lo:hi]` open a `Call::start`, and does it do so on every path?
+def _inner_span(blank: str, lo: int, hi: int):
+    """The unit's body with its braces removed, when it has any.
 
-    A HELPER THAT INSTRUMENTS ONLY ITS REFUSALS DOES NOT INSTRUMENT ITS CALLER,
-    and `top_only` is that rule. It is what stops crate-wide following from being
-    a weakening rather than a fix, and it comes from two real shapes in `gateway`
-    rather than from taste:
-
-      - `dispatch::measured` opens its `Call` as the first statement of its body,
-        on every path. Two label arms delegate to it and nothing else, and they
-        are instrumented BY it — a `Call` the caller cannot avoid.
-      - `gate::guard` opens one inside the arms of a `match` that decide a
-        REFUSAL. Its success path opens none. `top_only` stops that nested
-        `Call` from certifying `guard` ITSELF when `guard` is the callee being
-        checked — this is the ONE hop this function bounds.
-
-    **THIS RULE DOES NOT CLOSE THE CASE THAT MOTIVATED IT, and the residual is
-    measured rather than assumed.** `guard` still calls `too_many`, and
-    `too_many` opens its `Call` as the first statement of ITS OWN body — depth
-    1, unconditional. `_instrumented`'s recursion follows `guard`'s callees
-    after `_opens_call` returns False for `guard`, reaches `too_many` on the
-    next hop, and `top_only` passes it there. So deleting `admin_create_user`'s
-    own `Call::start` still leaves the handler green: the search never opens a
-    `Call` inside `guard`, but it reaches one inside `guard`'s own callee two
-    hops out. That is the silent stop-emitting this hook exists to catch, and
-    `top_only` alone does not catch it — closing it needs a rule about whether
-    a followed callee's `Call` sits in the caller's own result position, which
-    is dataflow this function does not do.
-
-    `top_only` is False for the unit's OWN body, unchanged: a handler that opens
-    its `Call` inside an `if` has still made a decision about its own paths, and
-    demanding otherwise would redden trees over a rule about somebody else's
-    function.
+    TWO SHAPES REACH HERE and only one is braced. Every `fn`, and a match arm
+    written `=> { .. }`, hands over the brace positions. An arm written as a bare
+    expression — `DISCOVER => measured(DISCOVER, || discover(&id))` — has none,
+    and in `gateway` that is the COMMON shape rather than an edge case: it is
+    what both credited arms are written as.
     """
-    i = blank.find(CALL, lo, hi)
-    while i >= 0:
-        if not top_only:
-            return True
-        # `lo` is the callee's opening brace, so depth 1 means "directly in the
-        # body" — not inside a match arm, an `if`, or a closure.
-        depth = 0
-        for c in blank[lo:i]:
-            if c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-        if depth == 1:
-            return True
-        i = blank.find(CALL, i + 1, hi)
-    return False
+    if lo < len(blank) and blank[lo] == "{":
+        return lo + 1, max(lo + 1, hi - 1)
+    return lo, hi
 
 
-def _instrumented(crate: Crate, path: str, lo: int, hi: int, own=True, seen=None, depth=0):
-    """Is `Call::start` reachable from `path[lo:hi]` through calls in this crate?
+def _top_segments(blank: str, lo: int, hi: int):
+    """`blank[lo:hi]` cut at every `;` that sits at bracket depth zero.
 
-    Returns (True, None) or (False, hint) where `hint` is (kind, name) naming
-    where the search stopped — a callee outside the crate, or a name the crate
-    defines more than once. That is not a separate failure: the unit has already
+    Depth counts every bracket kind, so a `;` inside a nested block, a closure
+    body or a macro argument is not a cut. The last segment is the body's tail
+    expression when the body has one, and empty when the body ends in `;`.
+    """
+    segs, start, depth, i = [], lo, 0, lo
+    while i < hi:
+        c = blank[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == ";" and depth == 0:
+            segs.append((start, i))
+            start = i + 1
+        i += 1
+    segs.append((start, hi))
+    return segs
+
+
+def _result_span(blank: str, lo: int, hi: int):
+    """The unit's RESULT POSITION — (start, end) — or None when it has no single one.
+
+    CONJUNCT 1 OF THE CREDITING RULE. A callee's `Call::start` may stand in for
+    its caller's only when the call IS the caller's result: its tail expression,
+    or its sole `return`. More than one way out of the unit means no credit,
+    because a `Call` on one of them is not a `Call` on the others — which is
+    exactly the loosening this replaces.
+
+    So the answer is None when:
+
+      - the body contains a `?`. That is an exit, and an invisible one.
+      - the body contains more than one `return`, or one that is not its last
+        statement. A `return` inside an `if` leaves by a second door.
+      - the body ends in `;`, so there is no tail expression to be the result.
+      - the result opens a block at depth zero — a `match`, an `if`, a `for`. Each
+        arm or branch is its own path, and none of them is "the" result.
+
+    Every one of those refusals is a REFUSAL TO CREDIT, never a verdict: the unit
+    then has to open a `Call` in its own body. So an over-strict reading here
+    costs a false red, which is loud, rather than a false green, which is silent —
+    and ADR-0645 forbids only the second direction.
+    """
+    ilo, ihi = _inner_span(blank, lo, hi)
+    body = blank[ilo:ihi]
+    if "?" in body:
+        return None
+    segs = _top_segments(blank, ilo, ihi)
+    returns = len(RETURN_KW.findall(body))
+    if returns:
+        if returns > 1:
+            return None
+        filled = [(a, b) for a, b in segs if blank[a:b].strip()]
+        if not filled:
+            return None
+        s, e = filled[-1]
+        if not blank[s:e].lstrip().startswith("return"):
+            return None  # the sole `return` is not the last statement
+        s = blank.index("return", s) + len("return")
+    else:
+        s, e = segs[-1]
+        if not blank[s:e].strip():
+            return None  # the body ends in `;` — no tail expression
+    depth = 0
+    for k in range(s, e):
+        c = blank[k]
+        if c in "([{":
+            if c == "{" and depth == 0:
+                return None  # a block, not a single result
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+    return s, e
+
+
+def _result_call(blank: str, lo: int, hi: int):
+    """(name, module_hint) for the ONE call in the unit's result position, or None.
+
+    THE OUTERMOST CALL ONLY, which is the sound reading of "the call is the tail
+    expression". `measured(DISCOVER, || discover(&id))` credits `measured` and
+    never the closure's `discover`: the closure is an argument, and an argument is
+    not the result.
+
+    The forms are `name(..)`, `self.name(..)`, `Self::name(..)` and
+    `a::b::name(..)`, with an optional `.await`. A method call on some other
+    receiver is not followed, and neither is an associated function of a type this
+    crate does not model — see the module docstring, and
+    `RESOLVING A TYPE-QUALIFIED CALL BY ITS BARE NAME` below, which is a measured
+    false green rather than a hypothesis: `iam` defines `fn new` in more than one
+    module, so `Response::new(..)` reached the crate table under the name `new`.
+    """
+    span = _result_span(blank, lo, hi)
+    if span is None:
+        return None
+    seg = blank[span[0] : span[1]].strip()
+    m = RESULT_CALL.match(seg)
+    if not m:
+        return None
+    name = m.group("method") or m.group("fn")
+    if name in NOT_A_CALL:
+        return None
+    close = _match_bracket(seg, m.end() - 1)
+    if close < 0 or not TAIL_SUFFIX.match(seg[close:]):
+        return None  # something follows the call, so the call is not the result
+    hint = None
+    raw = m.group("path")
+    if raw:
+        parts = [x for x in raw.replace(" ", "").split("::") if x]
+        parts = [x for x in parts if x not in ("crate", "super", "self", "Self")]
+        if not all(SNAKE.fullmatch(x) for x in parts):
+            return None  # a foreign type's associated function
+        if parts:
+            hint = parts[-1]
+    return name, hint
+
+
+def _opens_call_unconditionally(blank: str, lo: int, hi: int) -> bool:
+    """Is `Call::start` the FIRST STATEMENT of `blank[lo:hi]`, before any branch?
+
+    CONJUNCT 2 OF THE CREDITING RULE, and the reason it is not "at brace depth
+    one" is `gateway`'s own two shapes. Depth is where an earlier attempt at this
+    stopped, and it is measurably too weak:
+
+      - `dispatch::measured` opens its `Call` as the first thing its body does,
+        before the work it measures. Nothing it is handed can avoid that `Call`,
+        so a caller whose whole result is `measured(..)` is instrumented BY it.
+      - `dispatch::tools_call` opens its `Call` at the bottom of four statements,
+        below an early `return` on the throttle path. Its `Call` is CONDITIONAL —
+        and yet the `match` and `if let` blocks above it all open AND CLOSE, so
+        the net bracket depth where its `Call::start` sits is one, exactly like
+        `measured`'s. A depth test credits both and cannot tell them apart.
+
+    Nothing before the `Call::start` may therefore be a statement boundary, a
+    block, or an exit: no `;` at depth zero, no `{` at depth zero, no `?`, no
+    control-flow keyword, and no `|` (a closure would put the `Call` somewhere
+    that runs when somebody else decides, or never).
+
+    A callee that fails this is not refused. Its CALLER is refused credit, and
+    then has to open a `Call` in its own body — see `_result_span` on which
+    direction an over-strict rule errs in.
+    """
+    ilo, ihi = _inner_span(blank, lo, hi)
+    idx = blank.find(CALL, ilo, ihi)
+    if idx < 0:
+        return False
+    prefix = blank[ilo:idx]
+    if "?" in prefix or BRANCH_KW.search(prefix):
+        return False
+    depth = 0
+    for c in prefix:
+        if c in "([{":
+            if c == "{" and depth == 0:
+                return False
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif depth == 0 and c in ";|":
+            return False
+    return True
+
+
+def _instrumented(crate: Crate, path: str, lo: int, hi: int):
+    """Is this unit instrumented — by itself, or by the one callee it cannot avoid?
+
+    Returns (True, None) or (False, hint) where `hint` is (kind, name) naming why
+    no credit was available. That is not a separate failure: the unit has already
     failed for want of a `Call::start`. It only makes the message say WHERE the
-    search stopped instead of implying the code is empty.
+    rule stopped instead of implying the code is empty.
 
-    `own` distinguishes the unit's own body from a function it delegates to — see
-    `_opens_call`, which is where that distinction is spent.
+    ITS OWN BODY IS ACCEPTED ON ANY PATH, unchanged and deliberately: a handler
+    that opens its `Call` inside an `if` has still made a decision about its own
+    paths, and demanding otherwise would redden trees over somebody else's
+    function.
 
-    `seen` is keyed by DEFINITION, not by name. Keying it by name was correct
-    while the search was file-local and is not now: `gateway` defines three
-    `routes`, and one visit would have blocked the other two.
+    A CALLEE IS ONE HOP AND NEVER TWO. The recursion this replaces is what ledger
+    838 measured as a loosening: it followed `guard`, found no `Call` it would
+    accept there, then followed `guard`'s OWN callee `too_many` and accepted the
+    `Call` on its throttle-refusal arm — so deleting a handler's own `Call::start`
+    left the handler green two hops out. There is no chain in this estate to
+    justify the depth: every gRPC wrapper opens its own `Call`, and `gateway`'s
+    only credited units are two arms whose whole body is one call. One hop is also
+    the tighter direction, which is the direction ADR-0645 allows.
     """
     blank = crate.files[path][1]
-    if _opens_call(blank, lo, hi, top_only=not own):
+    if CALL in blank[lo:hi]:
         return True, None
-    if depth >= MAX_DEPTH:
-        return False, None
-    seen = seen if seen is not None else set()
-    hint = None
-    for name, module_hint in _call_sites(blank[lo:hi]):
-        target = crate.resolve(name, module_hint, path)
-        if target is AMBIGUOUS:
-            hint = hint or ("ambiguous", name)
-            continue
-        if target is None:
-            # Only a snake_case name is worth naming as a dead end. `Some(..)`
-            # and `Outcome { .. }` are constructors, not calls the search failed
-            # to follow, and reporting them as such makes the hint noise.
-            if SNAKE.fullmatch(name):
-                hint = hint or ("unfollowed", name)
-            continue
-        key = (target.path, target.lo)
-        if key in seen:
-            continue
-        seen.add(key)
-        ok, deeper = _instrumented(
-            crate, target.path, target.lo, target.hi, False, seen, depth + 1
-        )
-        if ok:
-            return True, None
-        hint = hint or deeper
-    return False, hint
+    call = _result_call(blank, lo, hi)
+    if call is None:
+        return False, ("no-result", None)
+    name, module_hint = call
+    target = crate.resolve(name, module_hint, path)
+    if target is AMBIGUOUS:
+        return False, ("ambiguous", name)
+    if target is None:
+        # Only a snake_case name is worth naming as a dead end. `Some(..)` and
+        # `Outcome { .. }` are constructors, not calls the rule failed to follow,
+        # and reporting them as such makes the hint noise.
+        return False, (("unfollowed", name) if SNAKE.fullmatch(name) else ("no-result", None))
+    tblank = crate.files[target.path][1]
+    if _opens_call_unconditionally(tblank, target.lo, target.hi):
+        return True, None
+    return False, ("conditional", name)
 
 
 def _check(path: str, label: str, lo: int, hi: int, idx: int, crate: Crate):
@@ -808,14 +990,21 @@ def _check(path: str, label: str, lo: int, hi: int, idx: int, crate: Crate):
         if not reason:
             yield f"{path}: `{label}` is marked exempt with no reason"
         return
-    tail = ""
-    if hint and hint[0] == "unfollowed":
-        tail = f" (the search could not follow the call to `{hint[1]}`)"
-    elif hint and hint[0] == "ambiguous":
+    kind = hint[0] if hint else None
+    if kind == "unfollowed":
+        tail = f" (the call to `{hint[1]}` leaves this crate, so it cannot be credited)"
+    elif kind == "ambiguous":
         tail = (
-            f" (the search stopped at `{hint[1]}`, which this crate defines in more "
-            "than one module — qualify the call with its module)"
+            f" (`{hint[1]}` is this unit's result, but is a name this crate defines in "
+            "more than one module — qualify the call with its module)"
         )
+    elif kind == "conditional":
+        tail = (
+            f" (`{hint[1]}` is this unit's result, but its `Call::start` is not its "
+            "first statement, so it does not run on every path into it)"
+        )
+    else:
+        tail = ""
     yield f"{path}: `{label}` opens no observe::Call{tail}"
 
 
@@ -1054,10 +1243,16 @@ def main(paths):
             "one is the whole requirement.\n\n"
             "A module that quietly stops emitting looks exactly like a module\n"
             "nobody called, which is the reading that would break D15.\n\n"
-            "The search follows calls ACROSS the modules of a crate, so a handler\n"
-            "that delegates is instrumented wherever its `Call::start` really is.\n"
-            "It refuses to guess between two same-named functions: qualify the call\n"
-            "with its module and the search follows it.\n\n"
+            "A handler that DELEGATES is instrumented by its callee, across the\n"
+            "modules of a crate, on two conditions and no fewer:\n\n"
+            "  1. the call is the handler's whole result — its tail expression or\n"
+            "     its sole return. More than one way out means no credit.\n"
+            "  2. the callee opens its `Call::start` as its FIRST statement, so\n"
+            "     nothing the handler does can avoid it.\n\n"
+            "A helper that records only its own refusals therefore instruments\n"
+            "nothing; open a `Call` in the handler instead. Resolution refuses to\n"
+            "guess between two same-named functions: qualify the call with its\n"
+            "module.\n\n"
             "An omission that is deliberate is written down, above the arm or the\n"
             "function, WITH A REASON:\n\n"
             "    // observe-coverage: exempt — why this one records nothing\n"
