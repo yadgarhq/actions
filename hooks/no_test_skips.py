@@ -158,6 +158,11 @@ def audit_cargo(text: str):
             "every binary reported zero passing tests, so nothing here says a test "
             "executed"
         )
+    if totals["failed"]:
+        problems.append(
+            f"{totals['failed']} test(s) FAILED. A `test result:` line with a "
+            "non-zero `failed` count is not a green audit"
+        )
     return problems, matches, totals, ignored_names
 
 
@@ -305,14 +310,34 @@ def ignored_is_covered(path: Path, named: set[str], unfiltered: bool, calls_shar
     """Why an `#[ignore]` in `path` still executes, or None when nothing runs it.
 
     Two facts, and neither is a marker anybody writes for this gate's benefit.
+
+    THE TLS CLAUSE BELOW IS GATED ON `target_of(path) is not None` because the
+    private-CA step it describes selects targets by `cargo metadata` kind
+    `test` — see `ci-pr.yaml`'s `cargo test --all-features --test "$t"`, where
+    `$t` comes only from targets whose kind is `test`. A file compiled into a
+    lib or bin target can never be selected by `--test <name>`, so naming
+    `TLS_CONTRACT` there grants no real coverage. `target_of(path) is not
+    None` is exactly the same test this function already uses for the named-
+    target branch below, applied here first.
+
+    TWO STATED LIMITS of the TLS clause, left open rather than closed here:
+      - `TLS_CONTRACT in read(path)` is a whole-file substring match, not a
+        parse of code versus comment. A test gutted to a stub keeps the
+        exemption as long as the old comment naming the contract survives.
+      - The step that actually executes the named suite lives in
+        `yadgarhq/actions`, not in the repository this function walks.
+        Deleting that step leaves every consumer's exemption standing with
+        nothing running it. This repository's own falsification tests cover
+        only a consumer-side rename of the variable, not a deletion of the
+        step; that stronger gap is not closed by anything here.
     """
-    if calls_shared and TLS_CONTRACT in read(path):
+    target = target_of(path)
+    if calls_shared and target is not None and TLS_CONTRACT in read(path):
         return (
             f"names {TLS_CONTRACT}, so the private-CA step in {SHARED_WORKFLOW} "
             "selects this suite, runs it with --ignored and refuses unless at "
             "least one test passed with none left ignored"
         )
-    target = target_of(path)
     if target is not None and target in named:
         return f"a workflow in this repository runs `cargo test --test {target} -- --ignored`"
     if target is None and unfiltered:

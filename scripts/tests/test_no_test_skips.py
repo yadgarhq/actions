@@ -306,6 +306,31 @@ def test_the_shared_workflow_without_the_contract_is_refused(tmp_path):
     assert run(root).returncode == 1
 
 
+def test_the_tls_contract_in_a_lib_target_is_refused(tmp_path):
+    """THE CASE THAT PROVES THE EXEMPTION KEYS ON WHAT THE STEP CAN SELECT.
+    `ci-pr.yaml`'s private-CA step reads `cargo metadata` and runs
+    `cargo test --test "$t"` only for targets of kind `test` — a file compiled
+    into the lib target can never be named by `--test`. So the same marker
+    that is genuinely covered in `tests/engine_tls.rs`
+    (`test_the_tls_contract_with_the_shared_workflow_is_accepted`, the paired
+    near-miss) grants no real coverage from a lib-target path, and moving a
+    TLS test from `tests/` into `src/` — one ordinary refactor — must still
+    red."""
+    root = tree(
+        tmp_path,
+        {
+            "Cargo.toml": MANIFEST,
+            "src/engine/tests.rs": IGNORED_TEST
+            + '\nfn dsn() -> String { std::env::var("YADGAR_TEST_TLS_DSN").unwrap() }\n',
+            ".github/workflows/ci.yaml": CALLS_SHARED,
+        },
+    )
+    result = run(root)
+    assert result.returncode == 1
+    assert "the_ignored_one" in result.stderr
+    assert "nothing in this repository executes it" in result.stderr
+
+
 # --------------------------------------------------------------------------
 # `#[cfg]` narrowing a test out of every build there is.
 # --------------------------------------------------------------------------
@@ -726,6 +751,22 @@ def test_a_run_where_nothing_passed_is_refused(tmp_path):
     result = audit(tmp_path, line)
     assert result.returncode == 1
     assert "zero passing tests" in result.stderr
+
+
+def test_a_failed_run_is_refused(tmp_path):
+    """MEASURED: `test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured;
+    0 filtered out` audited GREEN before this test existed — `totals["failed"]`
+    was parsed and printed but never asserted on. In the wiring this repository
+    ships, `set -euo pipefail` aborts before the audit ever sees a failing run,
+    but `--audit-cargo` is a published entry point on its own, and anything
+    wiring it outside that pipeline inherited the hole."""
+    line = (
+        "test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; "
+        "0 filtered out; finished in 0.02s\n"
+    )
+    result = audit(tmp_path, line)
+    assert result.returncode == 1
+    assert "1 test(s) FAILED" in result.stderr
 
 
 def test_one_real_line_beside_an_empty_doctest_line_is_accepted(tmp_path):
