@@ -45,6 +45,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 GATE = Path(__file__).resolve().parents[2] / "hooks" / "no_test_skips.py"
 REPO = Path(__file__).resolve().parents[2]
@@ -656,9 +657,18 @@ def test_an_empty_tree_reports_what_it_examined(tmp_path):
 
 def test_the_gate_does_not_refuse_its_own_repository(tmp_path):
     """A gate that cannot survive its own rule is a gate somebody switches off.
-    This is also the check that catches a pattern which matches its own source."""
+    This is also the check that catches a pattern which matches its own source.
+
+    THE SECOND ASSERTION IS NOT DECORATION (ADR-0645/0646), and this session
+    falsified the version without it. While `.claude` was in `PRUNE` and the
+    match was still made against the ABSOLUTE path, this test passed vacuously:
+    the working clone sat under `~/.claude/jobs/...`, the whole tree was pruned,
+    the walk examined nothing, and the gate exited 0. A green over zero files is
+    the failure mode, so the file count is asserted beside the verdict."""
     result = run(REPO)
     assert result.returncode == 0, result.stdout + result.stderr
+    assert "0 python files" not in result.stdout, result.stdout
+    assert "0 workflows" not in result.stdout, result.stdout
 
 
 # --------------------------------------------------------------------------
@@ -836,3 +846,202 @@ def test_the_pytest_wrapper_forwards_a_real_failure(tmp_path):
     result = run_pytest_mode(tmp_path, "def test_one():\n    assert 1 == 2\n")
     assert result.returncode != 0
     assert "assert 1 == 2" in result.stdout
+
+
+# --------------------------------------------------------------------------
+# LEDGER 860 — the walk sees the FILESYSTEM, so a second checkout inside the
+# tree is judged as though it were the repository.
+# --------------------------------------------------------------------------
+
+# THE FIXTURE IS A REAL DIRECTORY TREE rather than a constructed path list,
+# because the defect is precisely that `walk` reads the filesystem: `tree()`
+# writes these files to disk and the gate is a subprocess over that disk.
+AGENT_WORKTREE = ".claude/worktrees/stale-branch/tests/suite.rs"
+
+
+def test_an_ignored_test_in_an_agent_worktree_is_not_reported(tmp_path):
+    """LEDGER 860, and it blocked every local commit in `yadgarhq/iam-db`.
+
+    `.claude/worktrees/<name>` is a git worktree an agent left behind. It is a
+    SECOND CHECKOUT, so its contents belong to another branch, and judging this
+    repository by them is the same error `.ci-actions` is pruned for. The
+    signature is a hook that refuses locally while CI stays green, because CI
+    clones afresh and has no such directory.
+
+    The assertion on the `examined:` counts is load-bearing. A `PRUNE` entry that
+    pruned too much would also make the refusal disappear, so this reads the
+    number of files the walk still visited: the repository's own one, and not the
+    worktree's.
+    """
+    root = tree(
+        tmp_path,
+        {
+            "Cargo.toml": MANIFEST,
+            "tests/suite.rs": "#[test]\nfn the_real_one() {\n    assert!(true);\n}\n",
+            ".github/workflows/ci.yaml": WORKFLOW_PLAIN,
+            AGENT_WORKTREE: IGNORED_TEST,
+        },
+    )
+    result = run(root)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert ".claude" not in result.stdout + result.stderr
+    assert "1 rust files" in result.stdout
+    assert "1 test items" in result.stdout
+
+
+def test_the_same_ignored_test_in_the_repository_is_still_refused(tmp_path):
+    """THE COMPANION ASSERTION ON THE PRISTINE INPUT (ADR-0646). The test above
+    passes under a `PRUNE` that prunes everything, so it proves nothing on its
+    own. This is the identical fixture at a path that IS the repository, and it
+    must stay red — same file content, same tree shape, one property flipped."""
+    root = tree(
+        tmp_path,
+        {
+            "Cargo.toml": MANIFEST,
+            "tests/suite.rs": "#[test]\nfn the_real_one() {\n    assert!(true);\n}\n",
+            ".github/workflows/ci.yaml": WORKFLOW_PLAIN,
+            "worktrees/stale-branch/tests/suite.rs": IGNORED_TEST,
+        },
+    )
+    result = run(root)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "worktrees/stale-branch/tests/suite.rs" in result.stderr
+    assert "the_ignored_one" in result.stderr
+
+
+# --------------------------------------------------------------------------
+# LEDGER 842 — what FEEDS the audit, read out of the workflow rather than
+# asserted about a constructed log.
+# --------------------------------------------------------------------------
+
+CI_PR = REPO / ".github" / "workflows" / "ci-pr.yaml"
+
+
+def cargo_capture_lines():
+    """Every command in `ci-pr.yaml` that captures a `cargo test` run into a file.
+
+    PARSED, NOT GREPPED, and the distinction is the whole test. `ci-pr.yaml`
+    carries three prose comments about `tee` inside `run:` blocks and one more in
+    a YAML comment between steps, so a grep over the file text finds discussion
+    rather than commands. This walks the parsed document, takes only `run:`
+    scripts, drops comment-only lines, and rejoins `\\` continuations so that a
+    refactor splitting `cargo test` from its pipe cannot slip past.
+    """
+    document = yaml.safe_load(CI_PR.read_text(encoding="utf-8"))
+    found = []
+    for job_name, job in document["jobs"].items():
+        for step in job.get("steps") or []:
+            script = step.get("run")
+            if not script:
+                continue
+            logical = []
+            pending = ""
+            for raw in script.splitlines():
+                if raw.strip().startswith("#"):
+                    continue
+                if raw.rstrip().endswith("\\"):
+                    pending += raw.rstrip()[:-1] + " "
+                    continue
+                logical.append(pending + raw)
+                pending = ""
+            if pending:
+                logical.append(pending)
+            for line in logical:
+                if "cargo test" in line and "tee" in line:
+                    found.append((job_name, step.get("name", "<unnamed>"), line.strip()))
+    return found
+
+
+def test_no_cargo_capture_merges_stderr_into_the_anchored_parse():
+    """LEDGER 842, and the same defect PR #71 fixed twice in the two steps above.
+
+    MEASURED in #71 on a scratch crate: libtest writes `test result:` to STDOUT
+    while cargo writes `Compiling`, `Running` and `Finished` to STDERR. Every
+    reader of these captures is ANCHORED — `--audit-cargo` matches `^test
+    result:`, and the private-CA step runs `grep -E '^test result:'` — so one
+    interleaved progress line in front of a summary makes that summary invisible
+    and the reader reports "no test result line" on a HEALTHY run. It fails
+    closed, which makes it a latent FALSE RED rather than a false green.
+
+    Merging the two descriptors is the only way the interleave can happen, so
+    capturing stdout alone removes the surface rather than tolerating it. Stderr
+    is not lost: unredirected, it still reaches the job log.
+    """
+    captures = cargo_capture_lines()
+    # ADR-0645, and the class this estate has now measured five times: a scan
+    # that found nothing must not report green. Three capture sites exist — the
+    # `--all-features` step, the `--no-default-features` step and the private-CA
+    # step — so a refactor that deletes one reds here instead of passing over an
+    # empty sweep.
+    assert len(captures) >= 3, captures
+    merged = [c for c in captures if "2>&1" in c[2]]
+    assert merged == [], (
+        "these captures merge cargo's stderr into a file read by an anchored "
+        f"parse, so a progress line can hide the summary: {merged}"
+    )
+
+
+def test_prune_is_not_matched_against_the_path_that_leads_to_the_tree(tmp_path):
+    """LEDGER 860, the half that turns a false red into a FALSE GREEN.
+
+    MEASURED against the shipped v1.20.0 gate: one `yadgarhq/store` checkout
+    examined 18 Rust files at `/tmp/clean/store` and ZERO at `/tmp/target/store`,
+    exiting 0 both times. `PRUNE` was matched over `path.parts` — the whole
+    ABSOLUTE path — so a repository whose ancestor directory happened to be named
+    `target`, `vendor`, `venv` or `node_modules` had this gate examine nothing and
+    report green.
+
+    It is the reason `.claude` could not just be appended to the set: this
+    estate's agents work inside `~/.claude/worktrees/<name>`, so the absolute
+    match would have made the gate a no-op in precisely those checkouts.
+
+    THE REFUSAL IS THE ASSERTION, not the file count. A skip the gate must refuse
+    is planted in the tree, and the tree is placed under a pruned ancestor name.
+    """
+    parent = tmp_path / "target" / "node_modules" / ".claude"
+    parent.mkdir(parents=True)
+    root = tree(
+        parent,
+        {
+            "Cargo.toml": MANIFEST,
+            "tests/suite.rs": IGNORED_TEST,
+            ".github/workflows/ci.yaml": WORKFLOW_PLAIN,
+        },
+    )
+    result = run(root)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "the_ignored_one" in result.stderr
+
+
+def test_the_default_root_is_the_working_directory(tmp_path):
+    """THE INVOCATION EIGHTEEN REPOSITORIES ACTUALLY USE, and it had no test.
+
+    `.pre-commit-hooks.yaml` publishes this gate with `pass_filenames: false` and
+    no arguments, so every consumer runs it with `--root` at its default of `"."`
+    and the tree is whatever directory pre-commit is in. That is a DIFFERENT code
+    path from the `--root <absolute>` every other test here uses: the walk yields
+    relative paths, and `relative_to(Path("."))` has to be a no-op rather than an
+    error for the pruning to work at all. Nothing asserted that until ledger 860
+    changed the pruning, so this pins the real invocation in place.
+    """
+    root = tree(
+        tmp_path,
+        {
+            "Cargo.toml": MANIFEST,
+            "tests/suite.rs": IGNORED_TEST,
+            ".github/workflows/ci.yaml": WORKFLOW_PLAIN,
+            AGENT_WORKTREE: IGNORED_TEST,
+        },
+    )
+    result = subprocess.run(
+        [sys.executable, str(GATE)],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=root,
+    )
+    # The repository's own `#[ignore]` is refused; the worktree's is not reported.
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "tests/suite.rs" in result.stderr
+    assert ".claude" not in result.stdout + result.stderr
+    assert "1 ignored attributes" in result.stderr

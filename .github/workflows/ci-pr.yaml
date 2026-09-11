@@ -908,7 +908,18 @@ jobs:
           for t in "${wanted[@]}"; do
             out="$RUNNER_TEMP/$t.ignored.txt"
             rc=0
-            cargo test --all-features --test "$t" -- --ignored 2>&1 | tee "$out" || rc=$?
+            # NOT `2>&1`, for the reason the two `cargo test` steps above
+            # record at length (ledger 842). libtest writes `test result:` to
+            # STDOUT while cargo writes `Compiling`/`Running`/`Finished` to
+            # STDERR, and the only reader of "$out" is the ANCHORED
+            # `grep -E '^test result:'` below — so one interleaved progress line
+            # makes the summary invisible and this step reports "printed no
+            # summary" on a healthy run. It fails closed, so the cost is a false
+            # RED rather than a false green, and capturing stdout alone removes
+            # the interleave surface instead of tolerating it. cargo's stderr is
+            # not lost; unredirected it still reaches the job log, and the
+            # engine's own log is grouped below on a non-zero status.
+            cargo test --all-features --test "$t" -- --ignored | tee "$out" || rc=$?
             if [ "$rc" -ne 0 ]; then
               echo "::group::the engine's log"
               docker logs yadgar-private-ca-engine || true
