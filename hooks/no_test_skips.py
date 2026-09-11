@@ -208,9 +208,25 @@ def audit_pytest_tally(text: str):
 # which is this repository's source. `.ci-actions` is the path `ci-pr.yaml` uses
 # for its second checkout of yadgarhq/actions, and scanning it would judge one
 # repository's tree by another's contents.
+#
+# LEDGER 860 ADDED `.claude`, AND IT IS THE SAME CLASS AS `.ci-actions` rather
+# than a noise filter. `.claude/worktrees/<name>` is where an agent's git
+# worktree lives, so its files are ANOTHER BRANCH's files, and a stale one
+# blocked every local commit in `yadgarhq/iam-db` while CI stayed green — CI
+# clones afresh and never has the directory. A gate that refuses locally and
+# passes remotely is the shape that gets a gate switched off.
+#
+# THE RESIDUAL, stated rather than discovered later: this is a NAME, so a
+# worktree the operator puts anywhere else (`<repo>/wt-foo`) is still walked.
+# Only reading the index — `git ls-files` — closes the class, and ledger 845
+# holds that question. It is deferred because it would change this gate's
+# interface from "any tree" to "a git repository", which both the constructed
+# fixtures in `scripts/tests/test_no_test_skips.py` and the `--root <clone>`
+# sweep across nineteen repositories depend on.
 PRUNE = {
     ".git",
     ".ci-actions",
+    ".claude",
     "target",
     "node_modules",
     ".venv",
@@ -224,11 +240,27 @@ PRUNE = {
 
 
 def walk(root: Path, suffixes: tuple[str, ...]):
-    """Every file under `root` with one of `suffixes`, build output pruned."""
+    """Every file under `root` with one of `suffixes`, build output pruned.
+
+    PRUNE IS MATCHED INSIDE THE TREE, NEVER AGAINST THE PATH THAT LEADS TO IT,
+    and until ledger 860 it was matched against the whole absolute path. MEASURED
+    against the shipped v1.20.0 gate: the same `yadgarhq/store` checkout examined
+    18 Rust files at `/tmp/clean/store` and ZERO at `/tmp/target/store`, exiting 0
+    in both cases. So a repository living anywhere under a directory named
+    `target`, `vendor`, `venv`, `node_modules`, `.venv` or any cache in the set
+    had this gate examine nothing and report green — the check-that-cannot-fail
+    class (ADR-0645), reached through the operator's choice of directory rather
+    than through anything in the tree.
+
+    That is also why `.claude` could not simply be added to the set. This
+    estate's agents work in `~/.claude/worktrees/<name>`, so the absolute match
+    would have turned the gate into a no-op in exactly the checkouts ledger 860
+    is about, trading a false red for a false green.
+    """
     for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
-        if any(part in PRUNE for part in path.parts):
+        if any(part in PRUNE for part in path.relative_to(root).parts):
             continue
         if path.suffix in suffixes:
             yield path

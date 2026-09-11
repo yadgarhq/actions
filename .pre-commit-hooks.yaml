@@ -484,11 +484,33 @@
 # package, and the failure surfaces in the consuming repository where nothing
 # explains it. Stdlib only.
 #
-# ADOPTION IS PER REPOSITORY AND IS NOT AUTOMATIC (ADR-0577, ADR-0607). Measured
-# against `origin/main` of all nineteen unarchived repositories on 2026-09-10:
-# seventeen pass, and `yadgarhq/docs` and `yadgarhq/estate` each carry one real
-# finding this gate refuses. Neither may adopt it before that finding is fixed —
-# ADR-0584 forbids shipping a gate that hard-fails a known target.
+# ADOPTION IS PER REPOSITORY AND IS NOT AUTOMATIC (ADR-0577, ADR-0607), and
+# ADR-0584 forbids adopting a gate in a repository it hard-fails. That is the
+# durable rule, and it carries no count on purpose.
+#
+# LEDGER 847 — THIS FILE MAY STATE FACTS ABOUT THE GATE, NEVER STANDING STATUS
+# ABOUT REPOSITORIES IT DOES NOT CONTAIN. Two numbers sat in this block and only
+# one rotted. "Thirteen `#[ignore]` tests between `store` and `estate`" is a
+# property of the exemption logic above, re-measured as 3 + 10 on 2026-09-11 and
+# still true. "Seventeen pass, and `docs` and `estate` each carry one real
+# finding" was a claim about two OTHER repositories' current state, and it was
+# false within a day of being written — `yadgarhq/docs` 0350052f and
+# `yadgarhq/estate` 18471e34 both landed on 2026-09-10, hours after this file
+# shipped. A reader was left believing two repositories were still blocked.
+#
+# WHAT REPLACES IT IS HISTORY PLUS A COMMAND, because the count cannot be
+# derived. Answering "how many repositories pass today" needs `origin/main` of
+# nineteen repositories, which is a network read no pre-commit hook and no
+# offline test may perform, so nothing in this repository can assert it and a
+# typed number will rot again. Re-measure instead:
+#
+#   git clone --depth 1 git@github.com:yadgarhq/<repo>.git <tree>
+#   python3 hooks/no_test_skips.py --root <tree>
+#
+# Run that way across all nineteen unarchived repositories on 2026-09-11:
+# NINETEEN PASS, zero findings, across 292 Rust files, 1546 test items and 13
+# `#[ignore]` attributes. Read that as a dated observation, not as this file's
+# standing claim about anybody's tree.
 - id: no-test-skips
   name: ledger 837 — no test silently stops running
   language: script
