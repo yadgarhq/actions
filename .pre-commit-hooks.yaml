@@ -559,15 +559,17 @@
 # never that the policy is enabled — demanding `true` would refuse the design D80
 # chose.
 #
-# TWO FLOORS, NOT ONE, and a tree with nothing to judge is RED. `MINIMUM_CHARTS`
+# THREE WAYS TO GO BLIND, and a tree with nothing to judge is RED. `MINIMUM_CHARTS`
 # catches the walk finding nothing — a `chart/` to `charts/` rename — and
 # `MINIMUM_ASSERTIONS` catches every chart turning into something the gate does
-# not judge, which is what a broken `kind: Deployment` scan looks like: the chart
-# count holds while the assertions drop to zero. One floor cannot see both.
-# Ledger 715's `MINIMUM_SITES=2` is the precedent and `certificate_usages.py`
-# carries the same pair. Both counts are in the success line.
+# not judge AT ONCE: the chart count holds while the assertions drop to zero.
+# Neither catches SOME charts judged and others not in the same tree, where the
+# judged ones keep the assertion total above the floor — so every chart's
+# `judged` flag is checked against the chart count directly. Ledger 715's
+# `MINIMUM_SITES=2` is the precedent and `certificate_usages.py` carries the
+# first pair. All three counts are in the success line.
 #
-# `language: script` AND STDLIB ONLY, the reason six hooks above already carry: a
+# `language: script` AND STDLIB ONLY, the reason eight hooks above already carry: a
 # `language: python` hook pip-installs this repository, which is not a package,
 # and the failure surfaces in the CONSUMING repository where nothing explains it.
 # So the YAML scan is hand-written, and `scripts/tests/test_chart_baseline.py`

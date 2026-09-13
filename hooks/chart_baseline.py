@@ -26,9 +26,10 @@ refused, so the field set is closed and adding to it needs the plan to change
 first.
 
 THE GATE READS TWO FILES PER CHART, and that is forced rather than chosen. No
-module template contains `35` or `ScheduleAnyway`: every value arrives through
-`.Values.*`, so the template carries the KEY and `values.yaml` carries the
-NUMBER, and an assertion against either alone is fail-open. A template setting
+module template's NON-COMMENT line sets `35` or `ScheduleAnyway` as a literal:
+every value arrives through `.Values.*`, so the template carries the KEY and
+`values.yaml` carries the NUMBER, and an assertion against either alone is
+fail-open. A template setting
 `terminationGracePeriodSeconds: {{ . }}` under `{{- with .Values.terminationGracePeriodSeconds }}`
 renders NOTHING when the value is absent, `0` or `false` — the template's own
 comment says so — and a chart can keep every `topologySpreadConstraints` line and
@@ -37,6 +38,16 @@ assertion is a pair, and every resolution has THREE outcomes rather than two:
 resolved-and-good, resolved-and-bad, and UNRESOLVABLE, which is red. A gate whose
 parse failure is spelled the same way as a pass is the second failure mode this
 estate keeps shipping.
+
+THE GUARD CHECK ITSELF SKIPS THIS MODEL (ledger 897, not fixed here). It reports
+a guard as "left off" for anything not truthy, and an anchor, an alias, a
+sequence, a template expression or a deleted key under the guard are ALL not
+truthy — `values.raw()` returns `None` for a construct this scan does not model,
+the same `None` it returns for a key that is genuinely absent. So
+`terminationGracePeriodSeconds: &grace 35` prints the identical "values.yaml
+leaves it off" message a truly-absent key would print, even though the anchor
+sets it. The exit code is still red either way; the message is not accurate for
+the modelled-but-not-a-plain-scalar case.
 
 THE GRACE PERIOD IS ASSERTED AS A RULE, NEVER AS THE LITERAL 35 (ADR-0601,
 ADR-0602). All seven module charts ship 35 today, and `chart-hardening.md` still
@@ -111,17 +122,22 @@ tick. And `yadgarhq/actions` does not reference it either — this repository ho
 no chart — so what gates this file on every commit is `pytest-scripts`, not the
 hook itself.
 
-TWO FLOORS, NOT ONE, because there are two independent ways to go blind and one
-floor cannot see both (ledger 715's `MINIMUM_SITES=2`, and
-`certificate_usages.py`'s pair). `MINIMUM_CHARTS` catches the walk finding
-nothing at all — a `chart/` to `charts/` rename, a restructured repository.
-`MINIMUM_ASSERTIONS` catches every chart turning into something this gate does
-not judge, which is what a broken `kind: Deployment` detection looks like: the
-chart count stays 7 while the number of assertions evaluated drops to 0. Both are
-floors rather than the current counts, because adding a module is a legitimate
-change and must not redden. Both counts are in the success line.
+THREE WAYS TO GO BLIND, and no one check sees all of them (ledger 715's
+`MINIMUM_SITES=2`, and `certificate_usages.py`'s pair, extended by one). `MINIMUM_CHARTS`
+catches the walk finding nothing at all — a `chart/` to `charts/` rename, a
+restructured repository. `MINIMUM_ASSERTIONS` catches every chart turning into
+something this gate does not judge AT ONCE, which is what a broken
+`kind: Deployment` detection used to look like before this file's own regex
+carried that defect: the chart count stays 7 while the number of assertions
+evaluated drops to 0. Neither catches a THIRD way: some charts judged, others not,
+in the same tree — the total assertions stay well above the floor because the
+judged charts carry it, and the tree reports "N charts, N-1 judged" with exit 0.
+So a chart's `judged` flag is checked against the chart count directly: every
+discovered chart must be judged, or the run is red. All three are floors rather
+than the current counts, because adding a module is a legitimate change and must
+not redden. All three counts are in the success line.
 
-`language: script` AND STDLIB ONLY, the reason six hooks in
+`language: script` AND STDLIB ONLY, the reason eight hooks in
 `.pre-commit-hooks.yaml` already carry: `language: python` makes pre-commit
 pip-install this repository, which is not a package, and the failure surfaces in
 the CONSUMING repository where nothing explains it. So the YAML scan is
@@ -179,7 +195,18 @@ TRUE_WORDS = frozenset({"true", "yes", "on"})
 FALSE_WORDS = frozenset({"false", "no", "off", "null", "~", "0", '""', "''"})
 
 KEY_LINE = re.compile(r"^(?P<indent>[ ]*)(?P<key>[A-Za-z0-9_.\-]+):(?P<rest>.*)$")
-KIND_LINE = re.compile(r"^kind:\s*(?P<kind>[A-Za-z][A-Za-z0-9]*)\s*$")
+# `certificate_usages.py`'s `CERTIFICATE_KIND` carries the comment recording what
+# anchoring this on `$` alone cost, three times, one level further down each time
+# (ledger 720, actions#63). This gate shipped the same defect on its own first
+# publication: `kind: NetworkPolicy  # one ingress policy` and
+# `kind: "NetworkPolicy"` both went unrecognised (a false refusal), and worse,
+# `kind: Deployment  # the workload` went unrecognised too — which is a chart this
+# gate never judges, silently, since `MINIMUM_ASSERTIONS` cannot see one chart in
+# a many-chart tree going dark while the rest still pass. Tolerating leading
+# space, an optional quote and a trailing comment closes all three.
+KIND_LINE = re.compile(
+    r"^\s*kind:\s*[\"']?(?P<kind>[A-Za-z][A-Za-z0-9]*)[\"']?\s*(?:#.*)?$"
+)
 TEMPLATE_ACTION = re.compile(r"\{\{-?\s*(?P<word>[a-z]+)\b(?P<arg>[^}]*?)-?\}\}")
 VALUES_REFERENCE = re.compile(r"^\.Values\.(?P<path>[A-Za-z0-9_.]+)$")
 ANY_VALUES_REFERENCE = re.compile(r"\.Values\.([A-Za-z0-9_.]+)")
@@ -848,6 +875,24 @@ def main(argv=None) -> int:
             f"assertions evaluated, below the floor of {MINIMUM_ASSERTIONS}. The "
             f"charts were found and none was judged, which is what a broken "
             f"`kind: Deployment` scan looks like."
+        )
+        return 1
+    # A THIRD WAY TO GO BLIND, neither floor above catches: SOME charts judged,
+    # others not. `MINIMUM_ASSERTIONS` only sees the total across every chart, so
+    # one broken chart sitting beside N good ones keeps the total well above the
+    # floor while that one chart is never examined — "N charts, N-1 judged", green.
+    # Ledger 715's class, and independent of both `kind: Deployment` regex fixes:
+    # a legitimately different workload kind in the same tree looks identical to
+    # this gate. So every discovered chart is required to be judged; a chart this
+    # gate cannot judge must be pruned from the walk (moved out of `--root`)
+    # rather than left in it and outvoted by its neighbours.
+    if len(judged) < len(charts):
+        unjudged = sorted(verdict.chart for verdict in verdicts if not verdict.judged)
+        print(
+            f"chart-baseline: {len(charts)} charts found, {len(judged)} judged. "
+            f"{len(unjudged)} chart(s) were never examined: {', '.join(unjudged)}. "
+            f"A verdict over some of the charts is not a verdict. Prune an "
+            f"unjudgeable chart from this walk, or widen this gate to judge it."
         )
         return 1
     if findings:

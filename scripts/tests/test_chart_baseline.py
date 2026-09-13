@@ -575,7 +575,67 @@ def test_the_policy_is_found_by_kind_not_by_filename(tmp_path):
     assert result.returncode == 0, result.stdout
 
 
-# -------------------------------------------------------------- the two floors
+# --------------------------------------------- the kind: line, three ways wrong
+
+
+def test_a_trailing_comment_on_the_kind_line_does_not_hide_it(tmp_path):
+    """`kind: NetworkPolicy  # one ingress policy` used to be a false refusal."""
+    write_chart(
+        tmp_path,
+        templates__networkpolicy_yaml=swap(
+            NETWORK_POLICY,
+            "kind: NetworkPolicy\n",
+            "kind: NetworkPolicy  # one ingress policy\n",
+        ),
+    )
+    result = run(tmp_path)
+    assert result.returncode == 0, result.stdout
+
+
+def test_a_quoted_kind_value_does_not_hide_it(tmp_path):
+    """`kind: "NetworkPolicy"` used to be a false refusal too."""
+    write_chart(
+        tmp_path,
+        templates__networkpolicy_yaml=swap(
+            NETWORK_POLICY, "kind: NetworkPolicy\n", 'kind: "NetworkPolicy"\n'
+        ),
+    )
+    result = run(tmp_path)
+    assert result.returncode == 0, result.stdout
+
+
+def test_a_trailing_comment_on_kind_deployment_does_not_hide_the_chart(tmp_path):
+    """`kind: Deployment  # the workload` used to report `renders no Deployment`
+
+    with NO finding — the chart went unjudged and, beside another good chart,
+    the tree still exited 0. That silent half is closed below by the third
+    floor; this pins that the regex itself recognises the kind.
+    """
+    write_chart(
+        tmp_path,
+        templates__deployment_yaml=swap(
+            DEPLOYMENT, "kind: Deployment\n", "kind: Deployment  # the workload\n"
+        ),
+    )
+    result = run(tmp_path, "--report")
+    assert result.returncode == 0, result.stdout
+    assert "chart: PASS" in result.stdout
+
+
+def test_a_commented_out_kind_line_does_not_satisfy_the_requirement(tmp_path):
+    """`# kind: NetworkPolicy` must not count as the template declaring it."""
+    write_chart(
+        tmp_path,
+        templates__networkpolicy_yaml=swap(
+            NETWORK_POLICY, "kind: NetworkPolicy\n", "# kind: NetworkPolicy\n"
+        ),
+    )
+    result = run(tmp_path)
+    assert result.returncode == 1
+    assert "declares `kind: NetworkPolicy`" in result.stdout
+
+
+# ------------------------------------------------------------ the three floors
 
 
 def test_a_tree_with_no_chart_is_refused_rather_than_passed(tmp_path):
@@ -613,6 +673,28 @@ def test_a_vendored_subchart_is_not_this_repository_s_chart(tmp_path):
     assert result.returncode == 0, result.stdout
     assert "dependency" not in result.stdout
     assert "1 charts, 1 judged" in result.stdout
+
+
+def test_one_chart_unjudged_beside_a_good_one_trips_the_third_floor(tmp_path):
+    """Ledger 715's class: the good chart's assertions keep the total above the
+    second floor, so only a check on `judged` vs. `charts` catches this — the sum
+    of assertions alone cannot, since one broken/different chart hides beside a
+    passing one instead of the whole tree going to zero at once.
+    """
+    write_chart(tmp_path, name="good")
+    other = tmp_path / "unexamined"
+    (other / "templates").mkdir(parents=True)
+    (other / "Chart.yaml").write_text(CHART_YAML, encoding="utf-8")
+    (other / "templates" / "job.yaml").write_text(
+        "apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: helper\n",
+        encoding="utf-8",
+    )
+    result = run(tmp_path, "--report")
+    assert result.returncode == 1
+    assert "good: PASS" in result.stdout
+    assert "unexamined: not judged" in result.stdout
+    assert "2 charts found, 1 judged" in result.stdout
+    assert "never examined: unexamined" in result.stdout
 
 
 # ---------------------------------------------------- parse failures are red
