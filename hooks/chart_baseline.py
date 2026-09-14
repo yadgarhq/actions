@@ -1441,8 +1441,9 @@ class Part:
             f"{self.hook}: examined {self.examined}. It did NOT examine "
             f"{self.declined} — the `{self.sibling}` hook is what does, and this run "
             f"cannot say whether this repository references it (ADR-0685 split the "
-            f"gate; ADR-0577 makes adoption per repository). A green {self.hook} is a "
-            f"verdict over part of a chart's baseline, never over the whole of it."
+            f"gate; ADR-0577 makes adoption per repository). A {self.hook} verdict, "
+            f"green or red, covers part of a chart's baseline and never the whole "
+            f"of it."
         )
 
 

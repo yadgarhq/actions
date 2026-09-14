@@ -1485,7 +1485,7 @@ def test_each_half_names_what_it_did_not_examine_on_a_pass(tmp_path):
         # It must not imply the other half ran: this process cannot see the consumer's
         # `.pre-commit-config.yaml`, and ADR-0577 makes adoption per repository.
         assert "cannot say whether this repository references it" in tail, part
-        assert "verdict over part of a chart's baseline" in tail, part
+        assert "covers part of a chart's baseline" in tail, part
 
 
 def test_each_half_names_what_it_did_not_examine_on_a_refusal_too(tmp_path):
