@@ -43,6 +43,20 @@ seven module repositories on 2026-09-13:
   * `{{ . }}` UNDER A `with`, which is how all seven spell the grace period. Its
     value is legible only through the enclosing block.
 
+LEDGER 897 ADDED A SECOND BLOCK OF PAIRS, one per false refusal the review found,
+and every one of them was REPRODUCED against a scratch copy of `iam`'s real chart
+before it was fixed. The shapes: a `with` guard over a MAPPING; the four distinct
+causes that printed one wrong message; the `required "…"` and `| quote` wrappers the
+estate writes 163 times and this gate refused; `{{- else }}`; the preStop-sleep
+fail-open; and a Deployment at a filename other than `deployment.yaml`. Three more
+turned up while reproducing those — `$.Values.x`, `{{ .relative }}` inside a `with`,
+and a guard condition the gate could not read being DROPPED rather than refused.
+
+TWO OF THOSE NINE ARE FAIL-OPENS, not false refusals, and they are the ones worth a
+reader's attention: the grace floor silently fell from 35 to 30 when the preStop
+sleep was not spelled `preStopSleepSeconds`, and a key under `{{- if and A B }}` was
+judged as if it always rendered. A false refusal is loud. A fail-open is not.
+
 The gate is run as a SUBPROCESS in every verdict test, because its subject is a
 tree rather than a function — which is how pre-commit invokes it in a consumer.
 """
@@ -717,16 +731,616 @@ def test_a_multi_document_values_file_is_refused(tmp_path):
     assert "more than one YAML document" in result.stdout
 
 
-def test_a_deployment_spelled_outside_the_expected_path_is_refused(tmp_path):
+# LEDGER 897 ITEM 6, AND A DELIBERATE CONTRACT CHANGE. The test that stood here
+# asserted that a Deployment spelled outside `templates/deployment.yaml` is REFUSED,
+# which is what the shipped gate did. It is replaced rather than deleted, because the
+# shape it covered is now covered by two tests instead of one, and both halves of the
+# pair are asserted.
+#
+# WHY THE CONTRACT MOVED. `template.first()` read `templates/deployment.yaml` while
+# `declared_kinds` scanned all of `templates/`, so a chart with its workload at
+# another filename was judged against whatever sat at that path. Measured on a
+# scratch copy of `iam`'s real chart with the workload moved to `workload.yaml` and a
+# ConfigMap left at `deployment.yaml`: FIVE findings, of which FOUR were false — the
+# real template sets every field they named. Selecting the file BY its
+# `kind: Deployment` declaration is the property the ServiceAccount and NetworkPolicy
+# checks already have, and it makes the gate STRICTER: the Deployment is judged
+# wherever it is, rather than unjudged whenever it moves. The ambiguous shape — more
+# than one declaring template — is the one that is now refused, with one accurate
+# message instead of four false ones.
+
+
+def test_a_deployment_spelled_outside_the_expected_path_is_judged_there(tmp_path):
+    """The pod spec is found by its `kind:`, not by its filename."""
+    for grace, expected in ((35, 0), (29, 1)):
+        root = tmp_path / f"tree{grace}"
+        root.mkdir()
+        write_chart(
+            root,
+            templates__deployment_yaml=(
+                "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\ndata:\n  a: b\n"
+            ),
+            templates__workload_yaml=DEPLOYMENT,
+            values_yaml=swap(
+                VALUES,
+                "terminationGracePeriodSeconds: 35",
+                f"terminationGracePeriodSeconds: {grace}",
+            ),
+        )
+        result = run(root)
+        assert result.returncode == expected, result.stdout
+        if expected:
+            # The finding names the file that actually holds the pod spec.
+            assert "templates/workload.yaml" in result.stdout
+            assert "below the floor of 35s" in result.stdout
+
+
+def test_two_templates_declaring_a_deployment_are_refused(tmp_path):
+    """One pod spec per chart. Two, and there is no rule for choosing."""
+    write_chart(tmp_path, templates__canary_yaml=DEPLOYMENT)
+    result = run(tmp_path)
+    assert result.returncode == 1
+    assert "2 templates declare `kind: Deployment`" in result.stdout
+    assert "canary.yaml, deployment.yaml" in result.stdout
+
+
+# ------------------------------------------- ledger 897: the false refusals
+#
+# EVERY CASE BELOW IS A PAIR ON THE SAME TREE — the legitimate shape PASSES and a
+# genuinely broken variant of that same shape still REFUSES. A fix that only makes
+# things pass has removed a check rather than corrected one, and the gate's first
+# revision is this file's own evidence for why that matters: it reported "sets no
+# `maxSkew`" against all seven correct charts.
+#
+# THE SIX SHAPES THE LEDGER NAMED, plus three found while reproducing them, each
+# measured against a scratch copy of `iam`'s real chart on 2026-09-14 before being
+# fixed here.
+
+# The mapping-guard shape, spelled the way Helm actually renders it: inside
+# `{{- with .Values.topologySpread }}` the dot is REBOUND to the mapping, so
+# `.Values` is unreachable from that scope and `{{ .maxSkew }}` is the only legal
+# spelling of the inner references. A fixture keeping `{{ .Values.topologySpread.* }}`
+# inside the `with` would not render under Helm at all.
+WITH_MAPPING = (
+    DEPLOYMENT.replace(
+        "{{- if .Values.topologySpread.enabled }}", "{{- with .Values.topologySpread }}"
+    )
+    .replace("{{ .Values.topologySpread.maxSkew }}", "{{ .maxSkew }}")
+    .replace("{{ .Values.topologySpread.topologyKey }}", "{{ .topologyKey }}")
+    .replace(
+        "{{ .Values.topologySpread.whenUnsatisfiable }}", "{{ .whenUnsatisfiable }}"
+    )
+)
+
+
+def test_a_with_guard_over_a_mapping_is_seen_rather_than_read_as_off(tmp_path):
+    """ITEM 1. `scan_values` recorded only SCALARS, so a mapping parent had no entry,
+    `values.raw()` answered None and `is_truthy(None)` was False. The commonest Helm
+    guard idiom therefore reported that `values.yaml` "leaves it off" about a key it
+    plainly sets with four sub-keys.
+    """
+    write_chart(tmp_path, templates__deployment_yaml=WITH_MAPPING)
+    result = run(tmp_path)
+    assert result.returncode == 0, result.stdout
+    assert "0 findings" in result.stdout
+
+
+def test_the_same_mapping_guard_still_refuses_a_hard_spread(tmp_path):
+    """The red half: the guard is seen, and the value behind it is still judged."""
     write_chart(
         tmp_path,
-        templates__deployment_yaml=None,
-        templates__workload_yaml=DEPLOYMENT,
+        templates__deployment_yaml=WITH_MAPPING,
+        values_yaml=swap(
+            VALUES, "whenUnsatisfiable: ScheduleAnyway", "whenUnsatisfiable: DoNotSchedule"
+        ),
     )
     result = run(tmp_path)
     assert result.returncode == 1
-    assert "`templates/deployment.yaml`" in result.stdout
-    assert "which is not a state this gate accepts" in result.stdout
+    assert "not `ScheduleAnyway`" in result.stdout
+
+
+def test_a_mapping_guard_whose_mapping_is_absent_is_still_refused(tmp_path):
+    """And the message says ABSENT rather than the unmodelled-construct wording."""
+    write_chart(
+        tmp_path,
+        templates__deployment_yaml=WITH_MAPPING,
+        values_yaml=VALUES.replace(
+            """topologySpread:
+  enabled: true
+  maxSkew: 1
+  topologyKey: kubernetes.io/hostname
+  whenUnsatisfiable: ScheduleAnyway
+""",
+            "",
+        ),
+    )
+    result = run(tmp_path)
+    assert result.returncode == 1
+    assert "sets no `topologySpread` at all" in result.stdout
+
+
+# ITEM 2. FIVE CAUSES PRINTED ONE MESSAGE, and it was accurate for one of them. The
+# mechanism: `Values.raw()` collapses the NOT_MODELLED sentinel to the same None that
+# absence returns, so the sentinel added for exactly this never reached a message.
+# Measured before the fix — the anchor, the alias, the sequence, the UNQUOTED template
+# expression and the deleted key all printed "values.yaml leaves it off".
+#
+# THE QUOTED template expression is NOT in this list, and the ledger's count of five
+# is one too many on that point: `terminationGracePeriodSeconds: "{{ .Values.grace }}"`
+# is a plain scalar to the scanner, resolves, and was already refused accurately with
+# "which is not an integer number of seconds". It has its own case below.
+GRACE_GUARD_CAUSES = [
+    ("terminationGracePeriodSeconds: &grace 35", "a construct this gate does not model"),
+    ("terminationGracePeriodSeconds: *grace", "a construct this gate does not model"),
+    ("terminationGracePeriodSeconds:\n  - 35", "a construct this gate does not model"),
+    (
+        "terminationGracePeriodSeconds: {{ .Values.grace }}",
+        "a construct this gate does not model",
+    ),
+    ("", "sets no `terminationGracePeriodSeconds` at all"),
+    ("terminationGracePeriodSeconds: 0", "a value Go reads as false"),
+    ("terminationGracePeriodSeconds: false", "a value Go reads as false"),
+]
+
+
+def test_each_guard_cause_prints_its_own_message_and_all_of_them_are_red(tmp_path):
+    """ITEM 2. A gate must distinguish "the path is absent" from "the path is not a
+    scalar I model". Every case here is still exit 1 — the exit code was never the
+    defect — and each now says which of the four states it found.
+    """
+    for index, (replacement, expected) in enumerate(GRACE_GUARD_CAUSES):
+        root = tmp_path / f"cause{index}"
+        root.mkdir()
+        # `*grace` needs an anchor to alias, and it must sit on another key.
+        values = VALUES
+        if replacement == "terminationGracePeriodSeconds: *grace":
+            values = swap(values, "replicaCount: 2", "graceSource: &grace 35\nreplicaCount: 2")
+        if replacement == "":
+            values = swap(values, "terminationGracePeriodSeconds: 35\n", "")
+        else:
+            values = swap(values, "terminationGracePeriodSeconds: 35", replacement)
+        write_chart(root, values_yaml=values)
+        result = run(root)
+        assert result.returncode == 1, result.stdout
+        assert expected in result.stdout, (replacement, result.stdout)
+        if "does not model" in expected:
+            # The gate must not claim the key is unset when it cannot read it.
+            assert "NOT a claim that" in result.stdout
+
+
+def test_a_quoted_template_expression_in_values_was_already_accurate(tmp_path):
+    """The fifth cause the ledger grouped with the other four. It is a plain scalar to
+    the scanner, so it resolved and was refused with the true reason all along.
+    """
+    write_chart(
+        tmp_path,
+        values_yaml=swap(
+            VALUES,
+            "terminationGracePeriodSeconds: 35",
+            'terminationGracePeriodSeconds: "{{ .Values.grace }}"',
+        ),
+    )
+    result = run(tmp_path)
+    assert result.returncode == 1
+    assert "not an integer number of seconds" in result.stdout
+
+
+def test_the_cannot_be_resolved_branch_is_reachable_behind_a_truthy_guard(tmp_path):
+    """`judge_grace`'s dedicated resolution branch was UNREACHABLE for every real
+    chart: the key sits under a guard that failed first and returned. With a mapping
+    guard that is truthy and an inner key that is a sequence, it is reached.
+    """
+    write_chart(
+        tmp_path,
+        templates__deployment_yaml=WITH_MAPPING,
+        values_yaml=swap(VALUES, "  maxSkew: 1", "  maxSkew:\n    - 1"),
+    )
+    result = run(tmp_path)
+    assert result.returncode == 1
+    assert "`maxSkew` cannot be resolved" in result.stdout
+    assert "a construct this gate does not model" in result.stdout
+
+
+# ITEM 3, AND THE SCOPE LINE. Counted on `origin/main` of the seven module
+# repositories on 2026-09-14, per `chart/templates/deployment.yaml`: `required "…"`
+# 50 uses (iam 12, gateway 12, task 7, project 7, the three -db charts 4 each) and
+# `| quote` 113. Both are endorsed idiom and both yielded "an expression this gate
+# does not model". `| default` has ZERO uses and iam's own chart carries two comments
+# arguing against it by name, so it is deliberately NOT modelled — and an unmodelled
+# wrapper is REFUSED, which is red rather than green.
+GRACE_WRAPPERS = [
+    '{{ required "grace must be set; see the chart\'s values.yaml" .Values.terminationGracePeriodSeconds }}',
+    "{{ . | quote }}",
+    '{{ required "grace must be set" . | quote }}',
+    "{{ $.Values.terminationGracePeriodSeconds }}",
+    '{{ required "iamDb.tls.caSecret holds the bundle; see .Values.iamDb; must be set" .Values.terminationGracePeriodSeconds }}',
+]
+
+
+def test_the_endorsed_wrappers_resolve_and_the_bound_still_holds(tmp_path):
+    """ITEM 3, plus shape 7 (`$.Values.x`, which reaches the root context from inside
+    a `with` and is the only spelling available there). Each wrapper is asserted in
+    BOTH directions on the same tree: 35 passes, 29 is refused by the floor.
+    """
+    for index, wrapper in enumerate(GRACE_WRAPPERS):
+        for grace, expected in ((35, 0), (29, 1)):
+            root = tmp_path / f"wrap{index}-{grace}"
+            root.mkdir()
+            write_chart(
+                root,
+                templates__deployment_yaml=swap(
+                    DEPLOYMENT,
+                    "terminationGracePeriodSeconds: {{ . }}",
+                    f"terminationGracePeriodSeconds: {wrapper}",
+                ),
+                values_yaml=swap(
+                    VALUES,
+                    "terminationGracePeriodSeconds: 35",
+                    f"terminationGracePeriodSeconds: {grace}",
+                ),
+            )
+            result = run(root)
+            assert result.returncode == expected, (wrapper, grace, result.stdout)
+            if expected:
+                assert "below the floor of 35s" in result.stdout
+
+
+def test_a_relative_reference_inside_a_with_resolves(tmp_path):
+    """SHAPE 8, found while reproducing item 1 and required by it. Inside
+    `{{- with .Values.topologySpread }}`, `{{ .maxSkew }}` IS
+    `.Values.topologySpread.maxSkew` — and it is the ONLY spelling Helm renders there.
+    Refusing it made item 1's legitimate shape unprovable as well as unusable.
+    """
+    write_chart(
+        tmp_path,
+        templates__deployment_yaml=WITH_MAPPING,
+        values_yaml=swap(VALUES, "  maxSkew: 1", "  maxSkew: 0"),
+    )
+    result = run(tmp_path)
+    assert result.returncode == 1
+    assert "`maxSkew` resolves to `0`" in result.stdout
+
+
+def test_a_wrapper_this_gate_does_not_model_is_still_refused(tmp_path):
+    """The scope line, asserted rather than left implicit. `| default` is not modelled
+    because the estate does not write it, and the refusal direction is the safe one.
+    """
+    for wrapper in (
+        "{{ .Values.terminationGracePeriodSeconds | default 30 }}",
+        '{{ include "grace" . }}',
+        "{{ add .Values.terminationGracePeriodSeconds 5 }}",
+    ):
+        root = tmp_path / wrapper[3:9].strip().replace(".", "")
+        root.mkdir()
+        write_chart(
+            root,
+            templates__deployment_yaml=swap(
+                DEPLOYMENT,
+                "terminationGracePeriodSeconds: {{ . }}",
+                f"terminationGracePeriodSeconds: {wrapper}",
+            ),
+        )
+        result = run(root)
+        assert result.returncode == 1, (wrapper, result.stdout)
+        assert "an expression this gate does not model" in result.stdout
+
+
+# ITEM 4. `{{- else }}` was neither a `BLOCK_OPENER` nor `end`, so it was ignored
+# entirely — one push, one pop, balance holds, and `template.balanced` could not see
+# the problem. The if-condition's guard therefore propagated into the else arm, and
+# `template.first()` judged the branch that does NOT render. All seven module charts
+# already carry an inline `{{ else }}` on their image line, so the construct is live.
+def grace_if_else(if_branch, else_branch):
+    """The grace period behind an `{{- if }}`/`{{- else }}` pair, guard off."""
+    text = swap(
+        DEPLOYMENT,
+        "      terminationGracePeriodSeconds: {{ . }}\n      {{- end }}\n",
+        f"      terminationGracePeriodSeconds: {if_branch}\n"
+        f"      {{{{- else }}}}\n"
+        f"      terminationGracePeriodSeconds: {else_branch}\n"
+        f"      {{{{- end }}}}\n",
+    )
+    return swap(
+        text,
+        "{{- with .Values.terminationGracePeriodSeconds }}",
+        "{{- if .Values.topologySpread.absent }}",
+    )
+
+
+def test_the_else_branch_is_judged_rather_than_read_as_rendering_nothing(tmp_path):
+    """ITEM 4. The arm that renders is the arm that is judged."""
+    for else_branch, expected in ((35, 0), (29, 1)):
+        root = tmp_path / f"else{else_branch}"
+        root.mkdir()
+        write_chart(root, templates__deployment_yaml=grace_if_else(99, else_branch))
+        result = run(root)
+        assert result.returncode == expected, result.stdout
+        if expected:
+            assert "below the floor of 35s" in result.stdout
+        else:
+            # The unreachable if-branch must not be reported either way.
+            assert "0 findings" in result.stdout
+
+
+def test_an_unbalanced_else_is_still_caught(tmp_path):
+    """`else` must be neither a push nor a pop: an if/else/end is one opener and one
+    `end`. Pushing a frame here would unbalance every chart in the estate.
+    """
+    write_chart(
+        tmp_path,
+        templates__deployment_yaml=swap(grace_if_else(99, 35), "      {{- end }}\n", ""),
+    )
+    result = run(tmp_path)
+    assert result.returncode == 1
+    assert "do not balance" in result.stdout
+
+
+def test_an_else_if_branch_is_refused_rather_than_guessed(tmp_path):
+    """`{{- else if X }}` renders when the first condition is false AND X is true.
+    That is a conjunction, not a path, so the gate refuses instead of modelling it.
+    """
+    text = swap(
+        DEPLOYMENT,
+        "      terminationGracePeriodSeconds: {{ . }}\n      {{- end }}\n",
+        "      terminationGracePeriodSeconds: 99\n"
+        "      {{- else if .Values.replicaCount }}\n"
+        "      terminationGracePeriodSeconds: 35\n"
+        "      {{- end }}\n",
+    )
+    text = swap(
+        text,
+        "{{- with .Values.terminationGracePeriodSeconds }}",
+        "{{- if .Values.topologySpread.absent }}",
+    )
+    write_chart(tmp_path, templates__deployment_yaml=text)
+    result = run(tmp_path)
+    assert result.returncode == 1
+    assert "condition this gate does not model" in result.stdout
+
+
+# ITEM 5, THE ONE FAIL-OPEN, and the most important case in this file. The floor's
+# sleep term was added only when the literal dotted path `preStopSleepSeconds`
+# appeared in `template.references` AND in `values.yaml`. A term DISCOVERED BY NAME
+# silently became 0 whenever the name was anything else. Measured against `iam`'s real
+# chart with the sleep inlined as a literal 5 and the grace period cut to 32: 25
+# assertions, 0 findings, EXIT 0 — a pod given 27s for a 25s drain plus a 5s exit.
+def hardcoded_sleep(seconds):
+    """`iam`'s preStop handler with the sleep inlined and the values key deleted."""
+    text = swap(DEPLOYMENT, "            {{- with .Values.preStopSleepSeconds }}\n", "")
+    return swap(
+        text,
+        "                seconds: {{ . }}\n            {{- end }}\n",
+        f"                seconds: {seconds}\n",
+    )
+
+
+def test_a_hardcoded_prestop_sleep_is_priced_into_the_floor(tmp_path):
+    """ITEM 5. A derived bound whose terms are discovered BY NAME must refuse when it
+    cannot find a term it expects, never quietly compute a weaker bound. The sleep is
+    read from the handler's own structure instead, so its name no longer matters.
+    """
+    for sleep, grace, expected, floor in (
+        (5, 32, 1, 35),  # the measured fail-open: 25 assertions, 0 findings, exit 0
+        (5, 34, 1, 35),
+        (5, 35, 0, 35),
+        (10, 35, 1, 40),
+        (10, 40, 0, 40),
+    ):
+        root = tmp_path / f"sleep{sleep}-grace{grace}"
+        root.mkdir()
+        write_chart(
+            root,
+            templates__deployment_yaml=hardcoded_sleep(sleep),
+            values_yaml=swap(
+                swap(VALUES, "preStopSleepSeconds: 5\n", ""),
+                "terminationGracePeriodSeconds: 35",
+                f"terminationGracePeriodSeconds: {grace}",
+            ),
+        )
+        result = run(root)
+        assert result.returncode == expected, (sleep, grace, result.stdout)
+        if expected:
+            assert f"below the floor of {floor}s" in result.stdout
+            assert f"+ {sleep} preStop sleep" in result.stdout
+
+
+def test_a_differently_named_sleep_value_is_priced_into_the_floor(tmp_path):
+    """The other half of the same fail-open: the right structure, the wrong name."""
+    text = swap(DEPLOYMENT, "            {{- with .Values.preStopSleepSeconds }}\n", "")
+    text = swap(
+        text,
+        "                seconds: {{ . }}\n            {{- end }}\n",
+        "                seconds: {{ .Values.drainSleep }}\n",
+    )
+    for grace, expected in ((38, 0), (35, 1)):
+        root = tmp_path / f"named{grace}"
+        root.mkdir()
+        write_chart(
+            root,
+            templates__deployment_yaml=text,
+            values_yaml=swap(
+                swap(VALUES, "preStopSleepSeconds: 5", "drainSleep: 8"),
+                "terminationGracePeriodSeconds: 35",
+                f"terminationGracePeriodSeconds: {grace}",
+            ),
+        )
+        result = run(root)
+        assert result.returncode == expected, result.stdout
+        if expected:
+            assert "below the floor of 38s" in result.stdout
+
+
+def test_a_prestop_handler_this_gate_cannot_price_is_refused(tmp_path):
+    """An `exec` handler's duration is not knowable from the chart, so the floor is
+    UNKNOWABLE rather than smaller. Assuming 0 is the fail-open above.
+    """
+    text = swap(DEPLOYMENT, "            {{- with .Values.preStopSleepSeconds }}\n", "")
+    text = swap(
+        text,
+        "              sleep:\n                seconds: {{ . }}\n            {{- end }}\n",
+        "              exec:\n                command: [sh, -c, sleep 5]\n",
+    )
+    write_chart(tmp_path, templates__deployment_yaml=text)
+    result = run(tmp_path)
+    assert result.returncode == 1
+    assert "no `sleep: seconds:` under it" in result.stdout
+    assert "cannot be computed" in result.stdout
+
+
+# SHAPE 9, found while fixing item 4 and the same defect in its fail-open direction.
+# `guards` was built as `tuple(path for _, path in stack if path)`, so a frame whose
+# condition did not match `VALUES_REFERENCE` contributed NOTHING and the key inside it
+# was judged as though it always rendered. `{{- if and A B }}` (6 uses across the
+# seven charts) and `{{- if $var }}` (8) both take that branch. None sits over a
+# baseline key today, which is the only reason nothing was red.
+def test_a_guard_condition_this_gate_cannot_model_is_refused_not_ignored(tmp_path):
+    for condition in (
+        "{{- if and .Values.topologySpread.enabled .Values.replicaCount }}",
+        "{{- if $spread }}",
+        "{{- if eq .Values.topologySpread.enabled true }}",
+        "{{- range .Values.topologySpread.zones }}",
+    ):
+        root = tmp_path / condition[8:14].strip().replace("$", "").replace(".", "")
+        root.mkdir()
+        write_chart(
+            root,
+            templates__deployment_yaml=swap(
+                DEPLOYMENT, "{{- if .Values.topologySpread.enabled }}", condition
+            ),
+        )
+        result = run(root)
+        assert result.returncode == 1, (condition, result.stdout)
+        assert "condition this gate does not model" in result.stdout
+        assert "REFUSED rather than ignored" in result.stdout
+
+
+def test_a_negated_guard_is_modelled_in_both_directions(tmp_path):
+    """`{{- if not X }}` renders when X is falsey, and `not` of an absent key renders
+    too. Modelled rather than refused, because the seven charts write it seven times.
+    """
+    for condition, expected in (
+        ("{{- if not .Values.autoscaling.absent }}", 0),
+        ("{{- if not .Values.topologySpread.enabled }}", 1),
+        ("{{- if true }}", 0),
+        ("{{- if false }}", 1),
+    ):
+        root = tmp_path / str(abs(hash(condition)))
+        root.mkdir()
+        write_chart(
+            root,
+            templates__deployment_yaml=swap(
+                DEPLOYMENT, "{{- if .Values.topologySpread.enabled }}", condition
+            ),
+        )
+        result = run(root)
+        assert result.returncode == expected, (condition, result.stdout)
+
+
+# --------------------------- ledger 897: the SAME rule for every field
+#
+# THE ASYMMETRY THIS BLOCK EXISTS AGAINST, found by review after the first six fixes
+# landed. The guard work had been wired into `terminationGracePeriodSeconds` and the
+# `topologySpreadConstraints` presence check — the two shapes the ledger named — and
+# the other five lookups still used `template.first()` and evaluated NO guard. Both
+# ledger 897 defects survived there, one in each direction, and each was measured on
+# a scratch copy of `iam`'s real chart:
+#
+#   * an `{{- if }}`/`{{- else }}` pair over `automountServiceAccountToken` reported
+#     "resolves to `true`, not `false`" about a chart that renders `false`;
+#   * `automountServiceAccountToken`, `serviceAccountName` and `whenUnsatisfiable`
+#     behind a guard that is OFF each passed with EXIT 0 while rendering nothing.
+#
+# The third is the worst of the three: a `whenUnsatisfiable` that renders nothing
+# takes the API default `DoNotSchedule`, which is precisely the hung rollout this
+# gate exists to prevent, reported green.
+#
+# A fix applied field-by-field is how five of seven fields came to differ from the
+# two that were fixed, so the test is written over the WHOLE field set rather than
+# over the fields that were wrong. `Template.first()` is deleted, and `renders()` is
+# the only way to reach an occurrence, so a new field cannot skip the guard check
+# without going out of its way.
+GUARDABLE_FIELDS = [
+    ("serviceAccountName", "      serviceAccountName: {{ .Chart.Name }}"),
+    ("automountServiceAccountToken", "      automountServiceAccountToken: false"),
+    ("terminationGracePeriodSeconds", "      terminationGracePeriodSeconds: {{ . }}"),
+    ("topologySpreadConstraints", "      topologySpreadConstraints:"),
+    ("maxSkew", "        - maxSkew: {{ .Values.topologySpread.maxSkew }}"),
+    ("topologyKey", "          topologyKey: {{ .Values.topologySpread.topologyKey }}"),
+    (
+        "whenUnsatisfiable",
+        "          whenUnsatisfiable: {{ .Values.topologySpread.whenUnsatisfiable }}",
+    ),
+]
+
+
+def test_every_baseline_field_is_refused_when_its_guard_renders_nothing(tmp_path):
+    """The fail-open half, over all seven fields rather than the two that were fixed."""
+    for field, line in GUARDABLE_FIELDS:
+        indent = " " * (len(line) - len(line.lstrip(" ")))
+        root = tmp_path / f"off-{field}"
+        root.mkdir()
+        write_chart(
+            root,
+            templates__deployment_yaml=swap(
+                DEPLOYMENT,
+                line,
+                f"{indent}{{{{- if .Values.topologySpread.absent }}}}\n"
+                f"{line}\n"
+                f"{indent}{{{{- end }}}}",
+            ),
+        )
+        result = run(root)
+        assert result.returncode == 1, (field, result.stdout)
+        assert f"renders `{field}` only when" in result.stdout, (field, result.stdout)
+        assert "sets no `topologySpread.absent` at all" in result.stdout
+
+
+def test_every_baseline_field_still_passes_behind_a_guard_that_is_on(tmp_path):
+    """The other half of the pair: the guard check must not refuse a rendering field."""
+    for field, line in GUARDABLE_FIELDS:
+        indent = " " * (len(line) - len(line.lstrip(" ")))
+        root = tmp_path / f"on-{field}"
+        root.mkdir()
+        write_chart(
+            root,
+            templates__deployment_yaml=swap(
+                DEPLOYMENT,
+                line,
+                f"{indent}{{{{- if .Values.topologySpread.enabled }}}}\n"
+                f"{line}\n"
+                f"{indent}{{{{- end }}}}",
+            ),
+        )
+        result = run(root)
+        assert result.returncode == 0, (field, result.stdout)
+
+
+def test_an_else_branch_is_judged_for_the_service_account_too(tmp_path):
+    """ITEM 4 over a field it was not originally wired into. The shipped gate read the
+    if-branch and reported `true`, not `false`, about a chart that renders `false`.
+    """
+    for if_branch, else_branch, expected in (
+        ("true", "false", 0),
+        ("false", "true", 1),
+    ):
+        root = tmp_path / f"sa-else-{if_branch}"
+        root.mkdir()
+        write_chart(
+            root,
+            templates__deployment_yaml=swap(
+                DEPLOYMENT,
+                "      automountServiceAccountToken: false",
+                "      {{- if .Values.topologySpread.absent }}\n"
+                f"      automountServiceAccountToken: {if_branch}\n"
+                "      {{- else }}\n"
+                f"      automountServiceAccountToken: {else_branch}\n"
+                "      {{- end }}",
+            ),
+        )
+        result = run(root)
+        assert result.returncode == expected, (if_branch, result.stdout)
+        if expected:
+            assert "not `false`" in result.stdout
 
 
 # -------------------- the equivalence test, which is why this file exists ----
@@ -807,6 +1421,68 @@ nested:
 def test_the_hand_scan_agrees_with_pyyaml_on_every_scalar_leaf():
     """A disagreement means the stdlib scan is not a safe stand-in for a parser."""
     assert scanned(CORPUS) == leaves(yaml.safe_load(CORPUS))
+
+
+def structure(text: str):
+    """The mapping and null paths the hand scan records, for the guard differential."""
+    sys.path.insert(0, str(GATE.parent))
+    try:
+        import chart_baseline
+    finally:
+        sys.path.pop(0)
+    values = chart_baseline.scan_values(text)
+    assert values.modelled, values.reason
+    return set(values.mappings), set(values.nulls)
+
+
+def branches(node, prefix: str = ""):
+    """Every path PyYAML resolves to a NON-EMPTY mapping, and every one it calls None."""
+    mappings, nulls = set(), set()
+    if isinstance(node, dict):
+        for key, value in node.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if isinstance(value, dict) and value:
+                mappings.add(path)
+            if value is None:
+                nulls.add(path)
+            deeper = branches(value, path)
+            mappings |= deeper[0]
+            nulls |= deeper[1]
+    return mappings, nulls
+
+
+def test_the_mapping_model_agrees_with_pyyaml_too():
+    """LEDGER 897 ITEM 1 ADDED MODELLED STATE, so it gets the same evidence the scalar
+    scan has. `Values.mappings` decides whether `{{- with .Values.X }}` renders, which
+    is a verdict on the chart — a hand scan that guesses it wrong turns a green chart
+    red, which is the failure this whole file is organised against.
+
+    THE TRAP THIS CAUGHT, on the real files rather than on this corpus: a block
+    sequence is written `clients:` and then `- gateway`, so `clients` is opened exactly
+    like a mapping and never gains a child entry. Classifying it by "opened but not a
+    parent" called it YAML null in `iam` and `project-db`, where it is a one-item list.
+    Paths the scalar scan already recorded are excluded from both sets for that reason.
+    """
+    mappings, nulls = structure(CORPUS)
+    assert (mappings, nulls) == branches(yaml.safe_load(CORPUS))
+
+
+def test_a_non_empty_mapping_is_truthy_and_an_absent_one_is_not():
+    """The four guard states, asserted directly rather than only through a verdict."""
+    sys.path.insert(0, str(GATE.parent))
+    try:
+        import chart_baseline
+    finally:
+        sys.path.pop(0)
+    values = chart_baseline.scan_values(CORPUS)
+    assert values.truth("topologySpread") == chart_baseline.GUARD_ON
+    assert values.truth("nested.deeper") == chart_baseline.GUARD_ON
+    assert values.truth("networkPolicy.enabled") == chart_baseline.GUARD_OFF
+    assert values.truth("networkPolicy.absent") == chart_baseline.GUARD_ABSENT
+    # A sequence and a flow mapping are undecided, NOT off. This is the distinction
+    # `raw()` collapsed and the whole of item 2 turns on.
+    assert values.truth("networkPolicy.clients") == chart_baseline.GUARD_UNMODELLED
+    assert values.truth("networkPolicy.scrapeFrom") == chart_baseline.GUARD_UNMODELLED
 
 
 def test_the_scan_refuses_to_answer_rather_than_answering_wrongly():
