@@ -39,15 +39,32 @@ resolved-and-good, resolved-and-bad, and UNRESOLVABLE, which is red. A gate whos
 parse failure is spelled the same way as a pass is the second failure mode this
 estate keeps shipping.
 
-THE GUARD CHECK ITSELF SKIPS THIS MODEL (ledger 897, not fixed here). It reports
-a guard as "left off" for anything not truthy, and an anchor, an alias, a
-sequence, a template expression or a deleted key under the guard are ALL not
-truthy — `values.raw()` returns `None` for a construct this scan does not model,
-the same `None` it returns for a key that is genuinely absent. So
-`terminationGracePeriodSeconds: &grace 35` prints the identical "values.yaml
-leaves it off" message a truly-absent key would print, even though the anchor
-sets it. The exit code is still red either way; the message is not accurate for
-the modelled-but-not-a-plain-scalar case.
+LEDGER 897 CLOSED NINE FALSE REFUSALS AND TWO FAIL-OPENS in this file, and the
+detail of each sits beside the code that fixes it — `GUARD_ON` and the four guard
+states, `Guard`, `unwrap_action`, `prestop_sleep`, and `declared_kinds`. What is
+worth stating here is the SHAPE they shared, because it is one defect wearing nine
+faces: this gate modelled a narrower Helm than the estate writes, and spelled
+"I cannot read this" the same way it spelled "the chart is wrong".
+
+`values.raw()` collapsed the `NOT_MODELLED` sentinel to the same `None` absence
+returns, so a guard check could not tell a mapping, an anchor, an alias, a
+sequence or a template expression from a deleted key, and printed "values.yaml
+leaves it off" about keys `values.yaml` plainly sets. `{{- with .Values.X }}` over
+a MAPPING — the commonest Helm guard idiom — was invisible for the same reason,
+since `scan_values` recorded only scalars. `resolve` accepted `{{ .Values.x }}`
+verbatim and refused the estate's own endorsed `required "…" .Values.x` (50 uses)
+and `| quote` (113). `{{- else }}` was neither an opener nor an `end`, so the
+if-condition's guard propagated into the arm that actually renders, invisibly to
+`template.balanced`. And a guard whose condition this gate could not read was
+DROPPED rather than refused, which reads every key inside it as unconditional.
+
+A FALSE REFUSAL IS THE WORST FAILURE A GATE HAS, and not as a matter of taste:
+it reddens honest work and gets the gate switched off, which bypasses the whole
+gate rather than the one case (ADR-0679's `alternatives` rejects the opposite
+view by name). This file's own first revision reported "sets no `maxSkew`" against
+all seven correct charts. So every fix here is proved by a PAIR on one tree — the
+legitimate shape passes, and a broken variant of that same shape still refuses —
+and `scripts/tests/test_chart_baseline.py` carries both halves of each.
 
 THE GRACE PERIOD IS ASSERTED AS A RULE, NEVER AS THE LITERAL 35 (ADR-0601,
 ADR-0602). All seven module charts ship 35 today, and `chart-hardening.md` still
@@ -91,15 +108,22 @@ the chart's. This gate therefore demands that the TEMPLATE and the KEYS exist,
 never that the policy is enabled. Demanding `true` would refuse the design D80
 chose.
 
-WHAT IS KEYED ON A FACT RATHER THAN A FILENAME. The ServiceAccount and
-NetworkPolicy checks ask whether any file under `templates/` DECLARES
-`kind: ServiceAccount` / `kind: NetworkPolicy`, not whether a file of a
+WHAT IS KEYED ON A FACT RATHER THAN A FILENAME — now including the pod spec. The
+ServiceAccount and NetworkPolicy checks ask whether any file under `templates/`
+DECLARES `kind: ServiceAccount` / `kind: NetworkPolicy`, not whether a file of a
 particular name exists. A rename is then not an exemption, which is the property
-`certificate_usages.py` bought by deleting its issuer allowlist.
+`certificate_usages.py` bought by deleting its issuer allowlist. The DEPLOYMENT
+was the exception and is no longer (ledger 897): it was read from
+`templates/deployment.yaml` while the kind scan covered all of `templates/`, so a
+chart whose workload sat elsewhere was judged against whatever held that path.
+Two templates declaring `kind: Deployment` is the case that is refused now, with
+one accurate message rather than four false ones.
 
-`gateway` HAS NO NetworkPolicy IN ITS CHART, and this gate reports it. That is a
-dated observation — 2026-09-13, `origin/main` of the seven module repositories —
-and NOT this file's standing claim about anybody's tree (ledger 847). The reason
+`gateway` HAS NO NetworkPolicy IN ITS CHART, and this gate reports it; `project`
+declares no ServiceAccount, and it reports that. Both are dated observations —
+re-measured 2026-09-14 against `origin/main` of the seven module repositories,
+where the other five pass at 25 assertions — and NOT this file's standing claim
+about anybody's tree (ledger 847). The reason
 it is unresolved rather than simply missing: `gateway`'s ingress source is the
 Envoy Gateway data plane in `envoy-gateway-system`, selected by
 `gateway.envoyproxy.io/*` labels, and `chart-hardening.md` places that policy in
@@ -191,6 +215,32 @@ PRUNED_DIRECTORIES = frozenset(
 # lookup can tell "no such key" from "a key whose value I do not model".
 NOT_MODELLED = object()
 
+# The absence sentinel. `None` cannot serve: it is also what `raw()` returns for a
+# key it declines to model, and collapsing the two is the ledger 897 defect below.
+ABSENT = object()
+
+# THE FOUR STATES A GUARD CAN BE IN (ledger 897), and the reason they are four.
+# The shipped gate asked `is_truthy(values.raw(guard))` and got False for all of
+# them, so an anchor (`&grace 35`), an alias (`*grace`), a sequence, an unquoted
+# template expression in `values.yaml` and a genuinely deleted key ALL printed
+# "values.yaml leaves it off" — accurate for exactly one of the five. The exit code
+# was right every time; the message was false four times out of five, which is the
+# failure mode this file's own docstring warns about in the opposite direction.
+#
+# THE MECHANISM, because the sentinel above was added for precisely this and never
+# reached it: `Values.raw()` returns None for a NOT_MODELLED entry, which is the
+# same None it returns for a key that is not there. Every caller compared against
+# None, so the distinction the sentinel exists to carry was discarded one line
+# after it was read. `judge_grace`'s dedicated "cannot be resolved" branch was
+# therefore unreachable for every real chart — the guard fails first and returns.
+#
+# A gate must distinguish "the path is absent" from "the path is not a scalar I
+# model". Both are red; only one of them is a statement about the chart.
+GUARD_ON = "on"
+GUARD_OFF = "off"
+GUARD_ABSENT = "absent"
+GUARD_UNMODELLED = "unmodelled"
+
 TRUE_WORDS = frozenset({"true", "yes", "on"})
 FALSE_WORDS = frozenset({"false", "no", "off", "null", "~", "0", '""', "''"})
 
@@ -209,14 +259,59 @@ KIND_LINE = re.compile(
 )
 TEMPLATE_ACTION = re.compile(r"\{\{-?\s*(?P<word>[a-z]+)\b(?P<arg>[^}]*?)-?\}\}")
 VALUES_REFERENCE = re.compile(r"^\.Values\.(?P<path>[A-Za-z0-9_.]+)$")
-ANY_VALUES_REFERENCE = re.compile(r"\.Values\.([A-Za-z0-9_.]+)")
 SEQUENCE_ITEM = re.compile(r"^(?P<indent>[ ]*)-[ ]")
-VALUES_ACTION = re.compile(r"^\{\{-?\s*\.Values\.(?P<path>[A-Za-z0-9_.]+)\s*-?\}\}$")
-DOT_ACTION = re.compile(r"^\{\{-?\s*\.\s*-?\}\}$")
+TEMPLATE_ACTION_BODY = re.compile(r"^\{\{-?\s*(?P<body>.*?)\s*-?\}\}$", re.DOTALL)
+# An operand rooted at the values tree, with or without the `$` that reaches the
+# root context from inside a `with` block.
+ROOTED_OPERAND = re.compile(r"^\$?\.Values\.(?P<path>[A-Za-z0-9_.]+)$")
+# An operand relative to the `.` a `with` block bound: `{{ .maxSkew }}`.
+RELATIVE_OPERAND = re.compile(r"^\.(?P<path>[A-Za-z0-9_][A-Za-z0-9_.]*)$")
+# Go template roots that are NOT the values tree, so a relative-looking operand
+# beginning with one of them is never re-rooted onto a `with` path.
+BUILT_IN_ROOTS = frozenset(
+    {"Values", "Chart", "Release", "Files", "Capabilities", "Template", "Subcharts"}
+)
 BLOCK_OPENERS = frozenset({"if", "with", "range", "define", "block"})
+
+# THE WRAPPERS THIS ESTATE ACTUALLY WRITES, and nothing wider (ledger 897 item 3).
+# Counted on `origin/main` of the seven module repositories on 2026-09-14, over each
+# `chart/templates/deployment.yaml`:
+#
+#     required "…"   iam 12, gateway 12, task 7, project 7, iam-db/task-db/project-db 4 each  = 50
+#     | quote        iam 15, gateway 34, task 8, project 8, iam-db/task-db/project-db 11 each = 113
+#     | default      0 — and iam's chart carries two COMMENTS arguing against it by name
+#                    ("`required` rather than a bare lookup or a `| default 250`"),
+#                    so modelling it would widen the gate past the estate's own
+#                    decision. An unmodelled wrapper is REFUSED, which is red rather
+#                    than green, so leaving it out cannot hide a bad chart.
+#     | nindent      14, all of them on `toYaml` blocks over `resources`/
+#                    `rollingUpdate` — never on a baseline key, and not a scalar.
+#
+# The shipped resolver accepted `{{ .Values.x }}` or `{{ . }}` VERBATIM, so every one
+# of those 163 endorsed uses yielded "an expression this gate does not model". None
+# of them sits on a baseline key today, which is the only reason nothing was red.
+QUOTE_PIPE = re.compile(r"\|\s*quote\s*$")
+REQUIRED_CALL = re.compile(r"^required\s+(?=[\"'])")
 
 
 # ---------------------------------------------------------------- values.yaml
+
+
+def end_of_quoted_scalar(text: str, start: int) -> int:
+    """The index of the quote closing the string opened at `start`, or -1.
+
+    THE CANONICAL FORM IN THIS FILE, and the only one (ADR-0679: a predicate over a
+    shared syntax is copied from its hardened site and cited, never re-derived).
+    It was the loop inside `strip_inline_comment`, which is now one of its two
+    callers; the other is `unwrap_action`, which must skip the message argument of
+    `required "…" .Values.x` without being fooled by a `.` or a `}}` inside it.
+    A second expression for this job is a finding on its own.
+    """
+    quote = text[start]
+    end = text.find(quote, start + 1)
+    while end != -1 and text[end - 1] == "\\":
+        end = text.find(quote, end + 1)
+    return end
 
 
 def strip_inline_comment(raw: str) -> str:
@@ -225,10 +320,7 @@ def strip_inline_comment(raw: str) -> str:
     if not text:
         return ""
     if text[0] in "\"'":
-        quote = text[0]
-        end = text.find(quote, 1)
-        while end != -1 and text[end - 1] == "\\":
-            end = text.find(quote, end + 1)
+        end = end_of_quoted_scalar(text, 0)
         return text if end == -1 else text[: end + 1]
     if text.startswith("#"):
         return ""
@@ -245,18 +337,56 @@ class Values:
 
     `modelled` is False when the document carries a construct this scanner does
     not model, which makes EVERY lookup unresolvable rather than wrong.
+
+    `mappings` and `nulls` carry what `scalars` structurally cannot: a key whose
+    value is a nested block rather than a leaf. They exist for the guard check and
+    for nothing else, so `scalars` stays exactly the set of scalar leaves the
+    PyYAML differential in `scripts/tests/test_chart_baseline.py` compares against.
     """
 
     scalars: dict
     modelled: bool
     reason: str = ""
+    # Paths whose value is a NON-EMPTY block mapping. `{{- with .Values.X }}` over
+    # one of these is the commonest Helm guard idiom and the shipped gate could not
+    # see it at all: `scan_values` recorded only scalars, so `topologySpread` had no
+    # entry, `raw()` answered None, and a mapping `values.yaml` sets with four
+    # sub-keys was reported as "left off". A non-empty map is TRUE in Go's template
+    # truth, which is what makes `with` bind and the block render.
+    mappings: frozenset = frozenset()
+    # Paths written with a colon and nothing under them at all: YAML null, which Go
+    # reads as false. Distinct from a mapping, and distinct from absence.
+    nulls: frozenset = frozenset()
 
     def raw(self, path: str):
-        """The raw scalar at `path`, or None when it is absent or not modelled."""
+        """The raw scalar at `path`, or None when it is absent or not modelled.
+
+        KEPT LOSSY ON PURPOSE, for the callers that want a scalar or nothing. A
+        caller that must tell the two apart — every guard check — calls `truth()`.
+        """
         if not self.modelled:
             return None
         found = self.scalars.get(path, None)
         return None if found is NOT_MODELLED else found
+
+    def truth(self, path: str) -> str:
+        """Which of the four guard states `path` is in.
+
+        A scalar entry answers first, so a sequence or a flow collection recorded as
+        NOT_MODELLED reads as unmodelled rather than as the empty mapping it is not.
+        """
+        if not self.modelled:
+            return GUARD_UNMODELLED
+        found = self.scalars.get(path, ABSENT)
+        if found is NOT_MODELLED:
+            return GUARD_UNMODELLED
+        if found is not ABSENT:
+            return GUARD_ON if is_truthy(found) else GUARD_OFF
+        if path in self.mappings:
+            return GUARD_ON
+        if path in self.nulls:
+            return GUARD_OFF
+        return GUARD_ABSENT
 
     def present(self, path: str) -> bool:
         return self.modelled and path in self.scalars
@@ -268,6 +398,11 @@ def scan_values(text: str) -> Values:
     stack: list = []
     suppress_from = None
     seen_content = False
+    # Every path written with a colon and no value on the line, and every path some
+    # deeper entry proved to be a parent. A key in both is a non-empty mapping; a key
+    # only in `opened` is YAML null.
+    opened: set = set()
+    parents: set = set()
 
     for line in text.splitlines():
         if not line.strip():
@@ -294,7 +429,9 @@ def scan_values(text: str) -> Values:
             while stack and stack[-1][0] >= indent:
                 stack.pop()
             if stack:
-                scalars[dotted(stack)] = NOT_MODELLED
+                path = dotted(stack)
+                scalars[path] = NOT_MODELLED
+                parents.update(ancestors(path))
             suppress_from = indent
             continue
 
@@ -313,19 +450,42 @@ def scan_values(text: str) -> Values:
 
         if value == "":
             stack.append((indent, key))
+            opened.add(path)
             continue
         if value[0] in "{[|>&*!":
             # A flow collection, a block scalar, an anchor, an alias or a tag.
             scalars[path] = NOT_MODELLED
+            parents.update(ancestors(path))
             suppress_from = indent + 1
             continue
         scalars[path] = value
+        parents.update(ancestors(path))
 
-    return Values(scalars, True)
+    # A PATH `scalars` ALREADY HOLDS BELONGS TO NEITHER SET. A block sequence is
+    # written `clients:` and then `- gateway`, so `clients` is opened like a mapping
+    # and the sequence branch above records it as NOT_MODELLED; it has no child entry,
+    # so `opened - parents` would call it YAML null, which it is not. `truth()` reads
+    # `scalars` first and so never asked, but a set holding a wrong member is a trap
+    # for the next caller. Measured against PyYAML over the seven real `values.yaml`:
+    # this line is the difference between 2 charts disagreeing on `nulls` and 0.
+    reached = set(scalars)
+    return Values(
+        scalars,
+        True,
+        "",
+        frozenset((opened & parents) - reached),
+        frozenset((opened - parents) - reached),
+    )
 
 
 def dotted(stack) -> str:
     return ".".join(key for _, key in stack)
+
+
+def ancestors(path: str):
+    """Every proper prefix of a dotted path: `a.b.c` yields `a` and `a.b`."""
+    parts = path.split(".")
+    return [".".join(parts[:index]) for index in range(1, len(parts))]
 
 
 def as_integer(raw):
@@ -367,6 +527,41 @@ def is_truthy(raw) -> bool:
 
 
 @dataclass(frozen=True)
+class Guard:
+    """One enclosing `{{ if }}`/`{{ with }}`, and what this gate can say about it.
+
+    `path` is the single `.Values` path the branch turns on. `negated` is True inside
+    the `{{- else }}` arm, which renders when the condition is FALSE. `constant` is
+    True or False for a condition with no values term at all (`{{- if true }}`).
+    `modelled` is False for a condition this gate cannot evaluate.
+
+    TWO LEDGER 897 DEFECTS LIVE IN THIS SHAPE, and both were invisible because the
+    shipped gate reduced a frame to a bare path string.
+
+    `{{- else }}` PROPAGATED THE IF-CONDITION'S GUARD TO THE ELSE ARM. `else` was
+    neither a `BLOCK_OPENER` nor `end`, so it was ignored entirely: one push, one
+    pop, balance holds, and `template.balanced` could not see the problem. A chart
+    spelling `{{- if X }} …wrong… {{- else }} …correct… {{- end }}` was refused with
+    the message for X being off, while the arm that actually renders is correct.
+    All seven module charts already carry an inline `{{ if .Values.image.digest }}…
+    {{ else }}…{{ end }}`, so the construct is live in the estate today.
+
+    A CONDITION THE GATE COULD NOT READ WAS DROPPED RATHER THAN REFUSED, which is a
+    FAIL-OPEN of item 5's class. `guards` was built as `tuple(path for _, path in
+    stack if path)`, so a frame whose argument did not match `VALUES_REFERENCE`
+    contributed nothing and the key inside it was judged as though it always
+    rendered. `{{- if and A B }}`, `{{- if $clientCert }}` and `{{- range }}` all
+    take that branch, and all three appear in the seven charts today (6, 8 and 0
+    uses) — none over a baseline key, which is why nothing was red.
+    """
+
+    path: str = ""
+    negated: bool = False
+    modelled: bool = True
+    constant: object = None
+
+
+@dataclass(frozen=True)
 class KeyOccurrence:
     lineno: int
     raw_value: str
@@ -376,35 +571,104 @@ class KeyOccurrence:
 
 @dataclass(frozen=True)
 class Template:
-    declares: frozenset
     keys: dict
     balanced: bool
-    references: frozenset
 
-    def first(self, key: str):
-        found = self.keys.get(key)
-        return found[0] if found else None
+    # `first()` lived here and is DELETED: every caller went through it without
+    # evaluating a guard, which is exactly how five of the seven baseline fields kept
+    # both ledger 897 defects after the other two were fixed. `renders()` is the only
+    # way in now, and it cannot be used without the guard check.
+
+
+def read_condition(word: str, argument: str) -> Guard:
+    """The guard a block opener imposes on every key inside it."""
+    if word in ("define", "block", "range"):
+        # A `define`/`block` body is a named template rather than this Deployment's
+        # pod spec, and a `range` body renders zero-or-more times with `.` rebound
+        # per item. Neither is a truth question, so neither is modelled.
+        return Guard(modelled=False)
+    text = argument.strip()
+    negated = False
+    if text.startswith("not "):
+        negated = True
+        text = text[4:].strip()
+    if text in ("true", "false"):
+        return Guard(negated=negated, constant=text == "true")
+    reference = VALUES_REFERENCE.match(text)
+    if reference is None:
+        # `and`, `or`, `eq`, a `$variable`, a function call. A conjunction is not a
+        # path, and this gate refuses rather than guessing which term is in force.
+        return Guard(modelled=False)
+    return Guard(path=reference.group("path"), negated=negated)
+
+
+def guard_state(guard: Guard, values: Values) -> str:
+    """Which of the four states a guard is in, honouring `not` and `{{- else }}`."""
+    if not guard.modelled:
+        return GUARD_UNMODELLED
+    if guard.constant is not None:
+        state = GUARD_ON if guard.constant else GUARD_OFF
+    else:
+        state = values.truth(guard.path)
+    if not guard.negated:
+        return state
+    # Negation decides the two decided states and leaves the undecided one
+    # undecided: `not` of "this gate cannot read the value" is still that. An ABSENT
+    # key is falsey in Go, so its negation RENDERS.
+    if state == GUARD_ON:
+        return GUARD_OFF
+    if state in (GUARD_OFF, GUARD_ABSENT):
+        return GUARD_ON
+    return GUARD_UNMODELLED
 
 
 def scan_template(text: str) -> Template:
-    """Read a Go-templated manifest: which kinds it declares, and where keys sit.
+    """Read a Go-templated manifest: where each key sits, and under which guards.
 
     Template actions are tracked on EVERY line, comments included, because Go's
     text/template executes a `{{- if }}` inside a YAML comment exactly as it
     executes one outside it. Keys are read from non-comment lines only.
+
+    `declares` and `references` used to be collected here and are GONE. `declares`
+    lost its only consumer to item 6, which now selects the file BY its declaration
+    and made the assertion over it unreachable; `references` was the name-matching
+    the item 5 fail-open was built on, and `prestop_sleep` reads the handler's own
+    structure instead. Neither is kept as an unread field.
     """
-    declares: set = set()
     keys: dict = {}
     stack: list = []
     balanced = True
-    references = set(ANY_VALUES_REFERENCE.findall(text))
 
     for lineno, line in enumerate(text.splitlines(), 1):
         for action in TEMPLATE_ACTION.finditer(line):
             word = action.group("word")
             if word in BLOCK_OPENERS:
-                reference = VALUES_REFERENCE.match(action.group("arg").strip())
-                stack.append((word, reference.group("path") if reference else ""))
+                stack.append((word, read_condition(word, action.group("arg"))))
+            elif word == "else":
+                # NEITHER A PUSH NOR A POP — an if/else/end is one opener and one
+                # `end`, so balance must stay exactly as it was. This REPLACES the
+                # top frame; pushing one here would unbalance every chart in the
+                # estate, all seven of which carry an inline `{{ else }}` today.
+                if not stack:
+                    balanced = False
+                    continue
+                opener, guard = stack[-1]
+                if action.group("arg").strip():
+                    # `{{- else if X }}` renders when the first condition is false
+                    # AND X is true. That is a conjunction, which is not a path.
+                    stack[-1] = (opener, Guard(modelled=False))
+                else:
+                    # The else arm of a `{{ with }}` does NOT rebind `.`, so the
+                    # frame stops supplying a dot as well as flipping polarity.
+                    stack[-1] = (
+                        "if",
+                        Guard(
+                            path=guard.path,
+                            negated=not guard.negated,
+                            modelled=guard.modelled,
+                            constant=guard.constant,
+                        ),
+                    )
             elif word == "end":
                 if stack:
                     stack.pop()
@@ -414,9 +678,6 @@ def scan_template(text: str) -> Template:
         body = line.strip()
         if body.startswith("#"):
             continue
-        kind = KIND_LINE.match(body)
-        if kind is not None:
-            declares.add(kind.group("kind"))
 
         # `- maxSkew: 1` is a key on a sequence item, and the dash is the only
         # thing standing between it and the mapping-key pattern. Rewriting the
@@ -430,18 +691,50 @@ def scan_template(text: str) -> Template:
         if rest and not rest.startswith((" ", "\t")):
             continue
         dot = ""
-        for word, path in reversed(stack):
+        for word, guard in reversed(stack):
             if word == "with":
-                dot = path
+                dot = guard.path
                 break
-        guards = tuple(path for _, path in stack if path)
+        # EVERY frame, including the ones this gate cannot read. Dropping those was
+        # the fail-open recorded on `Guard` above.
+        guards = tuple(guard for _, guard in stack)
         keys.setdefault(match.group("key"), []).append(
             KeyOccurrence(lineno, rest.strip(), guards, dot)
         )
 
-    return Template(
-        frozenset(declares), keys, balanced and not stack, frozenset(references)
-    )
+    return Template(keys, balanced and not stack)
+
+
+def unwrap_action(text: str):
+    """The operand inside a `{{ … }}`, wrappers removed, or None when unmodelled.
+
+    Only the wrappers the seven module charts actually write — see the counts beside
+    `QUOTE_PIPE` above. `required "…" X` and a trailing `| quote` both render X
+    itself, so the value a chart ships is legible through them; anything else returns
+    None and the caller refuses.
+    """
+    action = TEMPLATE_ACTION_BODY.match(text)
+    if action is None:
+        return None
+    body = action.group("body").strip()
+    while True:
+        stripped = QUOTE_PIPE.sub("", body).strip()
+        if stripped == body:
+            break
+        body = stripped
+    if REQUIRED_CALL.match(body):
+        argument = body[len(REQUIRED_CALL.match(body).group(0)):]
+        # Skip the message. It is prose holding dots, semicolons and the word
+        # `.Values`, so it must be SKIPPED as a quoted scalar rather than pattern-
+        # matched — `end_of_quoted_scalar` is the file's one expression for that.
+        end = end_of_quoted_scalar(argument, 0)
+        if end == -1:
+            return None
+        body = argument[end + 1:].strip()
+    if not body or "|" in body or "(" in body or " " in body:
+        # A pipeline or a call this gate has not been taught. Refused, not guessed.
+        return None
+    return body
 
 
 def resolve(occurrence: KeyOccurrence, values: Values):
@@ -455,21 +748,47 @@ def resolve(occurrence: KeyOccurrence, values: Values):
     text = strip_inline_comment(occurrence.raw_value)
     if text == "":
         return "unresolvable", "the key carries no value"
-    path = ""
-    if DOT_ACTION.match(text):
+    if "{{" not in text:
+        return "ok", text
+    operand = unwrap_action(text)
+    if operand is None:
+        return "unresolvable", f"an expression this gate does not model: {text}"
+
+    if operand == ".":
         if not occurrence.dot:
             return "unresolvable", "`{{ . }}` outside a `with .Values...` block"
         path = occurrence.dot
     else:
-        action = VALUES_ACTION.match(text)
-        if action is not None:
-            path = action.group("path")
-        elif "{{" in text:
-            return "unresolvable", f"an expression this gate does not model: {text}"
+        rooted = ROOTED_OPERAND.match(operand)
+        relative = RELATIVE_OPERAND.match(operand)
+        if rooted is not None:
+            path = rooted.group("path")
+        elif relative is not None and relative.group("path").split(".")[0] not in (
+            BUILT_IN_ROOTS
+        ):
+            # A reference relative to the `.` a `with` bound: inside
+            # `{{- with .Values.topologySpread }}`, `{{ .maxSkew }}` IS
+            # `.Values.topologySpread.maxSkew`, and it is the only spelling Helm
+            # renders there — `.Values` is unreachable from that scope. Refusing it
+            # made item 1's legitimate shape unprovable as well as unusable.
+            if not occurrence.dot:
+                return (
+                    "unresolvable",
+                    f"`{operand}` is relative to a `with` block and there is none",
+                )
+            path = f"{occurrence.dot}.{relative.group('path')}"
         else:
-            return "ok", text
+            return "unresolvable", f"an expression this gate does not model: {text}"
+
     if not values.modelled:
         return "unresolvable", f"values.yaml carries {values.reason}"
+    if values.truth(path) == GUARD_UNMODELLED:
+        return (
+            "unresolvable",
+            f"values.yaml sets `{path}` to a construct this gate does not model — an "
+            f"anchor, an alias, a sequence, a flow collection or a template "
+            f"expression. This is NOT a claim that `{path}` is unset",
+        )
     raw = values.raw(path)
     if raw is None:
         return "unresolvable", f"values.yaml sets no plain scalar at `{path}`"
@@ -515,6 +834,128 @@ class Judge:
         return held
 
 
+def guard_verdict(occurrences, values: Values):
+    """Which occurrences of a key can render, and what blocks the others.
+
+    Returns `(renderable, blocking)`. `renderable` holds the occurrences whose every
+    enclosing guard is on; `blocking` is the `(occurrence, guard, state)` that
+    decided against one of the rest, preferring an unmodelled guard because "this
+    gate cannot tell" outranks "that branch is off".
+
+    THIS IS WHAT MAKES `{{- else }}` LEGIBLE (ledger 897 item 4). An
+    `{{- if X }}…{{- else }}…{{- end }}` pair is TWO occurrences of the same key with
+    opposite polarity, so exactly one of them renders — and the shipped gate read
+    only `template.first()`, judged the if-branch, found its guard false and reported
+    that the field renders nothing while the else arm renders it correctly.
+    """
+    renderable = []
+    blocking = None
+    for occurrence in occurrences:
+        blocked = None
+        for guard in occurrence.guards:
+            state = guard_state(guard, values)
+            if state != GUARD_ON:
+                blocked = (occurrence, guard, state)
+                break
+        if blocked is None:
+            renderable.append(occurrence)
+        elif blocking is None or blocked[2] == GUARD_UNMODELLED:
+            blocking = blocked
+    return renderable, blocking
+
+
+def guard_message(blocking, field: str, where: str, tail: str = "") -> str:
+    """Why a guard stops a field rendering. FOUR CAUSES, FOUR MESSAGES (ledger 897).
+
+    The shipped gate printed "values.yaml leaves it off" for all four, which is a
+    claim about the chart and was false for three of them. Every case is still red;
+    what changes is that the gate now names the one it found.
+    """
+    if blocking is None:
+        # Nothing blocked the field, so the caller's assertion holds and this string
+        # is never printed. `assert_that` takes its message eagerly.
+        return ""
+    occurrence, guard, state = blocking
+    named = f"`{guard.path}`" if guard.path else "its condition"
+    prefix = f"{where}:{occurrence.lineno} renders `{field}` only when "
+    if not guard.modelled:
+        return (
+            f"{where}:{occurrence.lineno} — `{field}` sits inside a "
+            f"`{{{{ if }}}}`/`{{{{ with }}}}` condition this gate does not model, so "
+            f"it cannot tell whether the field renders. A guard it cannot read is "
+            f"REFUSED rather than ignored: treating it as always-true passes a chart "
+            f"whose field renders nothing. Write the condition over a single "
+            f"`.Values` path, or set the field unguarded.{tail}"
+        )
+    if state == GUARD_UNMODELLED:
+        return (
+            f"{prefix}{named} is on, and values.yaml sets {named} to a construct this "
+            f"gate does not model — an anchor, an alias, a sequence, a flow "
+            f"collection or a template expression. The chart is refused because this "
+            f"gate cannot tell whether the field renders. It is NOT a claim that "
+            f"{named} is unset.{tail}"
+        )
+    if state == GUARD_ABSENT:
+        return (
+            f"{prefix}{named} is on, and values.yaml sets no {named} at all — so the "
+            f"field renders nothing.{tail}"
+        )
+    return (
+        f"{prefix}{named} is on, and values.yaml sets {named} to a value Go reads as "
+        f"false — so the field renders nothing.{tail}"
+    )
+
+
+def renders(
+    judge: Judge,
+    template: Template,
+    values: Values,
+    key: str,
+    where: str,
+    absent: str,
+    tail: str = "",
+):
+    """The occurrences of `key` that RENDER, or `[]` when the chart is refused.
+
+    Two assertions in the order they can fail: the key exists at all, and some
+    occurrence of it survives its enclosing guards.
+
+    EVERY BASELINE FIELD GOES THROUGH HERE, and that uniformity is the fix rather
+    than an incidental tidy-up. The ledger 897 guard work first landed on
+    `terminationGracePeriodSeconds` and the `topologySpreadConstraints` presence
+    check only, because those two were the shapes the review named; the other five
+    lookups kept `template.first()` and evaluated no guard at all. Both defects
+    survived there, one in each direction, and both were measured on a scratch copy
+    of `iam`'s chart:
+
+      * FALSE REFUSAL — an `{{- if }}`/`{{- else }}` pair over
+        `automountServiceAccountToken` reported "resolves to `true`, not `false`"
+        about a chart that renders `false`, because `first()` returns the branch
+        that does not render.
+      * FAIL-OPEN, and the worse half — `automountServiceAccountToken`,
+        `serviceAccountName` and `whenUnsatisfiable` behind a guard that is OFF all
+        passed with exit 0 while rendering NOTHING. A `whenUnsatisfiable` that
+        renders nothing takes the API default `DoNotSchedule`, which is the hang
+        this gate exists to prevent, reported green.
+
+    A per-field hand-rolled preamble is what allowed five of seven fields to differ
+    from the two that were fixed. One function is what stops the next one.
+    """
+    occurrences = template.keys.get(key, [])
+    if not judge.assert_that(bool(occurrences), absent):
+        return []
+    renderable, blocking = guard_verdict(occurrences, values)
+    # An unmodelled guard ANYWHERE over this key means the gate cannot say whether
+    # the field renders, even if another occurrence of it plainly does.
+    undecided = blocking is not None and blocking[2] == GUARD_UNMODELLED
+    if not judge.assert_that(
+        bool(renderable) and not undecided,
+        guard_message(blocking, key, where, tail),
+    ):
+        return []
+    return renderable
+
+
 def find_charts(root: Path):
     """Every chart directory under `root`, outermost first, vendored ones pruned."""
     found = []
@@ -534,7 +975,12 @@ def read(path: Path) -> str:
 
 
 def declared_kinds(templates: Path) -> dict:
-    """Which `kind:` each template under `templates/` declares, by kind."""
+    """Which template FILE under `templates/` declares each `kind:`, by kind.
+
+    The paths are load-bearing rather than diagnostic (ledger 897 item 6): they are
+    how `judge_chart` finds the pod spec. De-duplicated, because a file is one
+    declarer however many times it spells the line.
+    """
     by_kind: dict = {}
     if not templates.is_dir():
         return by_kind
@@ -547,69 +993,131 @@ def declared_kinds(templates: Path) -> dict:
                 continue
             kind = KIND_LINE.match(body)
             if kind is not None:
-                by_kind.setdefault(kind.group("kind"), []).append(path.name)
+                found = by_kind.setdefault(kind.group("kind"), [])
+                if path not in found:
+                    found.append(path)
     return by_kind
+
+
+def prestop_sleep(template: Template, values: Values):
+    """The preStop sleep the grace floor must cover: ('ok', seconds) or ('no', why).
+
+    THE ONE FAIL-OPEN THIS GATE SHIPPED (ledger 897 item 5), and the worst defect in
+    it. The floor's sleep term was added only when the literal dotted path
+    `preStopSleepSeconds` appeared in `template.references` AND in `values.yaml`, so
+    a term DISCOVERED BY NAME silently became 0 whenever the name was anything else:
+    a hardcoded `sleep: seconds: 5`, or a differently-named value. Measured against
+    `iam`'s real chart with the value inlined as a literal 5 and the grace period cut
+    to 32 — 25 assertions, 0 findings, exit 0, and a pod that gets 27s for a 25s
+    drain plus a 5s exit. The floor dropped from 35 to 30 with nothing said.
+
+    A DERIVED BOUND WHOSE TERMS ARE DISCOVERED BY NAME MUST REFUSE WHEN IT CANNOT
+    FIND A TERM IT EXPECTS, never quietly compute a weaker bound. So the sleep is
+    read from the TEMPLATE's own preStop handler — the structure that renders it —
+    rather than from a values key this gate hopes is spelled a particular way:
+
+      * no `preStop` key at all      -> 0, and the floor is ADR-0601's 25 + 5 = 30.
+      * a `preStop` whose block does not render -> 0, for the same reason.
+      * a `sleep: seconds:` that resolves      -> that number, whatever it is named.
+      * anything else — an `exec` handler, a `seconds:` this gate cannot resolve —
+        -> REFUSED. An `exec` handler's duration is not knowable from the chart, and
+        assuming 0 is exactly the fail-open above.
+    """
+    if "preStop" not in template.keys:
+        return "ok", 0
+    occurrences = template.keys.get("seconds", [])
+    if not occurrences:
+        return (
+            "no",
+            "the template sets a `preStop` handler with no `sleep: seconds:` under "
+            "it. An `exec` handler's duration is not knowable from the chart, so the "
+            "grace-period floor cannot be computed — and assuming no sleep is the "
+            "fail-open ADR-0601's bound exists to close",
+        )
+    renderable, blocking = guard_verdict(occurrences, values)
+    if not renderable:
+        if blocking is not None and blocking[2] == GUARD_UNMODELLED:
+            return (
+                "no",
+                "this gate cannot tell whether the `preStop` sleep renders, because "
+                "its guard is a construct it does not model, so the grace-period "
+                "floor cannot be computed",
+            )
+        # The handler is guarded off, so no sleep renders and the floor is the bare
+        # drain plus exit margin.
+        return "ok", 0
+    longest = 0
+    for occurrence in renderable:
+        state, text = resolve(occurrence, values)
+        if state != "ok":
+            return (
+                "no",
+                f"the `preStop` sleep at line {occurrence.lineno} cannot be "
+                f"resolved ({text}), so the grace-period floor cannot be computed",
+            )
+        seconds = as_integer(text)
+        if seconds is None:
+            return (
+                "no",
+                f"the `preStop` sleep at line {occurrence.lineno} resolves to "
+                f"`{text}`, which is not an integer number of seconds, so the "
+                f"grace-period floor cannot be computed",
+            )
+        longest = max(longest, seconds)
+    return "ok", longest
 
 
 def judge_grace(judge: Judge, template: Template, values: Values, where: str) -> None:
     """`terminationGracePeriodSeconds >= DRAIN_BUDGET + EXIT_MARGIN + preStop sleep`."""
-    occurrence = template.first("terminationGracePeriodSeconds")
-    if not judge.assert_that(
-        occurrence is not None,
-        f"{where} sets no `terminationGracePeriodSeconds`. ADR-0601 bounds the "
+    field = "terminationGracePeriodSeconds"
+    renderable = renders(
+        judge,
+        template,
+        values,
+        field,
+        where,
+        f"{where} sets no `{field}`. ADR-0601 bounds the "
         f"pod's grace period against `DRAIN_BUDGET`; a chart that does not set it "
         f"inherits kubelet's default, and the bound then holds by accident.",
-    ):
+    )
+    if not renderable:
         return
 
-    for guard in occurrence.guards:
-        if not judge.assert_that(
-            is_truthy(values.raw(guard)),
-            f"{where}:{occurrence.lineno} renders "
-            f"`terminationGracePeriodSeconds` only when `{guard}` is set, and "
-            f"values.yaml leaves it off — so the field renders nothing.",
-        ):
-            return
-
-    state, text = resolve(occurrence, values)
+    state, sleep = prestop_sleep(template, values)
     if not judge.assert_that(
         state == "ok",
-        f"{where}:{occurrence.lineno} — `terminationGracePeriodSeconds` cannot be "
-        f"resolved: {text}.",
+        f"{where} — `{field}` cannot be judged: {sleep}. ADR-0601's floor is "
+        f"{DRAIN_BUDGET_SECONDS} DRAIN_BUDGET + {EXIT_MARGIN_SECONDS} exit margin "
+        f"PLUS the preStop sleep, so a sleep this gate cannot price makes the bound "
+        f"unknowable rather than smaller.",
     ):
         return
-    grace = as_integer(text)
-    if not judge.assert_that(
-        grace is not None,
-        f"{where}:{occurrence.lineno} — `terminationGracePeriodSeconds` resolves "
-        f"to `{text}`, which is not an integer number of seconds.",
-    ):
-        return
-
-    sleep = 0
-    if "preStopSleepSeconds" in template.references:
-        raw = values.raw("preStopSleepSeconds")
-        if raw is not None:
-            sleep = as_integer(raw)
-            if not judge.assert_that(
-                sleep is not None,
-                f"values.yaml sets `preStopSleepSeconds: {raw}`, which is not an "
-                f"integer number of seconds, so the grace-period floor cannot be "
-                f"computed.",
-            ):
-                return
-
     floor = DRAIN_BUDGET_SECONDS + EXIT_MARGIN_SECONDS + sleep
-    judge.assert_that(
-        grace >= floor,
-        f"{where}:{occurrence.lineno} — `terminationGracePeriodSeconds: {grace}` "
-        f"is below the floor of {floor}s "
-        f"({DRAIN_BUDGET_SECONDS} DRAIN_BUDGET + {EXIT_MARGIN_SECONDS} exit "
-        f"margin + {sleep} preStop sleep). ADR-0601: the grace period covers the "
-        f"preStop sleep PLUS the drain after it, and going UNDER is the only "
-        f"direction that breaks the bound. Raise the grace period or lower the "
-        f"sleep; the 35 the estate ships is this arithmetic, not a magic number.",
-    )
+
+    for occurrence in renderable:
+        state, text = resolve(occurrence, values)
+        if not judge.assert_that(
+            state == "ok",
+            f"{where}:{occurrence.lineno} — `{field}` cannot be resolved: {text}.",
+        ):
+            continue
+        grace = as_integer(text)
+        if not judge.assert_that(
+            grace is not None,
+            f"{where}:{occurrence.lineno} — `{field}` resolves "
+            f"to `{text}`, which is not an integer number of seconds.",
+        ):
+            continue
+        judge.assert_that(
+            grace >= floor,
+            f"{where}:{occurrence.lineno} — `{field}: {grace}` "
+            f"is below the floor of {floor}s "
+            f"({DRAIN_BUDGET_SECONDS} DRAIN_BUDGET + {EXIT_MARGIN_SECONDS} exit "
+            f"margin + {sleep} preStop sleep). ADR-0601: the grace period covers the "
+            f"preStop sleep PLUS the drain after it, and going UNDER is the only "
+            f"direction that breaks the bound. Raise the grace period or lower the "
+            f"sleep; the 35 the estate ships is this arithmetic, not a magic number.",
+        )
 
 
 def judge_service_account(
@@ -623,15 +1131,21 @@ def judge_service_account(
         "with every other unnamed workload, and a permission cannot be granted to "
         "this workload without granting it to all of them.",
     )
-    named = template.first("serviceAccountName")
-    judge.assert_that(
-        named is not None,
+    renders(
+        judge,
+        template,
+        values,
+        "serviceAccountName",
+        where,
         f"{where} sets no `serviceAccountName`, so the pod takes the namespace's "
         f"`default` account whatever the chart's own ServiceAccount says.",
     )
-    mounted = template.first("automountServiceAccountToken")
-    if judge.assert_that(
-        mounted is not None,
+    for mounted in renders(
+        judge,
+        template,
+        values,
+        "automountServiceAccountToken",
+        where,
         f"{where} sets no `automountServiceAccountToken`. The default is to mount "
         f"a Kubernetes API token into a pod that calls no API.",
     ):
@@ -654,31 +1168,34 @@ def judge_topology_spread(
     judge: Judge, template: Template, values: Values, where: str
 ) -> None:
     """A hostname spread at `maxSkew: 1`, and `ScheduleAnyway` rather than a hang."""
-    occurrence = template.first("topologySpreadConstraints")
-    if not judge.assert_that(
-        occurrence is not None,
+    if not renders(
+        judge,
+        template,
+        values,
+        "topologySpreadConstraints",
+        where,
         f"{where} sets no `topologySpreadConstraints`. With `replicaCount: 2` and "
         f"nothing spreading them, both replicas may land on one node and a node "
         f"reboot takes the whole Service; today's even split is a scheduler "
         f"coincidence.",
+        tail=(
+            " Unlike `networkPolicy.enabled`, this has no D80 argument for being "
+            "off: a spread constraint needs no CRD and installs on a bare cluster."
+        ),
     ):
         return
 
-    for guard in occurrence.guards:
-        if not judge.assert_that(
-            is_truthy(values.raw(guard)),
-            f"{where}:{occurrence.lineno} renders "
-            f"`topologySpreadConstraints` only when `{guard}` is on, and "
-            f"values.yaml leaves it off — every template line is present and no "
-            f"constraint renders. Unlike `networkPolicy.enabled`, this has no D80 "
-            f"argument for being off: a spread constraint needs no CRD and "
-            f"installs on a bare cluster.",
-        ):
-            return
-
-    skew = template.first("maxSkew")
-    if judge.assert_that(
-        skew is not None,
+    # THE THREE SPREAD SCALARS GO THROUGH `renders` TOO, and the middle one is why
+    # it matters most here: a `whenUnsatisfiable` guarded off renders NOTHING, and
+    # the constraint then takes the API default `DoNotSchedule` — the hang the
+    # docstring above describes. Judging the key without its guard reported that
+    # green.
+    for skew in renders(
+        judge,
+        template,
+        values,
+        "maxSkew",
+        where,
         f"{where} — the `topologySpreadConstraints` block sets no `maxSkew`.",
     ):
         state, text = resolve(skew, values)
@@ -693,9 +1210,12 @@ def judge_topology_spread(
                 f"not a positive integer.",
             )
 
-    key = template.first("topologyKey")
-    if judge.assert_that(
-        key is not None,
+    for key in renders(
+        judge,
+        template,
+        values,
+        "topologyKey",
+        where,
         f"{where} — the `topologySpreadConstraints` block sets no `topologyKey`.",
     ):
         state, text = resolve(key, values)
@@ -708,9 +1228,12 @@ def judge_topology_spread(
                 f"{where}:{key.lineno} — `topologyKey` resolves to an empty value.",
             )
 
-    strength = template.first("whenUnsatisfiable")
-    if judge.assert_that(
-        strength is not None,
+    for strength in renders(
+        judge,
+        template,
+        values,
+        "whenUnsatisfiable",
+        where,
         f"{where} — the `topologySpreadConstraints` block sets no "
         f"`whenUnsatisfiable`, so it takes the API default `DoNotSchedule`.",
     ):
@@ -749,27 +1272,39 @@ def judge_chart(chart: Path, root: Path) -> Verdict:
     relative = chart.relative_to(root).as_posix() or "."
     verdict = Verdict(chart=relative, judged=False)
 
-    deployment = chart / "templates" / "deployment.yaml"
     kinds = declared_kinds(chart / "templates")
-    if "Deployment" not in kinds:
+    declarers = kinds.get("Deployment", [])
+    if not declarers:
         verdict.note = "renders no Deployment"
         return verdict
 
-    if not deployment.is_file():
+    # THE POD SPEC IS FOUND BY THE FACT, NOT BY THE FILENAME (ledger 897 item 6).
+    # The shipped gate read `templates/deployment.yaml` while `declared_kinds` scanned
+    # all of `templates/`, so a chart whose Deployment lives at another filename was
+    # judged against whatever that path happened to hold. Measured on a scratch copy
+    # of `iam`'s real chart with the workload moved to `workload.yaml` and a ConfigMap
+    # left at `deployment.yaml`: FIVE findings, of which FOUR were false — the real
+    # template sets every field they said were missing. Keying on the declaration is
+    # the same property the ServiceAccount and NetworkPolicy checks already have, and
+    # it makes the strictness argument stronger rather than weaker: the Deployment is
+    # now judged wherever it is, instead of being unjudged whenever it moves.
+    if len(declarers) > 1:
         verdict.judged = True
         verdict.findings.append(
             Finding(
                 relative,
                 "deployment",
-                "a template declares `kind: Deployment` but there is no "
-                "`templates/deployment.yaml`. This gate reads the pod spec from "
-                "that path; a Deployment spelled elsewhere is unjudged, which is "
-                "not a state this gate accepts.",
+                f"{len(declarers)} templates declare `kind: Deployment`: "
+                f"{', '.join(sorted(path.name for path in declarers))}. This gate "
+                f"judges ONE pod spec per chart and has no rule for choosing among "
+                f"them, so it refuses rather than judging an arbitrary one and "
+                f"reporting a verdict over part of the chart.",
             )
         )
         verdict.assertions += 1
         return verdict
 
+    deployment = declarers[0]
     verdict.judged = True
     template = scan_template(read(deployment))
     values = scan_values(read(chart / "values.yaml"))
@@ -783,10 +1318,13 @@ def judge_chart(chart: Path, root: Path) -> Verdict:
         f"field.",
     ):
         return verdict
-    structure.assert_that(
-        "Deployment" in template.declares,
-        f"{where} declares no `kind: Deployment`.",
-    )
+    # A `declares no kind: Deployment` assertion used to sit here. It is DELETED
+    # rather than kept, because item 6 made it tautological: the file being scanned is
+    # now the one `declared_kinds` picked BY that declaration, using the same
+    # `KIND_LINE` over the same text, so the check could no longer fail. A check whose
+    # failure branch is unreachable reads as coverage and is worse than its absence —
+    # this file's own docstring makes that argument about parse failures. It costs one
+    # assertion on every chart, which is why the per-chart count moves 26 -> 25.
     structure.assert_that(
         values.modelled,
         f"{chart.relative_to(root).as_posix()}/values.yaml cannot be read by this "
