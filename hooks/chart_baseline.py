@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """Ledger 511 — every module chart carries the four baseline fields, with the rule rather than the number.
 
+TWO PUBLISHED HOOKS LIVE IN THIS FILE, SPLIT BY ADR-0685 (ledger 911). `--part
+chart-baseline` asserts the three fields that are properties of the chart's own pod
+spec; `--part chart-network-policy` asserts the fourth, that a template declares
+`kind: NetworkPolicy`. The field set did not change and neither did any assertion —
+what changed is that a repository adopts each half separately. `Part` carries the
+reasoning, the floors and the sentence each half prints about its own scope; read it
+before changing either.
+
 `docs/plans/chart-hardening.md` asked whether ledger 511 is one shared chart
 decision or N local fixes, priced a shared chart library, and refused it: a new
 repository, a publish pipeline, a `dependencies:` stanza and a version bump per
@@ -17,7 +25,7 @@ five repositories that already passed; publishing it let one sweep reach the
 seven that never had it, and that sweep found real violations. A published hook
 is one artefact. A copied one is drift waiting to happen.
 
-THE FOUR FIELDS ARE THE PLAN'S, AND NOTHING ELSE IS HERE. The plan adopted
+THE FOUR FIELDS ARE THE PLAN'S, AND NOTHING ELSE IS HERE — across both halves. The plan adopted
 `terminationGracePeriodSeconds`, `topologySpreadConstraints`, a dedicated
 ServiceAccount and a NetworkPolicy; it DECLINED `livenessProbe`, `startupProbe`,
 `preStop`, `strategy`, `minReadySeconds` and `affinity`, each with its own
@@ -119,22 +127,25 @@ chart whose workload sat elsewhere was judged against whatever held that path.
 Two templates declaring `kind: Deployment` is the case that is refused now, with
 one accurate message rather than four false ones.
 
-`gateway` HAS NO NetworkPolicy IN ITS CHART, and this gate reports it; `project`
-declares no ServiceAccount, and it reports that. Both are dated observations —
-re-measured 2026-09-14 against `origin/main` of the seven module repositories,
-where the other five pass at 25 assertions — and NOT this file's standing claim
-about anybody's tree (ledger 847). The reason
-it is unresolved rather than simply missing: `gateway`'s ingress source is the
-Envoy Gateway data plane in `envoy-gateway-system`, selected by
-`gateway.envoyproxy.io/*` labels, and `chart-hardening.md` places that policy in
-`yadgarhq/deploy`'s `infra/network-policies/` precisely because putting it in the
-chart would be D80's first bullet — "a service chart that reads, requires, or is
-validated against a resource owned by one ingress implementation". A hook cannot
-see another repository, so there is no in-tree fact to key an exemption on, and
-there is deliberately NO comment marker either: `no_test_skips.py` states the
-rule this file follows — the exemption is a fact, never a reason string. The
-finding therefore stands until the adoption sweep resolves it, and ADR-0584 is
-satisfied because publication is not adoption.
+`gateway` HAS NO NetworkPolicy IN ITS CHART, AND THAT IS WHY THIS GATE IS TWO
+(ADR-0685, ledger 911). Its ingress source is the Envoy Gateway data plane in
+`envoy-gateway-system`, selected by `gateway.envoyproxy.io/*` labels, and a module
+chart validated against one ingress implementation is D80's first bullet — "a service
+chart that reads, requires, or is validated against a resource owned by one ingress
+implementation". So that policy ships in `yadgarhq/deploy` as
+`infra/network-policies/gateway-ingress.yaml`, and `gateway`'s chart is CORRECT in not
+carrying one. ADR-0584 forbids adopting a gate in a repository it hard-fails, so the
+single four-field gate cost `gateway` the three assertions it does satisfy in order to
+report the one it never will. Splitting the gate is what returns them, with no
+exemption anywhere — see `Part`.
+
+MEASURED 2026-09-14 against `origin/main` of the seven module repositories:
+`chart-baseline` passes all SEVEN at 29 assertions each, `chart-network-policy` passes
+six at 1 and refuses `gateway`. 29 + 1 = 30 is what the single gate evaluated per chart
+before the split, on every one of the seven, which is the measurement that says the
+fourth assertion MOVED rather than being dropped (ADR-0645). `project` declared no
+ServiceAccount when this gate was published and now does (ledger 894). Dated
+observations, not this file's standing claim about anybody's tree (ledger 847).
 
 ADOPTION IS PER REPOSITORY AND IS NOT AUTOMATIC (ADR-0577, ADR-0607), and
 ADR-0584 forbids adopting a gate in a repository it hard-fails. Two consequences
@@ -146,10 +157,14 @@ tick. And `yadgarhq/actions` does not reference it either — this repository ho
 no chart — so what gates this file on every commit is `pytest-scripts`, not the
 hook itself.
 
-THREE WAYS TO GO BLIND, and no one check sees all of them (ledger 715's
+THREE WAYS TO GO BLIND, EACH CHECKED IN EACH HALF, and no one check sees all of them.
+Splitting a gate multiplies this risk rather than moving it: a half able to report
+success having examined nothing reintroduces ledger 715's class on whichever side is
+weaker, so all three are evaluated per part against that part's own numbers and the
+suite fires each of the three in BOTH halves. (Ledger 715's
 `MINIMUM_SITES=2`, and `certificate_usages.py`'s pair, extended by one). `MINIMUM_CHARTS`
 catches the walk finding nothing at all — a `chart/` to `charts/` rename, a
-restructured repository. `MINIMUM_ASSERTIONS` catches every chart turning into
+restructured repository. The assertions floor catches every chart turning into
 something this gate does not judge AT ONCE, which is what a broken
 `kind: Deployment` detection used to look like before this file's own regex
 carried that defect: the chart count stays 7 while the number of assertions
@@ -159,7 +174,7 @@ judged charts carry it, and the tree reports "N charts, N-1 judged" with exit 0.
 So a chart's `judged` flag is checked against the chart count directly: every
 discovered chart must be judged, or the run is red. All three are floors rather
 than the current counts, because adding a module is a legitimate change and must
-not redden. All three counts are in the success line.
+not redden. All three counts are in the running half's own success line.
 
 `language: script` AND STDLIB ONLY, the reason eight hooks in
 `.pre-commit-hooks.yaml` already carry: `language: python` makes pre-commit
@@ -182,7 +197,10 @@ RUN IT AGAINST A TREE THIS REPOSITORY DOES NOT CONTAIN with `--root`, the way
 `no_test_skips.py` is swept across the estate:
 
     git clone --depth 1 git@github.com:yadgarhq/<repo>.git <tree>
-    python3 hooks/chart_baseline.py --root <tree> --report
+    python3 hooks/chart_baseline.py --root <tree> --part chart-baseline --report
+    python3 hooks/chart_baseline.py --root <tree> --part chart-network-policy --report
+
+Each half is its own run, because `--part` has no default.
 """
 
 from __future__ import annotations
@@ -201,9 +219,17 @@ EXIT_MARGIN_SECONDS = 5
 
 REQUIRED_WHEN_UNSATISFIABLE = "ScheduleAnyway"
 
-# Floors, not current counts. See the module docstring.
+# Floors, not current counts, and EACH HALF CARRIES ITS OWN (ledger 911). They are
+# both 1 in both halves today and that is a coincidence of arithmetic rather than a
+# shared constant: `chart-baseline` evaluates 29 assertions per conforming chart and
+# `chart-network-policy` exactly 1, so a shared number would have to be the smaller of
+# the two and would stop bounding the larger. A floor is what a half must clear to be
+# allowed to report success, so it belongs to the half. See `Part` and the module
+# docstring.
 MINIMUM_CHARTS = 1
 MINIMUM_ASSERTIONS = 1
+MINIMUM_POLICY_CHARTS = 1
+MINIMUM_POLICY_ASSERTIONS = 1
 
 # Directories a chart never lives in. `charts/` is helm's vendored-subchart
 # directory: a dependency's copy is not this repository's chart to judge.
@@ -251,7 +277,7 @@ KEY_LINE = re.compile(r"^(?P<indent>[ ]*)(?P<key>[A-Za-z0-9_.\-]+):(?P<rest>.*)$
 # publication: `kind: NetworkPolicy  # one ingress policy` and
 # `kind: "NetworkPolicy"` both went unrecognised (a false refusal), and worse,
 # `kind: Deployment  # the workload` went unrecognised too — which is a chart this
-# gate never judges, silently, since `MINIMUM_ASSERTIONS` cannot see one chart in
+# gate never judges, silently, since the assertions floor cannot see one chart in
 # a many-chart tree going dark while the rest still pass. Tolerating leading
 # space, an optional quote and a trailing comment closes all three.
 KIND_LINE = re.compile(
@@ -563,16 +589,32 @@ class Guard:
 
 @dataclass(frozen=True)
 class KeyOccurrence:
+    """One `key:` line: where it is, what it carries, and what encloses it.
+
+    `key` and `indent` were added by ledger 911 and are what make a key's POSITION
+    legible. `indent` is the column the key sits at AFTER a leading sequence dash is
+    rewritten to whitespace, so `- maxSkew: 1` reports the column `maxSkew` really
+    occupies. Together with `Template.ordered` they are the whole of the positional
+    model `prestop_sleep` needs — see `block_of`.
+    """
+
     lineno: int
     raw_value: str
     guards: tuple
     dot: str
+    key: str = ""
+    indent: int = 0
 
 
 @dataclass(frozen=True)
 class Template:
     keys: dict
     balanced: bool
+    # Every occurrence in LINE ORDER, which `keys` cannot give: it is grouped by key
+    # name, and a question about what NESTS UNDER a key is a question about the lines
+    # between that key and the next one at its own indentation or shallower. Ledger
+    # 911; `block_of` is the only reader.
+    ordered: tuple = ()
 
     # `first()` lived here and is DELETED: every caller went through it without
     # evaluating a guard, which is exactly how five of the seven baseline fields kept
@@ -636,6 +678,7 @@ def scan_template(text: str) -> Template:
     structure instead. Neither is kept as an unread field.
     """
     keys: dict = {}
+    ordered: list = []
     stack: list = []
     balanced = True
 
@@ -698,11 +741,18 @@ def scan_template(text: str) -> Template:
         # EVERY frame, including the ones this gate cannot read. Dropping those was
         # the fail-open recorded on `Guard` above.
         guards = tuple(guard for _, guard in stack)
-        keys.setdefault(match.group("key"), []).append(
-            KeyOccurrence(lineno, rest.strip(), guards, dot)
+        occurrence = KeyOccurrence(
+            lineno,
+            rest.strip(),
+            guards,
+            dot,
+            match.group("key"),
+            len(match.group("indent")),
         )
+        keys.setdefault(match.group("key"), []).append(occurrence)
+        ordered.append(occurrence)
 
-    return Template(keys, balanced and not stack)
+    return Template(keys, balanced and not stack, tuple(ordered))
 
 
 def unwrap_action(text: str):
@@ -999,6 +1049,33 @@ def declared_kinds(templates: Path) -> dict:
     return by_kind
 
 
+def block_of(template: Template, opener: KeyOccurrence):
+    """The key occurrences NESTED UNDER `opener`, by YAML indentation.
+
+    The block a mapping key opens runs from the line after it to the first later key
+    at its own indentation or shallower. That is the whole positional model, and
+    stating its size matters: the ledger 897 car filed the defect below rather than
+    fixing it because it believed scoping a key to a block needed a positional model
+    this scan did not have. It needed one `indent` field, one line-ordered tuple and
+    this loop.
+
+    WHAT IT DOES NOT MODEL, so nobody reads more into it. A flow mapping —
+    `lifecycle: {preStop: {sleep: {seconds: 5}}}` — puts no inner key on a line of its
+    own, so `preStop` never enters `template.keys` and `prestop_sleep` sees a chart
+    with no handler, exactly as it did before ledger 911. No module chart writes one,
+    and widening the hand scan to flow collections is a change to the scanner the
+    PyYAML differential covers rather than a change to this function.
+    """
+    inside = []
+    for occurrence in template.ordered:
+        if occurrence.lineno <= opener.lineno:
+            continue
+        if occurrence.indent <= opener.indent:
+            break
+        inside.append(occurrence)
+    return inside
+
+
 def prestop_sleep(template: Template, values: Values):
     """The preStop sleep the grace floor must cover: ('ok', seconds) or ('no', why).
 
@@ -1022,10 +1099,43 @@ def prestop_sleep(template: Template, values: Values):
       * anything else — an `exec` handler, a `seconds:` this gate cannot resolve —
         -> REFUSED. An `exec` handler's duration is not knowable from the chart, and
         assuming 0 is exactly the fail-open above.
+
+    THE SLEEP IS FOUND BY POSITION, NOT BY KEY NAME (ledger 911), and that residual is
+    the same class as the fail-open above rather than a tidy-up. Reading the handler's
+    structure fixed WHICH FILE the term came from and left the term itself discovered
+    by an unqualified `seconds:` anywhere in the template. `SleepAction` is equally
+    valid under `postStart`, and a `postStart` sleep is not time kubelet spends
+    draining — it runs at startup — so pricing it into the grace-period floor is a
+    FALSE REFUSAL of a legitimate chart. Measured on `yadgarhq/iam`'s real chart at
+    `origin/main` with a `postStart: sleep: seconds: 20` added beside its own 5s
+    `preStop`: "`terminationGracePeriodSeconds: 35` is below the floor of 50s (25
+    DRAIN_BUDGET + 5 exit margin + 20 preStop sleep)" — a number no `preStop` in that
+    chart sets, attributed to `preStop` by name. Latent at the time only because every
+    module chart holds exactly one `seconds:` key and it is the right one.
+
+    IT POINTED BOTH WAYS, which the filing did not record. The same unqualified lookup
+    also let a `postStart` sleep SATISFY the `exec`-handler refusal three paragraphs
+    up: a chart whose `preStop` is an `exec` — a duration not knowable from the chart —
+    found `seconds:` under `postStart`, priced THAT as the drain sleep and passed.
+    Measured on the same `iam` tree with `preStop: exec: command: [sh, -c, sleep 5]`, a
+    `postStart` sleep of 7 and the grace period at 40: v1.21.1 reports "OK — 1 charts,
+    1 judged, 30 assertions evaluated, 0 findings", exit 0. So the residual was a FALSE
+    REFUSAL and a FAIL-OPEN wearing one lookup, and only the first half had been filed.
+
+    So `seconds` is taken from `block_of` the `preStop` key rather than from
+    `template.keys`. Every `preStop` occurrence contributes its own block, because an
+    `{{- if }}`/`{{- else }}` pair is two of them and `guard_verdict` below decides
+    which renders.
     """
-    if "preStop" not in template.keys:
+    openers = template.keys.get("preStop", [])
+    if not openers:
         return "ok", 0
-    occurrences = template.keys.get("seconds", [])
+    occurrences = [
+        occurrence
+        for opener in openers
+        for occurrence in block_of(template, opener)
+        if occurrence.key == "seconds"
+    ]
     if not occurrences:
         return (
             "no",
@@ -1268,7 +1378,114 @@ def judge_network_policy(judge: Judge, kinds: dict) -> None:
     )
 
 
-def judge_chart(chart: Path, root: Path) -> Verdict:
+BASELINE_HOOK = "chart-baseline"
+POLICY_HOOK = "chart-network-policy"
+
+
+@dataclass(frozen=True)
+class Part:
+    """One published half of this gate: its floors, and the sentence it prints.
+
+    LEDGER 511 PUT FOUR FIELDS IN ONE GATE AND ADR-0685 SPLIT IT ALONG THE BOUNDARY OF
+    WHERE ITS SUBJECTS LIVE. Three of the four are properties of the chart's own pod
+    spec. The fourth asks whether a template declares `kind: NetworkPolicy`, and for
+    `yadgarhq/gateway` that policy legitimately does NOT live in the chart: its ingress
+    source is the Envoy Gateway data plane, and putting a policy validated against one
+    ingress implementation in a module chart is D80's first bullet, so the policy lives
+    in `yadgarhq/deploy` as `infra/network-policies/gateway-ingress.yaml`. One correct
+    assertion was therefore costing that repository the other three — ADR-0584 forbids
+    adopting a gate in a repository it hard-fails, so `gateway` could adopt none of it.
+
+    THE SPLIT NEEDS NO EXEMPTION, AND THAT IS THE POINT. An exemption keyed on an
+    in-tree fact was considered and is rejected by ADR-0685 by name: `kind: HTTPRoute`
+    discriminates `gateway` from the other six today, but it encodes "ships an
+    HTTPRoute" while the reason is "is edge-facing", so the next edge-facing module
+    inherits the exemption with nothing red. A fact that merely correlates with the
+    reason is not the reason. Splitting the gate and adopting each half per repository
+    leaves nothing to exempt.
+
+    ONE FILE, TWO `entry:` LINES, and not two scripts. The floors, the chart walk and
+    the success line are one mechanism, and `.pre-commit-hooks.yaml` already passes
+    arguments to a script hook (`no_test_skips.py --run-pytest`). Two files would be two
+    copies of the three floors — the five md5-identical copies ADR-0569's gate had, and
+    the drift this file's own header argues against publishing to avoid.
+
+    `--part` HAS NO DEFAULT. A default would make a bare invocation mean one half
+    without saying so, which is the "inferred from which hooks a repository happens to
+    reference" reading ADR-0685 forbids. Every invocation names its half.
+    """
+
+    hook: str
+    minimum_charts: int
+    minimum_assertions: int
+    examined: str
+    declined: str
+    sibling: str
+
+    def scope(self) -> str:
+        """What this half examined, what it did NOT, and what it cannot know.
+
+        ADR-0685: "a module can be partially covered, and partial coverage must be
+        legible in the success line rather than inferred from which hooks a repository
+        happens to reference." So the omission is stated POSITIVELY, on the pass as
+        well as on the failure, and it names the hook that covers it.
+
+        THE LAST CLAUSE IS THE LOAD-BEARING ONE. This process cannot see the consumer's
+        `.pre-commit-config.yaml` — it is handed a tree and a part — so it must not
+        imply the other half ran. Before the split a green `chart-baseline` meant four
+        fields; after it, an unqualified green line would silently mean three, and a
+        reader carrying the old meaning would be wrong with nothing to correct them.
+        This sentence is what corrects them.
+        """
+        return (
+            f"{self.hook}: examined {self.examined}. It did NOT examine "
+            f"{self.declined} — the `{self.sibling}` hook is what does, and this run "
+            f"cannot say whether this repository references it (ADR-0685 split the "
+            f"gate; ADR-0577 makes adoption per repository). A {self.hook} verdict, "
+            f"green or red, covers part of a chart's baseline and never the whole "
+            f"of it."
+        )
+
+
+PARTS = {
+    BASELINE_HOOK: Part(
+        hook=BASELINE_HOOK,
+        minimum_charts=MINIMUM_CHARTS,
+        minimum_assertions=MINIMUM_ASSERTIONS,
+        examined=(
+            "the grace period against ADR-0601's floor, a dedicated ServiceAccount "
+            "with no API token, and a hostname topology spread that cannot hang a roll"
+        ),
+        declined="whether a template declares `kind: NetworkPolicy`",
+        sibling=POLICY_HOOK,
+    ),
+    POLICY_HOOK: Part(
+        hook=POLICY_HOOK,
+        minimum_charts=MINIMUM_POLICY_CHARTS,
+        minimum_assertions=MINIMUM_POLICY_ASSERTIONS,
+        examined="whether a template declares `kind: NetworkPolicy`",
+        declined=(
+            "the grace period, the ServiceAccount or the topology spread — this half "
+            "reads `kind:` lines and neither the pod spec nor `values.yaml`"
+        ),
+        sibling=BASELINE_HOOK,
+    ),
+}
+
+
+def judge_chart(chart: Path, root: Path, part: Part) -> Verdict:
+    """One chart, judged by ONE HALF of the gate (ledger 911).
+
+    SUBJECTHOOD IS THE SAME QUESTION FOR BOTH HALVES, and keeping it so is what makes
+    the `judged == charts` floor mean the same thing in each: a chart that renders a
+    Deployment is a module workload, and a module workload is what ledger 511's four
+    fields are about. A chart rendering none — a library chart, a chart of CRDs — is
+    not judged by either half, so the two halves always see the same chart set and
+    neither can be silently narrower than the other.
+
+    WHAT DIFFERS IS EVERYTHING AFTER THAT. `chart-network-policy` reads `kind:` lines
+    and NOTHING else — see `judge_policy_template`.
+    """
     relative = chart.relative_to(root).as_posix() or "."
     verdict = Verdict(chart=relative, judged=False)
 
@@ -1278,6 +1495,41 @@ def judge_chart(chart: Path, root: Path) -> Verdict:
         verdict.note = "renders no Deployment"
         return verdict
 
+    if part.hook == POLICY_HOOK:
+        return judge_policy_template(verdict, kinds)
+    return judge_deployment_fields(verdict, chart, root, kinds, declarers)
+
+
+def judge_policy_template(verdict: Verdict, kinds: dict) -> Verdict:
+    """`chart-network-policy`: the policy-template assertion, and nothing else.
+
+    THIS PATH DELIBERATELY DOES NOT TOUCH THE DEPLOYMENT TEMPLATE OR `values.yaml`,
+    and that is a fail-open this split would otherwise have shipped. The pre-split
+    `judge_chart` asserts `template.balanced` first and RETURNS on failure, so a chart
+    whose Go template does not balance never reaches the policy check. Had this half
+    reused that path, an unbalanced deployment template would have produced
+    `judged=True` with no assertion about the policy at all — a chart declaring no
+    `kind: NetworkPolicy` passing this half because a DIFFERENT file is malformed. The
+    policy assertion needs `declared_kinds` and nothing more, so it is given nothing
+    more, and `balanced` / `values.modelled` / two-Deployment are now structurally
+    irrelevant here rather than relevant-and-handled.
+
+    TWO BEHAVIOUR DELTAS FOLLOW, both deliberate, neither visible in the seven-tree
+    sweep because no module chart has either shape. A chart with two `kind: Deployment`
+    templates is refused by `chart-baseline` — it has no rule for choosing a pod spec —
+    and PASSES here, because a policy template is not a pod spec. A chart whose
+    deployment template is unbalanced is likewise refused there and judged here.
+    """
+    verdict.judged = True
+    judge_network_policy(Judge(verdict, "network-policy"), kinds)
+    return verdict
+
+
+def judge_deployment_fields(
+    verdict: Verdict, chart: Path, root: Path, kinds: dict, declarers: list
+) -> Verdict:
+    """`chart-baseline`: the three deployment-shaped fields, over one pod spec."""
+    relative = verdict.chart
     # THE POD SPEC IS FOUND BY THE FACT, NOT BY THE FILENAME (ledger 897 item 6).
     # The shipped gate read `templates/deployment.yaml` while `declared_kinds` scanned
     # all of `templates/`, so a chart whose Deployment lives at another filename was
@@ -1324,7 +1576,11 @@ def judge_chart(chart: Path, root: Path) -> Verdict:
     # `KIND_LINE` over the same text, so the check could no longer fail. A check whose
     # failure branch is unreachable reads as coverage and is worse than its absence —
     # this file's own docstring makes that argument about parse failures. It costs one
-    # assertion on every chart, which is why the per-chart count moves 26 -> 25.
+    # assertion on every chart, which is why the per-chart count moved 26 -> 25 at
+    # ledger 897. Read that as the arithmetic of ONE deletion and not as the current
+    # total: ledger 894 and 896 added assertions after it, and ledger 911 moved the
+    # NetworkPolicy assertion to the other half, so this half evaluates 29 per chart
+    # today. The count a run reports is in its own success line; no number here is it.
     structure.assert_that(
         values.modelled,
         f"{chart.relative_to(root).as_posix()}/values.yaml cannot be read by this "
@@ -1339,7 +1595,10 @@ def judge_chart(chart: Path, root: Path) -> Verdict:
     judge_topology_spread(
         Judge(verdict, "topology-spread"), template, values, where
     )
-    judge_network_policy(Judge(verdict, "network-policy"), kinds)
+    # `judge_network_policy` USED TO BE CALLED HERE and is now the other half's only
+    # assertion (ledger 911, ADR-0685). Nothing else moved: the per-chart count goes
+    # 30 -> 29 here and 1 there, and the two halves run over the same chart set, so
+    # the sum over a tree is what the one gate evaluated before the split.
     return verdict
 
 
@@ -1349,8 +1608,21 @@ def main(argv=None) -> int:
             "Ledger 511 — every module chart carries the four baseline fields: a "
             "grace period above ADR-0601's floor, a dedicated ServiceAccount with "
             "no API token, a hostname spread that cannot hang a roll, and an "
-            "ingress NetworkPolicy template."
+            "ingress NetworkPolicy template. ADR-0685 SPLIT those four across two "
+            "published hooks, adopted per repository, so every run names the half "
+            "it is: `--part chart-baseline` for the first three, "
+            "`--part chart-network-policy` for the fourth."
         )
+    )
+    parser.add_argument(
+        "--part",
+        required=True,
+        choices=sorted(PARTS),
+        help=(
+            "which published half to run. REQUIRED and with no default: a default "
+            "would let a bare invocation mean one half without saying so, which is "
+            "the inference ADR-0685 forbids."
+        ),
     )
     parser.add_argument(
         "--root",
@@ -1371,20 +1643,21 @@ def main(argv=None) -> int:
         ),
     )
     arguments = parser.parse_args(argv)
+    part = PARTS[arguments.part]
 
     root = Path(arguments.root)
     if not root.is_dir():
-        print(f"chart-baseline: --root {arguments.root} is not a directory")
+        print(f"{part.hook}: --root {arguments.root} is not a directory")
         return 1
 
     charts = find_charts(root)
-    verdicts = [judge_chart(chart, root) for chart in charts]
+    verdicts = [judge_chart(chart, root, part) for chart in charts]
     judged = [verdict for verdict in verdicts if verdict.judged]
     assertions = sum(verdict.assertions for verdict in verdicts)
     findings = [finding for verdict in verdicts for finding in verdict.findings]
 
     if arguments.report:
-        print("chart-baseline: per chart")
+        print(f"{part.hook}: per chart")
         for verdict in verdicts:
             if not verdict.judged:
                 print(f"  {verdict.chart}: not judged — {verdict.note}")
@@ -1396,27 +1669,31 @@ def main(argv=None) -> int:
     for finding in sorted(findings, key=lambda f: (f.chart, f.field)):
         print(f"{finding.chart} [{finding.field}] {finding.message}")
 
-    # THE FLOORS. A gate that examined nothing must not report a pass: a renamed
-    # chart directory or a `kind: Deployment` this scan stopped recognising would
-    # otherwise turn it green by finding no input.
-    if len(charts) < MINIMUM_CHARTS:
+    # THE FLOORS, AND EACH HALF CLEARS ITS OWN (ledger 911). A gate that examined
+    # nothing must not report a pass: a renamed chart directory or a
+    # `kind: Deployment` this scan stopped recognising would otherwise turn it green
+    # by finding no input. Splitting a gate multiplies that risk rather than moving
+    # it — a half able to report success having examined nothing reintroduces ledger
+    # 715's class on whichever side is weaker — so all three are evaluated per part,
+    # against that part's own numbers, and every number is in that part's own line.
+    if len(charts) < part.minimum_charts:
         print(
-            f"chart-baseline: found {len(charts)} charts under {root}, below the "
-            f"floor of {MINIMUM_CHARTS}. A tree with no `Chart.yaml` has nothing "
-            f"for this gate to judge, and a library repository does not reference "
-            f"it — see ADR-0577 on adoption."
+            f"{part.hook}: found {len(charts)} charts under {root}, below the "
+            f"floor of {part.minimum_charts}. A tree with no `Chart.yaml` has "
+            f"nothing for this gate to judge, and a library repository does not "
+            f"reference it — see ADR-0577 on adoption."
         )
         return 1
-    if assertions < MINIMUM_ASSERTIONS:
+    if assertions < part.minimum_assertions:
         print(
-            f"chart-baseline: {len(charts)} charts found but {assertions} "
-            f"assertions evaluated, below the floor of {MINIMUM_ASSERTIONS}. The "
-            f"charts were found and none was judged, which is what a broken "
+            f"{part.hook}: {len(charts)} charts found but {assertions} "
+            f"assertions evaluated, below the floor of {part.minimum_assertions}. "
+            f"The charts were found and none was judged, which is what a broken "
             f"`kind: Deployment` scan looks like."
         )
         return 1
     # A THIRD WAY TO GO BLIND, neither floor above catches: SOME charts judged,
-    # others not. `MINIMUM_ASSERTIONS` only sees the total across every chart, so
+    # others not. The assertions floor only sees the total across every chart, so
     # one broken chart sitting beside N good ones keeps the total well above the
     # floor while that one chart is never examined — "N charts, N-1 judged", green.
     # Ledger 715's class, and independent of both `kind: Deployment` regex fixes:
@@ -1427,7 +1704,7 @@ def main(argv=None) -> int:
     if len(judged) < len(charts):
         unjudged = sorted(verdict.chart for verdict in verdicts if not verdict.judged)
         print(
-            f"chart-baseline: {len(charts)} charts found, {len(judged)} judged. "
+            f"{part.hook}: {len(charts)} charts found, {len(judged)} judged. "
             f"{len(unjudged)} chart(s) were never examined: {', '.join(unjudged)}. "
             f"A verdict over some of the charts is not a verdict. Prune an "
             f"unjudgeable chart from this walk, or widen this gate to judge it."
@@ -1435,15 +1712,17 @@ def main(argv=None) -> int:
         return 1
     if findings:
         print(
-            f"chart-baseline: {len(findings)} findings across {len(judged)} of "
+            f"{part.hook}: {len(findings)} findings across {len(judged)} of "
             f"{len(charts)} charts ({assertions} assertions evaluated)."
         )
+        print(part.scope())
         return 1
 
     print(
-        f"chart-baseline: OK — {len(charts)} charts, {len(judged)} judged, "
+        f"{part.hook}: OK — {len(charts)} charts, {len(judged)} judged, "
         f"{assertions} assertions evaluated, 0 findings."
     )
+    print(part.scope())
     return 0
 
 

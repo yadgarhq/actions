@@ -518,103 +518,173 @@
   always_run: true
   pass_filenames: false
 
-# LEDGER 511, STAGE 5. `docs/plans/chart-hardening.md` asked whether ledger 511
-# is one shared chart decision or N local fixes. It priced a shared chart library
-# — a new repository, a publish pipeline, a `dependencies:` stanza and a version
-# bump per chart per change, against roughly twelve duplicated lines in six charts
-# — and refused it: "a shared pre-commit gate, NOT a shared chart library". This
-# is that gate. The library's worst cost was not the machinery but a THIRD clock
-# on a delivery path that already lands a chart from the module repo at HEAD and
-# an image by digest from `argocd/versions/`.
+# LEDGER 511, STAGE 5, SPLIT IN TWO BY LEDGER 911. `docs/plans/chart-hardening.md`
+# asked whether ledger 511 is one shared chart decision or N local fixes. It priced
+# a shared chart library — a new repository, a publish pipeline, a `dependencies:`
+# stanza and a version bump per chart per change, against roughly twelve duplicated
+# lines in six charts — and refused it: "a shared pre-commit gate, NOT a shared chart
+# library". This is that gate. The library's worst cost was not the machinery but a
+# THIRD clock on a delivery path that already lands a chart from the module repo at
+# HEAD and an image by digest from `argocd/versions/`.
 #
-# FOUR FIELDS, AND THE PLAN'S FOUR. `terminationGracePeriodSeconds`, a dedicated
+# FOUR FIELDS, ACROSS TWO HOOKS. `terminationGracePeriodSeconds`, a dedicated
 # ServiceAccount with no API token, `topologySpreadConstraints`, and an ingress
 # NetworkPolicy template. The same plan DECLINED `livenessProbe`, `startupProbe`,
-# `preStop`, `strategy`, `minReadySeconds` and `affinity`, each on its own
-# argument, so the field set is closed: a gate that checked one of the six would
-# enforce a decision the plan refused.
+# `preStop`, `strategy`, `minReadySeconds` and `affinity`, each on its own argument,
+# so the field set is closed: a gate that checked one of the six would enforce a
+# decision the plan refused. What ADR-0685 changed is not the field set but WHERE the
+# four are asserted from — `chart-baseline` carries the first three and
+# `chart-network-policy` the fourth, and a repository adopts each separately.
+#
+# WHY THE SPLIT (ADR-0685). Three of the four are properties of the chart's own pod
+# spec. The fourth is a question about where a module's ingress policy LIVES, and for
+# `yadgarhq/gateway` it legitimately does not live in the chart: that module's ingress
+# source is the Envoy Gateway data plane in `envoy-gateway-system`, selected by
+# `gateway.envoyproxy.io/*` labels, and a module chart validated against one ingress
+# implementation is D80's first bullet. The policy therefore ships in
+# `yadgarhq/deploy` as `infra/network-policies/gateway-ingress.yaml`. ADR-0584 forbids
+# adopting a gate in a repository it hard-fails, so before the split `gateway` could
+# adopt NONE of this gate: one correct assertion was costing it the other three.
+# ADR-0685's rule — "where a module's policy legitimately lives outside its chart,
+# that module does not forfeit the remaining assertions of a gate that also checks for
+# the policy. Such a gate is SPLIT along the boundary of where its subjects live, and
+# each part is adopted per repository."
+#
+# NO EXEMPTION, AND THAT IS THE POINT. Keying one on an in-tree fact was considered
+# and ADR-0685 rejects it by name: `kind: HTTPRoute` discriminates `gateway` from the
+# other six today, but it encodes "ships an HTTPRoute" while the reason is "is
+# edge-facing", so the next edge-facing module inherits the exemption with nothing
+# red. No exemption is keyed on a fact that merely correlates with the reason. The
+# split leaves nothing to exempt, which is why there is no marker, no allowlist and no
+# reason string here — `no_test_skips.py` above states the rule both follow.
+#
+# ONE SCRIPT, TWO `entry:` LINES, and deliberately not two files. The chart walk, the
+# three floors and the success line are one mechanism; the `pytest-scripts` entry in
+# this repository's own config already passes arguments to a script hook. Two files
+# would be two copies of the three floors — ADR-0569's gate lived as five
+# md5-identical `repo: local` copies, and the argument for publishing this one at all
+# is that a copied gate is drift waiting to happen. `--part` is REQUIRED with no
+# default: a default would let a bare invocation mean one half without saying so,
+# which is the inference ADR-0685 forbids.
+#
+# PARTIAL COVERAGE IS PRINTED, NOT INFERRED. ADR-0685: "a module can be partially
+# covered, and partial coverage must be legible in the success line rather than
+# inferred from which hooks a repository happens to reference." So each half prints,
+# on the pass as well as on the failure, what it examined, what it did NOT, which hook
+# covers the rest, and that it cannot see whether this repository references that
+# hook. A green `chart-baseline` meant four fields before the split and three after
+# it; without that sentence the line changes meaning in silence. `verbose: true` is
+# on both entries for the same reason — pre-commit shows a passing hook's output only
+# when asked, and a legibility line nobody sees is not one.
 #
 # THE RULE, NEVER THE LITERAL. All seven module charts ship
-# `terminationGracePeriodSeconds: 35` and the plan still recommends 30 — the plan
-# is stale on this point and ADR-0601 is not. The gate asserts
+# `terminationGracePeriodSeconds: 35` and the plan still recommends 30 — the plan is
+# stale on this point and ADR-0601 is not. The gate asserts
 # `grace >= DRAIN_BUDGET + EXIT_MARGIN + the preStop sleep` = 25 + 5 + 5, which
 # derives 35 rather than copying it, and ADR-0602 names the only direction that
 # breaks the bound: a chart going UNDER. Pinning 35 would redden the first chart
 # that legitimately lengthens its sleep; a flat `>= 30` would pass a 32s grace
 # behind a 5s sleep, leaving 27s for a 25s drain plus a 5s exit.
 #
-# IT READS TWO FILES PER CHART, and that is forced rather than chosen. No module
-# template contains `35` or `ScheduleAnyway` — every value arrives through
+# THE SLEEP TERM IS FOUND BY POSITION (ledger 911). It used to be an unqualified
+# `seconds:` anywhere in the deployment template, and `SleepAction` is equally valid
+# under `postStart`. Measured on `yadgarhq/iam`'s chart at `origin/main` with a
+# `postStart` sleep of 20 beside its own 5s `preStop`, v1.21.1 reports
+# "`terminationGracePeriodSeconds: 35` is below the floor of 50s (25 DRAIN_BUDGET +
+# 5 exit margin + 20 preStop sleep)" — a false refusal naming a number no `preStop`
+# in that chart sets. The same lookup pointed the other way too: with the `preStop`
+# an `exec` handler, whose duration a chart cannot state, a `postStart` sleep
+# SATISFIED the refusal and was priced as the drain sleep, so that chart passed at
+# exit 0. Both are closed by scoping the key to the `preStop` block.
+#
+# `chart-baseline` READS TWO FILES PER CHART, and that is forced rather than chosen.
+# No module template contains `35` or `ScheduleAnyway` — every value arrives through
 # `.Values.*` — so the template carries the KEY, `values.yaml` carries the NUMBER,
 # and an assertion against either alone is fail-open. A chart can keep every
 # `topologySpreadConstraints` line and render none of them by flipping
-# `topologySpread.enabled: false`.
+# `topologySpread.enabled: false`. `chart-network-policy` reads NEITHER: it reads
+# `kind:` lines and nothing else, which is not a shortcut but a fail-open closed —
+# sharing the deployment half's path would have let an unbalanced Go template
+# early-return before the policy assertion ran, reporting a chart judged with nothing
+# asserted about its policy.
 #
 # THE TWO `enabled` KEYS ARE NOT ONE RULE. `topologySpread.enabled` must be true:
 # a spread constraint needs no CRD and installs on a bare cluster, so D80's
 # fail-closed arm does not reach it. `networkPolicy.enabled` may be false, and in
 # all six charts that have a policy it IS false: a module chart must stay
 # installable on a bare cluster, so switching the policy on is the reference
-# deployment's business. This gate therefore demands the TEMPLATE and the KEYS,
+# deployment's business. `chart-network-policy` therefore demands the TEMPLATE,
 # never that the policy is enabled — demanding `true` would refuse the design D80
 # chose.
 #
-# THREE WAYS TO GO BLIND, and a tree with nothing to judge is RED. `MINIMUM_CHARTS`
-# catches the walk finding nothing — a `chart/` to `charts/` rename — and
-# `MINIMUM_ASSERTIONS` catches every chart turning into something the gate does
-# not judge AT ONCE: the chart count holds while the assertions drop to zero.
-# Neither catches SOME charts judged and others not in the same tree, where the
-# judged ones keep the assertion total above the floor — so every chart's
-# `judged` flag is checked against the chart count directly. Ledger 715's
-# `MINIMUM_SITES=2` is the precedent and `certificate_usages.py` carries the
-# first pair. All three counts are in the success line.
+# THREE WAYS TO GO BLIND, AND EACH HALF CLEARS ITS OWN FLOORS. A tree with nothing to
+# judge is RED. The chart floor catches the walk finding nothing — a `chart/` to
+# `charts/` rename. The assertions floor catches every chart turning into something
+# the gate does not judge AT ONCE: the chart count holds while the assertions drop to
+# zero. Neither catches SOME charts judged and others not in the same tree, where the
+# judged ones keep the total above the floor — so every chart's `judged` flag is
+# checked against the chart count directly. Ledger 715's `MINIMUM_SITES=2` is the
+# precedent and `certificate_usages.py` carries the first pair. Splitting a gate
+# MULTIPLIES this risk rather than moving it: a half able to report success having
+# examined nothing reintroduces ledger 715's class on whichever side is weaker. So
+# all three are evaluated per part against that part's own numbers, every count is in
+# that part's own success line, and `scripts/tests/test_chart_baseline.py` fires each
+# of the three in BOTH halves.
 #
 # `language: script` AND STDLIB ONLY, the reason eight hooks above already carry: a
-# `language: python` hook pip-installs this repository, which is not a package,
-# and the failure surfaces in the CONSUMING repository where nothing explains it.
-# So the YAML scan is hand-written, and `scripts/tests/test_chart_baseline.py`
-# asserts it against PyYAML over a corpus carrying the traps the real files hold —
-# including `- maxSkew: {{ .Values.topologySpread.maxSkew }}`, a key on a sequence
-# item that this gate's own first revision skipped, reporting "sets no maxSkew"
-# against all seven correct charts.
+# `language: python` hook pip-installs this repository, which is not a package, and
+# the failure surfaces in the CONSUMING repo where nothing explains it. So the YAML
+# scan is hand-written, and `scripts/tests/test_chart_baseline.py` asserts it against
+# PyYAML over a corpus carrying the traps the real files hold — including
+# `- maxSkew: {{ .Values.topologySpread.maxSkew }}`, a key on a sequence item that
+# this gate's own first revision skipped, reporting "sets no maxSkew" against all
+# seven correct charts.
 #
-# `always_run` WITH `pass_filenames: false`: the subject is every chart in the
-# tree, not the file somebody touched. A `files: ^chart/` filter would leave a
-# chart moved elsewhere unjudged, which is the hole `certificate_usages.py`
-# measured when its own `files:` scoping let a Certificate at the repository root
-# pass.
+# `always_run` WITH `pass_filenames: false` on both: the subject is every chart in
+# the tree, not the file somebody touched. A `files: ^chart/` filter would leave a
+# chart moved elsewhere unjudged, which is the hole `certificate_usages.py` measured
+# when its own `files:` scoping let a Certificate at the repository root pass.
 #
-# NOT ADDED TO THIS REPOSITORY'S OWN `.pre-commit-config.yaml`, unlike the
-# actionlint, prettier and no-test-skips entries. `yadgarhq/actions` holds no
-# chart, and this gate REFUSES a tree with no `Chart.yaml` rather than passing it
-# — the way `boot_reads_watched.py` refuses a repository with no `src/rotate.rs`,
-# because a green tick must not mean "examined nothing". So what gates this file
-# on every commit is `pytest-scripts`, not the hook itself, and the pull request
-# that publishes it says so rather than claiming CI exercised it.
+# NEITHER IS ADDED TO THIS REPOSITORY'S OWN `.pre-commit-config.yaml`, unlike the
+# actionlint, prettier and no-test-skips entries. `yadgarhq/actions` holds no chart,
+# and both halves REFUSE a tree with no `Chart.yaml` rather than passing it — the way
+# `boot_reads_watched.py` refuses a repository with no `src/rotate.rs`, because a
+# green tick must not mean "examined nothing". So what gates this file on every commit
+# is `pytest-scripts`, not the hooks themselves, and the pull request that publishes
+# them says so rather than claiming CI exercised them.
 #
-# ADOPTION IS PER REPOSITORY AND IS NOT AUTOMATIC (ADR-0577, ADR-0607), and
-# ADR-0584 forbids adopting a gate in a repository it hard-fails. A library
-# repository with no chart — `dial`, `lifecycle` — does not reference it at all.
-# Re-measure rather than trusting a typed count (ledger 847):
+# ADOPTION IS PER REPOSITORY AND IS NOT AUTOMATIC (ADR-0577, ADR-0607), and it is now
+# per HALF as well. A library repository with no chart — `dial`, `lifecycle` —
+# references neither. Re-measure rather than trusting a typed count (ledger 847):
 #
 #   git clone --depth 1 git@github.com:yadgarhq/<repo>.git <tree>
-#   python3 hooks/chart_baseline.py --root <tree> --report
+#   python3 hooks/chart_baseline.py --root <tree> --part chart-baseline --report
+#   python3 hooks/chart_baseline.py --root <tree> --part chart-network-policy --report
 #
-# Run that way across the seven module repositories on 2026-09-13, at
-# `origin/main`: FIVE PASS. `yadgarhq/project` has no `kind: ServiceAccount`
-# template and its pod names no `serviceAccountName` (ledger 894, its own pull
-# request). `yadgarhq/gateway`'s chart declares no NetworkPolicy, and that one is
-# unresolved rather than merely missing — its ingress source is the Envoy Gateway
-# data plane, and `chart-hardening.md` puts that policy in `yadgarhq/deploy`'s
-# `infra/network-policies/` precisely because a chart validated against one
-# ingress implementation is D80's first bullet. A hook cannot see another
-# repository, so there is no in-tree fact to key an exemption on, and there is
-# deliberately no comment marker either: `no_test_skips.py` above states the rule
-# this gate follows — the exemption is a fact, never a reason string. Read both as
-# dated observations, not as this file's standing claim about either tree.
+# Run that way across the seven module repositories on 2026-09-14, at `origin/main`:
+# `chart-baseline` passes ALL SEVEN at 29 assertions each, and `chart-network-policy`
+# passes six at 1 assertion and refuses `yadgarhq/gateway`, whose policy is the
+# `deploy` file named above. 29 + 1 = 30 is what the single gate evaluated per chart
+# before the split, on every one of the seven, which is the measurement that says the
+# fourth assertion MOVED rather than being dropped (ADR-0645). Read these as dated
+# observations, not as this file's standing claim about anybody's tree. Publication is
+# not adoption, so ADR-0584 is satisfied by this file regardless of either count.
 - id: chart-baseline
-  name: ledger 511 — a module chart carries the four baseline fields
+  name: ledger 511 — a module chart carries the three deployment baseline fields
   language: script
-  entry: hooks/chart_baseline.py
+  entry: hooks/chart_baseline.py --part chart-baseline
   always_run: true
   pass_filenames: false
+  verbose: true
+
+# THE OTHER HALF. Published side by side rather than folded into the entry above, so a
+# repository whose ingress policy legitimately lives elsewhere references one and not
+# the other — and so that choice is a line in its own `.pre-commit-config.yaml` rather
+# than an exemption inside this gate.
+- id: chart-network-policy
+  name: ledger 511 — a module chart ships its own ingress NetworkPolicy template
+  language: script
+  entry: hooks/chart_baseline.py --part chart-network-policy
+  always_run: true
+  pass_filenames: false
+  verbose: true
