@@ -1576,7 +1576,11 @@ def judge_deployment_fields(
     # `KIND_LINE` over the same text, so the check could no longer fail. A check whose
     # failure branch is unreachable reads as coverage and is worse than its absence —
     # this file's own docstring makes that argument about parse failures. It costs one
-    # assertion on every chart, which is why the per-chart count moves 26 -> 25.
+    # assertion on every chart, which is why the per-chart count moved 26 -> 25 at
+    # ledger 897. Read that as the arithmetic of ONE deletion and not as the current
+    # total: ledger 894 and 896 added assertions after it, and ledger 911 moved the
+    # NetworkPolicy assertion to the other half, so this half evaluates 29 per chart
+    # today. The count a run reports is in its own success line; no number here is it.
     structure.assert_that(
         values.modelled,
         f"{chart.relative_to(root).as_posix()}/values.yaml cannot be read by this "
