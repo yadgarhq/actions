@@ -40,6 +40,7 @@ own source text cannot satisfy them.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -664,11 +665,22 @@ def test_the_gate_does_not_refuse_its_own_repository(tmp_path):
     match was still made against the ABSOLUTE path, this test passed vacuously:
     the working clone sat under `~/.claude/jobs/...`, the whole tree was pruned,
     the walk examined nothing, and the gate exited 0. A green over zero files is
-    the failure mode, so the file count is asserted beside the verdict."""
+    the failure mode, so the file count is asserted beside the verdict.
+
+    THE COUNT IS PARSED RATHER THAN SUBSTRING-MATCHED, and the substring form is
+    what this assertion used to be. `"0 python files" not in stdout` is satisfied
+    by 0 and ALSO by 10, 20 and 30, because "30 python files" contains "0 python
+    files" — so the assertion fired on 2026-09-13, when this repository's
+    thirtieth Python file landed and the gate reported a perfectly healthy scan.
+    A guard whose own arithmetic reddens on a legitimate change is a guard that
+    gets deleted rather than read; `"0 workflows"` carried the same defect,
+    unexercised only because the count was still 5."""
     result = run(REPO)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "0 python files" not in result.stdout, result.stdout
-    assert "0 workflows" not in result.stdout, result.stdout
+    for subject in ("python files", "workflows"):
+        counted = re.search(rf"(\d+) {subject}", result.stdout)
+        assert counted is not None, result.stdout
+        assert int(counted.group(1)) > 0, result.stdout
 
 
 # --------------------------------------------------------------------------
