@@ -69,6 +69,13 @@ import yaml
 
 GATE = Path(__file__).resolve().parents[2] / "hooks" / "chart_baseline.py"
 
+# THE TWO PUBLISHED HALVES (ledger 911, ADR-0685). `--part` has no default in the
+# gate, so every run below names one; `run()` defaults to the deployment half because
+# that is what all but a handful of these cases are about, and the policy cases pass
+# `part=POLICY` explicitly rather than relying on a filter.
+BASELINE = "chart-baseline"
+POLICY = "chart-network-policy"
+
 
 # ---------------------------------------------------------------- the fixtures
 
@@ -186,11 +193,33 @@ def write_chart(root: Path, name: str = "chart", **replace) -> Path:
     return chart
 
 
-def run(root: Path, *arguments):
+def run(root: Path, *arguments, part: str = BASELINE):
     return subprocess.run(
-        [sys.executable, str(GATE), "--root", str(root), *arguments],
+        [sys.executable, str(GATE), "--part", part, "--root", str(root), *arguments],
         capture_output=True,
         text=True,
+    )
+
+
+def findings_of(result) -> str:
+    """Only the per-finding lines of a run.
+
+    LEDGER 911 — THE SCOPE LINE QUOTES THE PHRASES THE FINDINGS USE, so a bare
+    `"declares `kind: NetworkPolicy`" in result.stdout` now matches
+    "examined whether a template declares `kind: NetworkPolicy`" and holds whatever the
+    gate found. That made this file's own fail-open case vacuous: it passed against a
+    deliberately naive split whose policy half returned "does not balance" and asserted
+    nothing about the policy at all, caught only by re-running the mutation and reading
+    the output. A legibility line is a new way for a message assertion to pass for the
+    wrong reason, so message assertions read the findings and not the summary.
+
+    A finding line is `<chart> [<field>] <message>`; the summary and scope lines start
+    with the hook id and the `--report` table lines are indented.
+    """
+    return "\n".join(
+        line
+        for line in result.stdout.splitlines()
+        if not line.startswith((BASELINE, POLICY)) and not line.startswith("  ")
     )
 
 
@@ -224,7 +253,10 @@ def test_the_report_names_every_chart_and_its_fields(tmp_path):
 def test_the_default_root_is_the_working_directory(tmp_path):
     write_chart(tmp_path)
     result = subprocess.run(
-        [sys.executable, str(GATE)], cwd=tmp_path, capture_output=True, text=True
+        [sys.executable, str(GATE), "--part", BASELINE],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
     )
     assert result.returncode == 0, result.stdout
 
@@ -561,21 +593,26 @@ def test_an_empty_topology_key_is_refused(tmp_path):
     assert "resolves to an empty value" in result.stdout
 
 
-# --------------------------------------------------------- the NetworkPolicy
+# ------------------------------- the NetworkPolicy, now `chart-network-policy`
+#
+# These three cases are RETARGETED rather than rewritten (ledger 911). The assertion
+# they exercise did not change — it moved to the half ADR-0685 split it into — so they
+# keep asserting the same red and the same green through `part=POLICY`. Deleting them
+# because the other half no longer carries the check is how a split loses coverage.
 
 
 def test_a_chart_with_no_network_policy_template_is_refused(tmp_path):
     write_chart(tmp_path, templates__networkpolicy_yaml=None)
-    result = run(tmp_path)
+    result = run(tmp_path, part=POLICY)
     assert result.returncode == 1
-    assert "declares `kind: NetworkPolicy`" in result.stdout
+    assert "declares `kind: NetworkPolicy`" in findings_of(result)
 
 
 def test_a_policy_defaulting_to_disabled_passes(tmp_path):
     """D80: the template must exist; whether it is ON is the deployment's business."""
     assert "enabled: false" in VALUES
     write_chart(tmp_path)
-    result = run(tmp_path)
+    result = run(tmp_path, part=POLICY)
     assert result.returncode == 0, result.stdout
 
 
@@ -585,11 +622,20 @@ def test_the_policy_is_found_by_kind_not_by_filename(tmp_path):
         templates__networkpolicy_yaml=None,
         templates__ingress_rules_yaml=NETWORK_POLICY,
     )
-    result = run(tmp_path)
+    result = run(tmp_path, part=POLICY)
     assert result.returncode == 0, result.stdout
 
 
 # --------------------------------------------- the kind: line, three ways wrong
+#
+# LEDGER 911: THE THREE POLICY CASES HERE RUN ON `part=POLICY`, and the two asserting
+# exit 0 are why that matters. The deployment half no longer reads the policy's `kind:`
+# line at all, so `kind: NetworkPolicy  # one ingress policy` and
+# `kind: "NetworkPolicy"` would have gone green there for a reason that has nothing to
+# do with the regex the case exists to pin — a passing test asserting nothing. The
+# `kind: Deployment` case below stays on the deployment half: subjecthood is that
+# half's question. This is the coverage a split loses quietly if the tests are moved by
+# exit code rather than by subject.
 
 
 def test_a_trailing_comment_on_the_kind_line_does_not_hide_it(tmp_path):
@@ -602,7 +648,7 @@ def test_a_trailing_comment_on_the_kind_line_does_not_hide_it(tmp_path):
             "kind: NetworkPolicy  # one ingress policy\n",
         ),
     )
-    result = run(tmp_path)
+    result = run(tmp_path, part=POLICY)
     assert result.returncode == 0, result.stdout
 
 
@@ -614,7 +660,7 @@ def test_a_quoted_kind_value_does_not_hide_it(tmp_path):
             NETWORK_POLICY, "kind: NetworkPolicy\n", 'kind: "NetworkPolicy"\n'
         ),
     )
-    result = run(tmp_path)
+    result = run(tmp_path, part=POLICY)
     assert result.returncode == 0, result.stdout
 
 
@@ -644,21 +690,30 @@ def test_a_commented_out_kind_line_does_not_satisfy_the_requirement(tmp_path):
             NETWORK_POLICY, "kind: NetworkPolicy\n", "# kind: NetworkPolicy\n"
         ),
     )
-    result = run(tmp_path)
+    result = run(tmp_path, part=POLICY)
     assert result.returncode == 1
-    assert "declares `kind: NetworkPolicy`" in result.stdout
+    assert "declares `kind: NetworkPolicy`" in findings_of(result)
 
 
-# ------------------------------------------------------------ the three floors
+# ---------------------------- the three floors, EVALUATED IN EACH HALF
+#
+# LEDGER 911. Splitting a gate multiplies the ways it can go blind rather than moving
+# them: whichever half is weaker can report success having examined nothing, which is
+# ledger 715's class reintroduced on one side. So every one of the three floors is
+# exercised in BOTH halves, by looping over the two parts rather than by trusting the
+# shared code path — a floor read from `part.minimum_*` can be wired to the wrong
+# part's number, and only running both catches that.
 
 
 def test_a_tree_with_no_chart_is_refused_rather_than_passed(tmp_path):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "main.rs").write_text("fn main() {}\n", encoding="utf-8")
-    result = run(tmp_path)
-    assert result.returncode == 1
-    assert "below the floor" in result.stdout
-    assert "nothing for this gate to judge" in result.stdout
+    for part in (BASELINE, POLICY):
+        result = run(tmp_path, part=part)
+        assert result.returncode == 1, (part, result.stdout)
+        assert "below the floor" in result.stdout, part
+        assert "nothing for this gate to judge" in result.stdout, part
+        assert result.stdout.startswith(f"{part}:"), part
 
 
 def test_a_chart_that_renders_no_deployment_is_unjudged_and_trips_the_second_floor(
@@ -670,10 +725,11 @@ def test_a_chart_that_renders_no_deployment_is_unjudged_and_trips_the_second_flo
         templates__deployment_yaml=None,
         templates__serviceaccount_yaml=SERVICE_ACCOUNT,
     )
-    result = run(tmp_path, "--report")
-    assert result.returncode == 1
-    assert "not judged — renders no Deployment" in result.stdout
-    assert "assertions evaluated, below the floor" in result.stdout
+    for part in (BASELINE, POLICY):
+        result = run(tmp_path, "--report", part=part)
+        assert result.returncode == 1, (part, result.stdout)
+        assert "not judged — renders no Deployment" in result.stdout, part
+        assert "assertions evaluated, below the floor" in result.stdout, part
 
 
 def test_a_vendored_subchart_is_not_this_repository_s_chart(tmp_path):
@@ -703,12 +759,13 @@ def test_one_chart_unjudged_beside_a_good_one_trips_the_third_floor(tmp_path):
         "apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: helper\n",
         encoding="utf-8",
     )
-    result = run(tmp_path, "--report")
-    assert result.returncode == 1
-    assert "good: PASS" in result.stdout
-    assert "unexamined: not judged" in result.stdout
-    assert "2 charts found, 1 judged" in result.stdout
-    assert "never examined: unexamined" in result.stdout
+    for part in (BASELINE, POLICY):
+        result = run(tmp_path, "--report", part=part)
+        assert result.returncode == 1, (part, result.stdout)
+        assert "good: PASS" in result.stdout, part
+        assert "unexamined: not judged" in result.stdout, part
+        assert "2 charts found, 1 judged" in result.stdout, part
+        assert "never examined: unexamined" in result.stdout, part
 
 
 # ---------------------------------------------------- parse failures are red
@@ -1341,6 +1398,251 @@ def test_an_else_branch_is_judged_for_the_service_account_too(tmp_path):
         assert result.returncode == expected, (if_branch, result.stdout)
         if expected:
             assert "not `false`" in result.stdout
+
+
+# ------------------------------- ledger 911: the split, and what each half says
+#
+# ADR-0685 split this gate along the boundary of where its subjects live. Three of the
+# four baseline fields are properties of the chart's own pod spec; the fourth asks for a
+# `kind: NetworkPolicy` template, and `yadgarhq/gateway`'s policy legitimately lives in
+# `yadgarhq/deploy` instead. One correct assertion was costing that repository the other
+# three, because ADR-0584 forbids adopting a gate in a repository it hard-fails.
+#
+# NO EXEMPTION IS TESTED HERE BECAUSE THERE IS NONE. ADR-0685 rejects keying one on
+# `kind: HTTPRoute` by name: it discriminates `gateway` from the other six today, but it
+# encodes "ships an HTTPRoute" while the reason is "is edge-facing", so the next
+# edge-facing module would inherit the exemption with nothing red. The split needs no
+# exemption, and that is what these cases pin.
+
+
+def test_a_part_must_be_named(tmp_path):
+    """No default, so no invocation can mean one half without saying so."""
+    write_chart(tmp_path)
+    result = subprocess.run(
+        [sys.executable, str(GATE), "--root", str(tmp_path)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2, result.stderr
+    assert "--part" in result.stderr
+
+
+def test_the_gateway_shape_passes_the_baseline_half_and_fails_the_policy_half(tmp_path):
+    """THE CASE THE SPLIT EXISTS FOR, as a pair on one tree.
+
+    A chart with the three deployment fields correct and no policy template — the shape
+    `yadgarhq/gateway` ships — is now judged by both halves and refused by exactly one.
+    Before the split the single gate refused the whole chart, so `gateway` forfeited
+    three correct assertions to one it cannot satisfy in-tree.
+    """
+    write_chart(tmp_path, templates__networkpolicy_yaml=None)
+    passing = run(tmp_path, part=BASELINE)
+    assert passing.returncode == 0, passing.stdout
+    assert findings_of(passing) == "", passing.stdout
+    refused = run(tmp_path, part=POLICY)
+    assert refused.returncode == 1, refused.stdout
+    assert "declares `kind: NetworkPolicy`" in findings_of(refused)
+
+
+def test_the_two_halves_sum_to_the_assertions_the_one_gate_evaluated(tmp_path):
+    """No assertion vanished in the split (ADR-0645's direction).
+
+    The pre-split gate evaluated 30 per conforming chart. The halves evaluate 29 and 1,
+    over the SAME chart set, so the sum is the invariant that says the fourth check
+    moved rather than being dropped. Read off the output rather than hardcoded on one
+    side: the sum is the claim, not either number.
+    """
+    write_chart(tmp_path)
+    counts = {}
+    for part in (BASELINE, POLICY):
+        result = run(tmp_path, part=part)
+        assert result.returncode == 0, (part, result.stdout)
+        assert "1 charts, 1 judged" in result.stdout, part
+        counts[part] = int(
+            result.stdout.split(" assertions evaluated")[0].rsplit(" ", 1)[1]
+        )
+    assert counts[POLICY] == 1, counts
+    assert counts[BASELINE] + counts[POLICY] == 30, counts
+
+
+def test_each_half_names_what_it_did_not_examine_on_a_pass(tmp_path):
+    """ADR-0685: partial coverage is legible in the SUCCESS line.
+
+    A green line that did not say so would silently change meaning at this commit —
+    `chart-baseline` meant four fields before the split and three after it.
+    """
+    write_chart(tmp_path)
+    for part, examined, declined in (
+        (BASELINE, "grace period", "`kind: NetworkPolicy`"),
+        (POLICY, "`kind: NetworkPolicy`", "the grace period"),
+    ):
+        result = run(tmp_path, part=part)
+        assert result.returncode == 0, (part, result.stdout)
+        assert f"{part}: examined " in result.stdout, part
+        head, _, tail = result.stdout.partition("It did NOT examine")
+        assert examined in head, (part, result.stdout)
+        assert declined in tail, (part, result.stdout)
+        # It must not imply the other half ran: this process cannot see the consumer's
+        # `.pre-commit-config.yaml`, and ADR-0577 makes adoption per repository.
+        assert "cannot say whether this repository references it" in tail, part
+        assert "verdict over part of a chart's baseline" in tail, part
+
+
+def test_each_half_names_what_it_did_not_examine_on_a_refusal_too(tmp_path):
+    """The scope line is not a green-path decoration: a red verdict is equally partial."""
+    write_chart(tmp_path, templates__networkpolicy_yaml=None, values_yaml=swap(
+        VALUES, "terminationGracePeriodSeconds: 35", "terminationGracePeriodSeconds: 29"
+    ))
+    for part in (BASELINE, POLICY):
+        result = run(tmp_path, part=part)
+        assert result.returncode == 1, (part, result.stdout)
+        assert f"{part}: examined " in result.stdout, part
+        assert "It did NOT examine" in result.stdout, part
+
+
+def test_the_policy_half_reads_no_pod_spec_and_no_values_file(tmp_path):
+    """THE FAIL-OPEN THIS SPLIT WOULD OTHERWISE HAVE SHIPPED.
+
+    The pre-split `judge_chart` asserts `template.balanced` and RETURNS on failure, so a
+    chart whose Go template does not balance never reaches the policy check. Had the
+    policy half reused that path it would have reported `judged=True` having asserted
+    NOTHING about the policy — a chart with no `kind: NetworkPolicy` passing because a
+    DIFFERENT file is malformed. Both halves are run on the same tree: the deployment
+    half refuses the unbalanced template, and the policy half still refuses the missing
+    policy.
+    """
+    write_chart(
+        tmp_path,
+        templates__networkpolicy_yaml=None,
+        templates__deployment_yaml=swap(DEPLOYMENT, "      {{- end }}\n", "", ),
+    )
+    unbalanced = run(tmp_path, part=BASELINE)
+    assert unbalanced.returncode == 1, unbalanced.stdout
+    assert "do not balance" in unbalanced.stdout
+    policy = run(tmp_path, part=POLICY)
+    assert policy.returncode == 1, policy.stdout
+    # The policy assertion is the ONLY finding: no structure finding stood in for it.
+    assert findings_of(policy).count("\n") == 0, policy.stdout
+    assert "declares `kind: NetworkPolicy`" in findings_of(policy), policy.stdout
+    assert "balance" not in findings_of(policy), policy.stdout
+
+
+def test_two_deployments_refuse_the_baseline_half_and_pass_the_policy_half(tmp_path):
+    """A DELIBERATE BEHAVIOUR DELTA, named so a reviewer does not have to find it.
+
+    Two `kind: Deployment` templates leave the deployment half with no rule for choosing
+    a pod spec, so it refuses. A policy template is not a pod spec, so the policy half
+    judges the chart and passes. No module chart has this shape, which is why the
+    seven-tree sweep cannot show it.
+    """
+    write_chart(tmp_path, templates__second_yaml=DEPLOYMENT)
+    refused = run(tmp_path, part=BASELINE)
+    assert refused.returncode == 1, refused.stdout
+    assert "templates declare `kind: Deployment`" in refused.stdout
+    judged = run(tmp_path, part=POLICY)
+    assert judged.returncode == 0, judged.stdout
+    assert "1 charts, 1 judged, 1 assertions" in judged.stdout
+
+
+# ---------------- ledger 911: the residual the ledger 897 car filed, both ways
+#
+# `prestop_sleep` discovered its `seconds` term by UNQUALIFIED KEY NAME across the whole
+# deployment template. `SleepAction` is equally valid under `postStart`, and a
+# `postStart` sleep runs at STARTUP rather than during the drain, so pricing it into the
+# grace-period floor is a false refusal — the exact class ledger 897 closed. The filing
+# believed a positional model was needed; it needed one `indent` field on
+# `KeyOccurrence`, one line-ordered tuple on `Template`, and `block_of`.
+
+
+def with_post_start(seconds):
+    """The conforming chart's lifecycle block, with a `postStart` sleep added."""
+    return swap(
+        DEPLOYMENT,
+        "          lifecycle:\n",
+        "          lifecycle:\n"
+        "            postStart:\n"
+        "              sleep:\n"
+        f"                seconds: {seconds}\n",
+    )
+
+
+def test_a_post_start_sleep_is_not_priced_into_the_grace_floor(tmp_path):
+    """The false refusal, and the paired red that shows the floor still binds.
+
+    Measured on `yadgarhq/iam`'s real chart at `origin/main` before the fix: a
+    `postStart: sleep: seconds: 20` beside its own 5s `preStop` reported
+    "`terminationGracePeriodSeconds: 35` is below the floor of 50s (25 DRAIN_BUDGET + 5
+    exit margin + 20 preStop sleep)" — a number no `preStop` in that chart sets.
+    """
+    for post_start, grace, expected, floor in (
+        (20, 35, 0, None),  # the false refusal: 35 covers the 5s preStop, not the 20
+        (20, 29, 1, 35),  # the floor still binds on the preStop sleep alone
+        (1, 29, 1, 35),  # and does not move when the postStart sleep shrinks
+    ):
+        root = tmp_path / f"post{post_start}-grace{grace}"
+        root.mkdir()
+        write_chart(
+            root,
+            templates__deployment_yaml=with_post_start(post_start),
+            values_yaml=swap(
+                VALUES,
+                "terminationGracePeriodSeconds: 35",
+                f"terminationGracePeriodSeconds: {grace}",
+            ),
+        )
+        result = run(root)
+        assert result.returncode == expected, (post_start, grace, result.stdout)
+        if expected:
+            assert f"below the floor of {floor}s" in result.stdout, result.stdout
+            assert "+ 5 preStop sleep" in result.stdout, result.stdout
+
+
+def test_a_post_start_sleep_does_not_satisfy_the_prestop_exec_refusal(tmp_path):
+    """THE SAME LOOKUP'S FAIL-OPEN HALF, which the filing did not record.
+
+    A `preStop` this gate cannot price — an `exec` handler — must be REFUSED, because
+    assuming zero is the fail-open ADR-0601's bound exists to close. The unqualified
+    lookup let a `postStart` sleep satisfy that check and be priced as the drain sleep
+    instead. Measured on `iam`'s real chart with `preStop: exec:`, a 7s `postStart` sleep
+    and the grace period at 40, the shipped v1.21.1 gate reports "OK — 1 charts, 1
+    judged, 30 assertions evaluated, 0 findings", exit 0.
+    """
+    text = swap(with_post_start(7), "            {{- with .Values.preStopSleepSeconds }}\n", "")
+    text = swap(
+        text,
+        "              sleep:\n                seconds: {{ . }}\n            {{- end }}\n",
+        "              exec:\n                command: [sh, -c, sleep 5]\n",
+    )
+    write_chart(
+        tmp_path,
+        templates__deployment_yaml=text,
+        values_yaml=swap(
+            VALUES, "terminationGracePeriodSeconds: 35", "terminationGracePeriodSeconds: 40"
+        ),
+    )
+    result = run(tmp_path)
+    assert result.returncode == 1, result.stdout
+    assert "no `sleep: seconds:` under it" in result.stdout
+
+
+def test_a_sleep_outside_any_prestop_block_is_not_a_prestop_sleep(tmp_path):
+    """`block_of` is indentation-scoped, so a `seconds:` elsewhere in the pod spec is
+    not the handler's.
+
+    A `postStart` handler is the shape the estate could actually grow; this is the
+    general property under it. The stray key sits at CONTAINER level rather than under
+    any handler, and the pre-ledger-911 lookup took it: `max(5, 99)` gives a floor of
+    129 and refuses a chart shipping the estate's own 35.
+    """
+    text = swap(
+        DEPLOYMENT,
+        "          image: example\n",
+        "          image: example\n          seconds: 99\n",
+    )
+    write_chart(tmp_path, templates__deployment_yaml=text)
+    result = run(tmp_path)
+    assert result.returncode == 0, result.stdout
+    assert "1 charts, 1 judged" in result.stdout
 
 
 # -------------------- the equivalence test, which is why this file exists ----
