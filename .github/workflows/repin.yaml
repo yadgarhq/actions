@@ -244,6 +244,15 @@ jobs:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           BRANCH: ${{ steps.plan.outputs.branch }}
         run: |
+          # `pipefail` IS LOAD-BEARING ON THE NEXT LINE, not boilerplate. `gh` is
+          # the FIRST command of a pipeline whose exit status would otherwise be
+          # `tr`'s, so a rate limit or a transient 502 would yield an empty
+          # `states`, read as "no pull request exists", and force-push over
+          # whatever is there. Measured rather than reasoned: under `set -eu`
+          # alone, `x=$(false | sort -u | tr '\n' ' ')` reaches the next line with
+          # `x` empty and exit 0; adding `pipefail` exits 1 at the assignment.
+          # This is the one step here where an API error could become a WRONG
+          # ACTION rather than a red, so it must fail loudly instead.
           set -euo pipefail
           states=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" \
                      --state all --json state --jq '.[].state' | sort -u | tr '\n' ' ')
