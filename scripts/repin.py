@@ -71,6 +71,22 @@ HEADING = re.compile(r"^[ \t]*(#{1,6})[ \t]+(.+?)[ \t]*$", re.M)
 
 REQUIRED = ("What", "Why", "Changelog", "Verification", "Risk")
 
+# THE SQUASH SUBJECT IS PERMANENT HISTORY AND IT MUST NOT EXCEED THE WRAP COLUMN.
+# GitHub hard-wraps a pull request BODY at 72 columns on its way into the squash
+# commit but does NOT wrap the SUBJECT, and `pr_body.looks_wrapped` judges the
+# message AS A WHOLE: one over-long multi-word line makes it read every line as
+# author-typed, so it reassembles nothing and every Changelog bullet the wrap
+# broke reaches the annotated tag TRUNCATED. A published tag never moves in this
+# organisation, so that truncation can never be corrected.
+#
+# 64 RATHER THAN 72, and the difference is the suffix GitHub appends. The squash
+# subject is the pull request title plus ` (#NNN)`, which is 8 characters at a
+# four-digit number — so 64 is the widest title that still lands at or under
+# `pr_body.WRAP` once the number is on it. The estate's own near-miss is the
+# measurement: `actions#78` carried a 77-character title, which would have made
+# an 85-column subject and silently truncated all five of its bullets.
+SUBJECT_BUDGET = 64
+
 Dep = namedtuple("Dep", "name producer tag")
 Bump = namedtuple("Bump", "dep tag")
 
@@ -275,6 +291,30 @@ def branch(bumps):
         for b in sorted(bumps, key=lambda b: b.dep.name)
     ]
     return "repin/" + "_".join(parts)
+
+
+def title(bumps):
+    """The pull request title, which becomes the consumer's squash subject.
+
+    IT NAMES THE CRATES WHILE THEY FIT AND COUNTS THEM WHEN THEY DO NOT. The
+    earlier form appended " to their semver-greatest tags", which put a three-
+    crate subject at 84 columns with the number on it — over
+    `SUBJECT_BUDGET` and over `pr_body.WRAP`. That phrase says what the `## What`
+    section already says at length, so the subject drops it rather than truncating
+    somewhere a reader cannot predict.
+
+    THE FALLBACK IS NOT DECORATION. Nothing here knows the four crate names, so a
+    fifth crate with a long one must not be able to blow the budget — the failure
+    would be a truncated tag message in somebody else's repository, months from
+    now. When the names do not fit, the count does.
+    """
+    ordered = sorted(bumps, key=lambda b: b.dep.name)
+    named = "chore(deps): re-pin " + ", ".join(
+        b.dep.name.removeprefix("yadgar-") for b in ordered
+    )
+    if len(named) <= SUBJECT_BUDGET:
+        return named
+    return f"chore(deps): re-pin {len(ordered)} in-org crate pins"
 
 
 def headings(text):
@@ -506,9 +546,7 @@ def do_plan(tags_dir, plan_path, body_path):
         stale="true",
         branch=head,
         crates=" ".join(f"-p {b.dep.name}" for b in as_json_order(bumps)),
-        title="chore(deps): re-pin "
-        + ", ".join(b.dep.name.removeprefix("yadgar-") for b in as_json_order(bumps))
-        + " to their semver-greatest tags",
+        title=title(bumps),
     )
     summary(f"### Re-pin\n\n{len(bumps)} pin(s) behind. Head branch `{head}`.\n\n{table}")
     return 0

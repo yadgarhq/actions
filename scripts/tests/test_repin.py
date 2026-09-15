@@ -731,3 +731,75 @@ def test_a_refusal_is_reported_as_an_error_annotation_not_a_traceback(tmp_path):
     assert result.returncode == 1
     assert "::error::" in result.stdout
     assert "Traceback" not in result.stderr
+
+
+# --------------------------------------------------------------------------
+# the squash subject, which is permanent history in the consumer repository
+# --------------------------------------------------------------------------
+
+
+def test_a_long_subject_defeats_the_derivation_which_is_why_the_budget_exists():
+    """THE NEGATIVE CONTROL. Without it the budget test proves nothing.
+
+    `looks_wrapped` judges the message AS A WHOLE, so ONE over-long multi-word
+    line makes it read every line as author-typed and reassemble nothing. GitHub
+    does not wrap the squash SUBJECT, so a long pull request title is exactly
+    that line — and every wrapped Changelog bullet then reaches the annotated tag
+    truncated at the wrap, uncorrectable because a published tag never moves.
+    """
+    bumps = repin.plan(repin.git_deps(MANIFEST), TAGS)
+    body = repin.body(TEMPLATE, bumps, "yadgarhq/iam-db")
+    long_subject = (
+        "chore(deps): re-pin lifecycle, store, telemetry to their "
+        "semver-greatest tags (#1234)"
+    )
+    assert len(long_subject) > pr_body.WRAP
+    assert len(long_subject.split()) > 1
+    assert not pr_body.looks_wrapped((long_subject + "\n\n" + wrap(body)).splitlines())
+
+
+def test_the_generated_subject_stays_within_the_wrap_column():
+    bumps = repin.plan(repin.git_deps(MANIFEST), TAGS)
+    assert len(repin.title(bumps)) <= repin.SUBJECT_BUDGET
+    # GitHub appends ` (#NNN)` to the squash subject, and that has to fit too.
+    assert len(repin.title(bumps) + " (#1234)") <= pr_body.WRAP
+
+
+def test_the_generated_subject_does_not_defeat_the_derivation():
+    bumps = repin.plan(repin.git_deps(MANIFEST), TAGS)
+    body = repin.body(TEMPLATE, bumps, "yadgarhq/iam-db")
+    message = repin.title(bumps) + " (#1234)\n\n" + wrap(body)
+    assert pr_body.looks_wrapped(message.splitlines())
+    _, matches, lenient = pr_body.commit_entries(message.splitlines())
+    assert len(matches) == 3
+    assert pr_body.bump_for(matches) == pr_body.bump_for(lenient) == "patch"
+
+
+def test_all_four_crates_at_once_still_fit():
+    """The widest real case in this estate: a consumer holding all four crates."""
+    four = ["telemetry", "lifecycle", "dial", "store"]
+    bumps = [
+        repin.Bump(repin.Dep(f"yadgar-{name}", name, "v0.2.9"), "v0.2.13")
+        for name in four
+    ]
+    assert len(repin.title(bumps)) <= repin.SUBJECT_BUDGET
+    assert len(repin.title(bumps) + " (#1234)") <= pr_body.WRAP
+
+
+def test_an_unfittable_crate_list_falls_back_and_still_fits():
+    """A name nobody has yet must not be able to blow the budget."""
+    deps = [
+        repin.Dep(f"yadgar-an-extremely-long-crate-name-{i}", f"prod{i}", "v0.1.0")
+        for i in range(6)
+    ]
+    bumps = [repin.Bump(d, "v0.2.0") for d in deps]
+    subject = repin.title(bumps)
+    assert len(subject) <= repin.SUBJECT_BUDGET
+    assert len(subject + " (#1234)") <= pr_body.WRAP
+    assert "6" in subject
+
+
+def test_the_subject_is_a_conventional_commits_line_so_the_bump_is_derivable():
+    bumps = repin.plan(repin.git_deps(MANIFEST), TAGS)
+    for subject in (repin.title(bumps), repin.title([repin.Bump(repin.Dep("yadgar-x", "x", "v0.1.0"), "v0.2.0")])):
+        assert pr_body.BULLET.match("- " + subject), subject
