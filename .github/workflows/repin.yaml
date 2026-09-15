@@ -1,0 +1,320 @@
+name: repin
+
+# THE CHANNEL ADR-0690 CLOSED, REOPENED WITH THE ORDERING FIXED.
+#
+# Four in-org crates — `yadgar-telemetry`, `yadgar-lifecycle`, `yadgar-dial`,
+# `yadgar-store` — are consumed by seven repositories as git dependencies pinned
+# by an exact release tag (ADR-0526). Dependabot was the only thing that ever
+# advanced one of those pins, and it ordered the tags LEXICALLY: `"v0.2.9" >
+# "v0.2.10"` on a character comparison, so every proposal it made once a patch
+# number reached two digits was a DOWNGRADE wearing the word "bump". Nineteen
+# such pull requests were closed, and all seven `dependabot.yaml` files now name
+# the four crates in an `ignore:` block.
+#
+# THAT LEFT NOTHING ADVANCING AN IN-ORG PIN. Measured 2026-09-15: every re-pin
+# since has been a human opening seven pull requests by hand, the most recent
+# being `gateway#90`. The lag reads as zero tags today only because that round
+# has just run; it reopens the moment any producer cuts a tag, and nothing
+# reports it when it does.
+#
+# ONE CRON PER CONSUMER, NOT ONE FAN-OUT HERE, and the reasoning is the estate's
+# own. `dependabot.yaml`'s header already rules that scheduling is per-repository
+# by necessity while the logic is defined once (D62), and this is the same split:
+# the logic is here, the schedule is in each consumer's `.github/workflows/
+# repin.yaml`. Three things follow from it. The App token
+# `create-github-app-token` mints defaults to the CALLING repository, so no
+# credential has to be widened across seven. The run lands in the Actions tab of
+# the repository that owns the pull request, so the failure is read by whoever
+# has to merge it. And a fan-out would need a hardcoded list of consumers — the
+# same rot this workflow refuses for crate names.
+#
+# ITS COST, NAMED RATHER THAN HIDDEN: a repository that gains an in-org crate is
+# NOT covered until somebody adds the caller, and nothing detects one missing it.
+# A fan-out would have covered that and cost the three properties above.
+#
+# WHY IT PROPOSES AND DOES NOT MERGE. ADR-0531 rejects automation where it
+# MANUFACTURES A REVIEW rather than where it is automation. A bot opening a pull
+# request a human reads and merges manufactures none; a bot merging its own would.
+# There is no auto-merge here and there should not be one.
+#
+# NOTHING HERE KNOWS THE FOUR CRATE NAMES OR WHICH REPOSITORY HOLDS WHICH.
+# `scripts/repin.py` derives both from the manifest it is looking at — the
+# consumer-to-crate map is not symmetric, and a copy of it here would be a second
+# place the truth lives and a second place it rots.
+#
+# THIS FILE CANNOT BE TESTED BY THE PULL REQUEST THAT CHANGES IT. `ci-self.yaml`
+# tests `ci-pr.yaml` by local path because that is a workflow this repository
+# CALLS; this one is `workflow_call` only and `yadgarhq/actions` has no
+# `Cargo.toml` to run it against. `scripts/tests/test_repin.py` covers every
+# decision the planner makes; the steps below are first executed for real in a
+# consumer, against `@main`.
+on:
+  workflow_call:
+    # BOTH OPTIONAL, so this ships into a repository before the credential
+    # reaches it. A caller that passes nothing hands over two empty strings, the
+    # `cred` step notices, and the job reports what is behind and opens nothing —
+    # the same off switch the `version` job in `ci-pr.yaml` uses.
+    secrets:
+      RELEASE_APP_CLIENT_ID:
+        required: false
+      RELEASE_APP_PRIVATE_KEY:
+        required: false
+
+# CONTENTS: READ, AND THE BRANCH PUSH BELOW DOES NOT CONTRADICT IT. Every write
+# goes through the short-lived App installation token, which is not
+# `GITHUB_TOKEN` and which this block does not constrain. That is the point
+# rather than a loophole, and it is the same argument `ci-pr.yaml` makes about
+# tagging: a pull request opened with `GITHUB_TOKEN` does not trigger
+# `on: pull_request` — GitHub blocks that to prevent recursion — so it would
+# never run CI, never report `ci / passed`, and never be mergeable under the
+# rulesets. `GITHUB_TOKEN` is not a fallback here; it is a way to open a pull
+# request nobody can merge.
+permissions:
+  contents: read
+
+jobs:
+  repin:
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 because the commit below is pushed to a branch of this
+      # repository, and a shallow clone's push is refused by some server
+      # configurations. The `version` job checks out the same way.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # THE PLANNER IS A CHECKED-IN SCRIPT staged the way the `version`,
+      # `template` and `portability` jobs stage theirs, and for the same reason:
+      # this is a reusable workflow, so the checkout above is the CALLING
+      # repository and nothing from `yadgarhq/actions` is on disk. `@main`
+      # because that is what every consumer pins the workflow at, so the script
+      # and the workflow that calls it move together.
+      - if: github.repository != 'yadgarhq/actions'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: yadgarhq/actions
+          ref: main
+          path: .ci-actions
+
+      - name: where the planner is, and whether this repository has a manifest
+        id: where
+        env:
+          UNDER_REVIEW: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # THE REPOSITORY NAME DECIDES, never the presence of the file, so that
+          # no repository under review can supply its own planner.
+          if [ "$UNDER_REVIEW" = "yadgarhq/actions" ]; then
+            dir=scripts
+          else
+            dir=.ci-actions/scripts
+          fi
+          if [ ! -f "$dir/repin.py" ]; then
+            echo "::error::the re-pin planner is missing at $dir/repin.py"
+            exit 1
+          fi
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          if [ -f Cargo.toml ]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "rust=false" >> "$GITHUB_OUTPUT"
+            echo "_No \`Cargo.toml\` here, so there is no in-org crate pin to advance._" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # ONE LISTING PER PRODUCER, WRITTEN TO A FILE EACH. No `jq` accumulation
+      # loop merges them: the planner reads the directory, which is what keeps
+      # the shell here to a loop and a redirect. `--paginate` because
+      # `GET /repos/{o}/{r}/tags` answers 30 at a time and `store` is already
+      # past that — a first page read as the whole set would order a subset and
+      # propose a downgrade, which is the exact defect this workflow exists to
+      # stop.
+      #
+      # `github.token` IS ENOUGH FOR THIS STEP and the App is not minted yet.
+      # Every producer repository in the organisation is PUBLIC, so a read needs
+      # no cross-repository grant. A private producer would 404 here and redden
+      # the step rather than reading as "publishes no tags" — the planner refuses
+      # an empty listing.
+      - name: list every producer's published tags
+        if: steps.where.outputs.rust == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIR: ${{ steps.where.outputs.dir }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/tags"
+          mkdir -p "$out"
+          python3 "$DIR/repin.py" producers > "$RUNNER_TEMP/producers.txt"
+          while read -r producer; do
+            [ -n "$producer" ] || continue
+            gh api "repos/${OWNER}/${producer}/tags" --paginate --jq '.[].name' \
+              > "${out}/${producer}"
+            count=$(wc -l < "${out}/${producer}")
+            echo "- \`${OWNER}/${producer}\`: ${count} tags listed" >> "$GITHUB_STEP_SUMMARY"
+          done < "$RUNNER_TEMP/producers.txt"
+
+      # THE PLAN, AND ITS OUTPUT IS A BRANCH NAME RATHER THAN A SENTENCE. Every
+      # path that cannot be certain refuses and reddens the job; the one path
+      # that is certain and has nothing to do writes `stale=false`, reports the
+      # table it compared, and every step below skips.
+      - name: what is behind, and by how much
+        id: plan
+        if: steps.where.outputs.rust == 'true'
+        env:
+          DIR: ${{ steps.where.outputs.dir }}
+        run: |
+          set -euo pipefail
+          python3 "$DIR/repin.py" plan "$RUNNER_TEMP/tags" \
+            "$RUNNER_TEMP/repin_plan.json" "$RUNNER_TEMP/repin_body.md"
+
+      # THE OFF SWITCH, and it has to be a step output rather than a condition on
+      # the secret: the `secrets` context is not available in a step-level `if:`.
+      # BOTH OR NEITHER — an id without a key fails inside the minting action
+      # instead of here, which is a red job in place of a skipped step.
+      - name: is the release App configured here
+        id: cred
+        if: steps.plan.outputs.stale == 'true'
+        env:
+          CLIENT_ID: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          APP_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "$CLIENT_ID" ] && [ -n "$APP_KEY" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "_No release App is configured for this repository, so nothing was proposed. See the \`repin\` workflow in \`yadgarhq/actions\`._" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # A SHORT-LIVED INSTALLATION TOKEN, minted per run and expiring in an hour.
+      # Hash-pinned with the version in a comment because it is somebody else's
+      # repository however first-party it is — the `"*": hash-pin` policy the
+      # `workflows` job enforces.
+      #
+      # NARROWED TO THE TWO PERMISSIONS THIS NEEDS rather than inheriting
+      # whatever the installation holds; zizmor's `github-app` audit fails the
+      # blanket form and is right to. Measured rather than assumed on 2026-09-15:
+      # installation 158692002 of app_id 4814165 (`yadgarhq-bot`) holds
+      # `pull_requests: write` alongside `contents: write`, so both narrowings
+      # resolve. Scoped to THIS repository by the action's default.
+      - name: mint the token that opens the pull request
+        id: app
+        if: steps.cred.outputs.configured == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      # IDEMPOTENCE, AND THE BRANCH NAME IS WHAT CARRIES IT. `repin.branch`
+      # derives the head from the bump content alone — `repin/store-v0.2.13_
+      # telemetry-v0.1.17` — so a second run of the same bump asks about the same
+      # head and finds the first run's pull request.
+      #
+      # ANY STATE STOPS IT, and the three mean three different things, all of
+      # which say do nothing. OPEN: it is already proposed and possibly already
+      # under review. CLOSED without a merge: a human declined THIS EXACT BUMP,
+      # and re-proposing it every week is spam rather than automation. MERGED:
+      # unreachable in practice, because the pins would then equal the greatest
+      # tags and `plan` would have written `stale=false` — belt and braces.
+      #
+      # WHAT THIS DELIBERATELY DOES NOT REFUSE: a head branch that exists with NO
+      # pull request, which is what a run that pushed and then died leaves behind.
+      # Refusing on the branch instead of on the pull request would wedge that
+      # state forever, so the push below is a force-push and the pull request is
+      # opened against it. Only this workflow writes `repin/*`, and the name is
+      # derived from content, so there is nothing of anybody else's to overwrite.
+      - name: has this exact bump already been proposed
+        id: proposed
+        if: steps.cred.outputs.configured == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          BRANCH: ${{ steps.plan.outputs.branch }}
+        run: |
+          set -euo pipefail
+          states=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" \
+                     --state all --json state --jq '.[].state' | sort -u | tr '\n' ' ')
+          if [ -z "$states" ]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "proceed=false" >> "$GITHUB_OUTPUT"
+          echo "\`$BRANCH\` already carries a pull request (${states}), so nothing was opened." >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        if: steps.proposed.outputs.proceed == 'true'
+        with:
+          toolchain: stable
+
+      # THE LOCKFILE IS PART OF THE BUMP, and `gateway#90` is the measurement:
+      # three lines of `Cargo.toml` and three `source` stanzas of `Cargo.lock`.
+      # Leaving the lock behind would not redden anything — no `cargo` invocation
+      # in `ci-pr.yaml`, `ci-release.yaml` or a module `Containerfile` passes
+      # `--locked`, checked rather than assumed — which is exactly why it has to
+      # be done here: the drift would be silent, and the next person to run
+      # `cargo build --locked` would inherit it.
+      #
+      # PACKAGE-SCOPED, NEVER A BARE `cargo update`. `cargo update` with no
+      # argument re-resolves the whole graph, so a dependency bump would arrive
+      # carrying an unrelated one. A resolution that FAILS reddens this step and
+      # opens nothing, which is the right answer: a half-bumped pull request is
+      # worse than none.
+      - name: move the pins and re-resolve the lockfile
+        if: steps.proposed.outputs.proceed == 'true'
+        env:
+          DIR: ${{ steps.where.outputs.dir }}
+          CRATES: ${{ steps.plan.outputs.crates }}
+        run: |
+          set -euo pipefail
+          python3 "$DIR/repin.py" apply "$RUNNER_TEMP/repin_plan.json"
+          if [ -f Cargo.lock ]; then
+            read -r -a specs <<< "$CRATES"
+            cargo update "${specs[@]}"
+          else
+            echo "_No \`Cargo.lock\` here, so only \`Cargo.toml\` moved._" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # ONE COMMIT, TWO FILES, and the author is the App rather than a person.
+      # The numeric user id is what links the commit to the bot account; the
+      # `<id>+<login>@users.noreply.github.com` form is GitHub's own.
+      #
+      # THE TOKEN TRAVELS IN A HEADER, NOT IN THE REMOTE URL. `git -c
+      # http.extraheader` is what `actions/checkout` itself uses, and it leaves
+      # nothing in `.git/config` for a later step to read. The checkout above is
+      # `persist-credentials: false`, so this is the only credential in the
+      # working copy at any point.
+      #
+      # THE PULL REQUEST BODY IS THE SQUASH COMMIT MESSAGE in every repository
+      # here, and the `version` job derives the release from its `## Changelog`
+      # bullets — so the body `repin.py` wrote carries every section of THIS
+      # repository's own template and one unwrapped `chore(deps):` bullet per
+      # bumped crate. `scripts/tests/test_repin.py` runs the real `pr_body.review`
+      # over it in both of its modes rather than restating the rules.
+      - name: open one pull request for the whole bump
+        if: steps.proposed.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          BRANCH: ${{ steps.plan.outputs.branch }}
+          TITLE: ${{ steps.plan.outputs.title }}
+          SLUG: ${{ steps.app.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          base=$(gh api "repos/${GITHUB_REPOSITORY}" --jq .default_branch)
+          uid=$(gh api "users/${SLUG}%5Bbot%5D" --jq .id)
+          git config user.name "${SLUG}[bot]"
+          git config user.email "${uid}+${SLUG}[bot]@users.noreply.github.com"
+          git add Cargo.toml
+          if [ -f Cargo.lock ]; then
+            git add Cargo.lock
+          fi
+          git commit --message "$TITLE"
+          git -c "http.extraheader=Authorization: Bearer ${GH_TOKEN}" \
+            push --force origin "HEAD:refs/heads/${BRANCH}"
+          url=$(gh pr create --repo "$GITHUB_REPOSITORY" --base "$base" \
+                  --head "$BRANCH" --title "$TITLE" \
+                  --body-file "$RUNNER_TEMP/repin_body.md")
+          echo "::notice::opened ${url}"
+          echo "Opened ${url} from \`${BRANCH}\`." >> "$GITHUB_STEP_SUMMARY"
