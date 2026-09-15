@@ -221,6 +221,16 @@ jobs:
       # unreachable in practice, because the pins would then equal the greatest
       # tags and `plan` would have written `stale=false` — belt and braces.
       #
+      # THE CLOSED ARM HAS A COST AND IT IS NOT SMALL, said here rather than
+      # discovered from a pin that stopped moving. The head branch is derived from
+      # the bump CONTENT, so closing a pull request suppresses that bump for as
+      # long as it remains the greatest — permanently, if the producer cuts no
+      # further tag. Somebody who closes one because CI was red for an unrelated
+      # reason has silently opted this repository out until the next producer
+      # release, and nothing reports it. The alternative is worse in the common
+      # case: re-proposing a bump a human deliberately declined, every week,
+      # forever. `workflow_dispatch` on the caller is the manual way back in.
+      #
       # WHAT THIS DELIBERATELY DOES NOT REFUSE: a head branch that exists with NO
       # pull request, which is what a run that pushed and then died leaves behind.
       # Refusing on the branch instead of on the pull request would wedge that

@@ -644,6 +644,26 @@ def test_plan_writes_the_plan_the_body_and_the_head_branch(tmp_path):
     assert "-p yadgar-store" in outputs["crates"]
     assert pr_body.review((tmp_path / "body.md").read_text(), wrapped=False)[0] == []
 
+    # THE CRATE SPECS ARE READ AS A WORD ARRAY by the workflow's `cargo update`,
+    # so one `-p` per crate and nothing else may be in there.
+    assert outputs["crates"].split() == [
+        "-p",
+        "yadgar-lifecycle",
+        "-p",
+        "yadgar-store",
+        "-p",
+        "yadgar-telemetry",
+    ]
+
+    # THE TITLE IS A `GITHUB_OUTPUT` VALUE AND ALSO THE COMMIT SUBJECT. A newline
+    # in it would terminate the output early and hand the next line to the runner
+    # as a second variable.
+    assert "\n" not in outputs["title"]
+    assert outputs["title"].startswith("chore(deps): re-pin ")
+    for short in ("lifecycle", "store", "telemetry"):
+        assert short in outputs["title"]
+    assert "dial" not in outputs["title"]
+
 
 def test_plan_says_so_and_stops_when_every_pin_is_current(tmp_path):
     tree = workspace(tmp_path)
