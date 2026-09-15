@@ -126,3 +126,102 @@ this pull request adds applies only to merges from now on.
   `build(deps): bump metrics-exporter-prometheus from 0.17.2 to 0.18.3 (#26)`.
 
 Each needs a hand-cut tag if it is to ship. That is separate follow-up work.
+
+## 5. The `repin` workflow needs a caller in each consumer repository
+
+`.github/workflows/repin.yaml` in this repository is `workflow_call` only, so it
+has no schedule of its own and never runs until a consumer calls it. That split
+is deliberate and the workflow's own header argues it: the logic is defined once
+(D62) and the schedule is per repository, exactly as `dependabot.yaml` already
+is.
+
+Add the file below as `.github/workflows/repin.yaml` in each of the seven
+consumer repositories. Nothing in this pull request edits them.
+
+- `yadgarhq/gateway`
+- `yadgarhq/iam`
+- `yadgarhq/iam-db`
+- `yadgarhq/project`
+- `yadgarhq/project-db`
+- `yadgarhq/task`
+- `yadgarhq/task-db`
+
+```yaml
+name: repin
+
+# The in-org crate re-pin, defined once in yadgarhq/actions (D62). This file is
+# the whole of this repository's configuration for it: the shared workflow reads
+# this repository's own Cargo.toml and derives which crates to advance, so a
+# repository that gains or drops an in-org crate needs no edit here.
+#
+# ADR-0690: Dependabot orders these git tags lexically rather than by semver, so
+# every proposal it made once a patch number reached two digits was a downgrade,
+# and all four crate names are in this repository's dependabot.yaml `ignore:`
+# block. This workflow is what advances them instead, ordering by parsed
+# integers.
+#
+# A SCHEDULED WORKFLOW RUNS THE DEFAULT BRANCH'S COPY AND NO OTHER, so a change
+# to this file takes effect only once it is on `main`.
+#
+# NAMED SECRETS RATHER THAN `secrets: inherit`, for the reason ci.yaml records:
+# zizmor's `secrets-inherit` audit fails the blanket form at High confidence.
+# Both are organisation secrets in yadgarhq, so nothing has to be set per
+# repository — but an organisation secret reaches the CALLER only, so this
+# passthrough is not optional.
+on:
+  schedule:
+    # Weekly, after the Dependabot window, and deliberately not on the hour —
+    # GitHub delays scheduled runs at popular minutes.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  repin:
+    uses: yadgarhq/actions/.github/workflows/repin.yaml@main
+    permissions:
+      contents: read
+    secrets:
+      RELEASE_APP_CLIENT_ID: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+```
+
+`permissions: contents: read` is the cap the caller sets on the callee, and it is
+enough: every write the workflow makes goes through a short-lived App
+installation token, not `GITHUB_TOKEN`.
+
+## 6. No App or organisation change is needed
+
+Checked read-only on 2026-09-15 rather than assumed:
+
+```console
+$ ~/.local/bin/gh-personal api orgs/yadgarhq/installations --jq '.installations[] | {app_id, app_slug, permissions}'
+```
+
+Installation `158692002` of app_id `4814165` (`yadgarhq-bot`) already holds
+`pull_requests: write` alongside `contents: write`, with
+`repository_selection: all`. Both narrowings the workflow asks
+`actions/create-github-app-token` for therefore resolve, and no permission has to
+be granted.
+
+`RELEASE_APP_CLIENT_ID` and `RELEASE_APP_PRIVATE_KEY` are ORGANISATION secrets in
+`yadgarhq`, so no repository-level secret has to be created either:
+
+```console
+$ ~/.local/bin/gh-personal api orgs/yadgarhq/actions/secrets --jq '.secrets[].name'
+RELEASE_APP_CLIENT_ID
+RELEASE_APP_PRIVATE_KEY
+```
+
+## 7. What the operator should expect on the first real run
+
+The seven repositories are all at their producers' semver-greatest tags today, so
+the first run of each caller reports a comparison table and opens nothing. The
+first pull request appears after a producer cuts a tag.
+
+A pull request it opens is authored by `yadgarhq-bot[bot]`, which
+`ci-pr.yaml`'s `template` job exempts (`user.type != 'Bot'`) — so the body is not
+validated at pull-request time. It is still validated after the merge, by the
+`version` job's HEAD gate and by the derivation that reads its `## Changelog`
+bullets. `actions#74` is the precedent that `ci / passed` goes green with
+`ci / template` skipped: that pull request was authored by `app/dependabot` and
+merged.
