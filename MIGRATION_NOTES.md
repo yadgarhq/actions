@@ -87,10 +87,22 @@ defensible is moving it.
 `yadgar`'s seven tags are all `v0.1.0aN`, so it has no plain-semver baseline and
 has cut zero automatic tags ever. Under this change its next merge to `main`
 fails the `version` job with a message asking for a first plain tag. That is the
-intended one-time cost of ledger 936, and the repair is a single hand-cut tag:
+intended one-time cost of ledger 936, and the repair is a single hand-cut tag.
+
+**It must be an ANNOTATED tag, which takes two calls.** `POST /git/refs` on its
+own makes a LIGHTWEIGHT tag, and item 2 above explains why that is not
+interchangeable: `git describe` breaks a distance tie in favour of the newer
+ANNOTATED tag, and a lightweight one LOSES to an annotated one at the same
+commit. It is safe today only because `v0.1.0a7` sits 7 commits behind HEAD, so
+distance decides rather than the tie rule. Cut the plain tag at the same commit
+as an alpha and a lightweight tag silently fails to become the baseline. This is
+the same two-call shape the `tag it` step uses, and for the same reason:
 
 ```
-gh api repos/yadgarhq/yadgar/git/refs -f ref=refs/tags/v0.1.1 -f sha=<main sha>
+obj=$(gh api repos/yadgarhq/yadgar/git/tags \
+        -f tag=v0.1.1 -f message='v0.1.1' \
+        -f object=<main sha> -f type=commit --jq .sha)
+gh api repos/yadgarhq/yadgar/git/refs -f ref=refs/tags/v0.1.1 -f sha="$obj"
 ```
 
 Pick the number deliberately — it becomes the baseline every later version counts

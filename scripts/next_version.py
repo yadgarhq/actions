@@ -4,11 +4,22 @@
 WHY THIS IS A FILE. It was a `python3 - <<'PY'` heredoc in `ci-pr.yaml`'s
 `version` job, and `hooks/run_block_size.py` already says what that costs: "a
 heredoc is undiffable, untestable and invisible to every linter". That mattered
-here more than anywhere else in the repository, because EIGHT branches of it end
-in no tag and seven of the eight left the job GREEN — a gate reporting success
-while doing nothing, which is this organisation's most-repeated defect class
-(ADR-0689, ADR-0691, ledgers 701, 715, 720). Six of those branches now refuse
-out loud, and a refusal nobody can test is a refusal nobody should trust.
+here more than anywhere else in the repository.
+
+COUNTED AT THE JOB, AND THE BASIS IS STATED BECAUSE IT DECIDES THE NUMBER. Eight
+outcomes of the `version` job end in no tag: the four branches of this file — no
+baseline, a non-semver baseline, no parseable entries, an ambiguous wrap — plus
+the Changelog gate, a HEAD that already carries a tag, an unconfigured release
+App, and the lost side of a two-merge tag race. SEVEN OF THE EIGHT left the job
+GREEN; only the gate reddened. A gate reporting success while doing nothing is
+this organisation's most-repeated defect class (ADR-0689, ADR-0691, ledgers 701,
+715, 720).
+
+FOUR OF THE EIGHT NOW FAIL — the non-semver baseline, no parseable entries, the
+ambiguous wrap, and a version derived that cannot be tagged. Counting the leaves
+of this file instead gives a different number for the same change, so this file
+counts job-level outcomes throughout. A refusal nobody can test is a refusal
+nobody should trust.
 
 THE PREDICATE THAT DECIDES GREEN FROM RED, and it needs no per-repository
 configuration: a repository that already carries at least one `v*` tag has OPTED
@@ -27,8 +38,15 @@ WHAT STAYS GREEN, and neither is an oversight:
   happened. This is checked BEFORE every refusal below, and the order is
   load-bearing: this step runs ahead of the `is HEAD already released` step, so a
   refusal raised on an empty range would pre-empt that step's green and redden
-  every re-run of a main-push run — and every LOST TAG RACE, which `ci-pr.yaml`
-  documents as benign.
+  every RE-RUN of a main-push run on an already-tagged commit.
+
+  THE LOST SIDE OF A TAG RACE DOES NOT LAND ON THAT ARM, and crediting it there
+  would name the wrong guard. Measured in a scratch repository: with merges A then
+  B, the run for B tags at B, and the run for A then describes to the PRE-A tag and
+  carries ONE commit in its range rather than zero. So it derives a version,
+  reaches the `tag it` step, and is absorbed by the pre-existing 422 `Reference
+  already exists` arm there — which is the mechanism `ci-pr.yaml` documents as
+  benign.
 
   A BOT MERGE THAT CHANGES NOTHING SHIPPED. See `SHIPS` below.
 
@@ -76,8 +94,12 @@ SEMVER = re.compile(r"^v([0-9]+)\.([0-9]+)\.([0-9]+)$")
 # entries and cut nothing. The question this set answers is not "was a dependency
 # updated" but "does the bot's diff change WHAT SHIPS": `Cargo.toml` and
 # `Cargo.lock` do, and a `Containerfile` does because the base image is part of
-# the artifact. A bumped action SHA under `.github/workflows/` does NOT — it
-# changes how the repository is built, not what it produces — and synthesising a
+# the artifact. A bumped action SHA under `.github/workflows/` does NOT, and the
+# reason is DELIVERY rather than significance. A workflow reaches whoever runs it
+# through the BRANCH they pin, and all nineteen consumers pin `@main`, so a tag
+# carries nothing for it. Saying instead that such a bump "changes how the
+# repository is built, not what it produces" is backwards in THIS repository,
+# where `ci-pr.yaml` is the product. Synthesising a
 # release for one would be a guess against this job's own rule that writing no
 # tag is always the cheaper mistake. Matched on the BASENAME, because `actions`'
 # own two bot merges touch `containers/rust-build/Containerfile` and nothing else.
@@ -269,8 +291,10 @@ def derive(last, tags, messages, authors, files):
     if not messages:
         return Verdict(0, "", "", entries, out + [
             f"HEAD is **already** released as `{last}`, so there is nothing to",
-            "cut. A re-run of this job, and the loser of a two-merge tag race,",
-            "both land here."])
+            "cut. A re-run of this job on an already-tagged commit lands here.",
+            "The lost side of a two-merge tag race does NOT: its range holds a",
+            "commit, so it derives a version and is absorbed by the `tag it`",
+            "step's `Reference already exists` arm instead."])
 
     base = SEMVER.match(last)
     if not base:

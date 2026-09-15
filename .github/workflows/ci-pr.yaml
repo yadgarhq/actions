@@ -1436,15 +1436,18 @@ jobs:
       # THE DERIVATION, and it is a CHECKED-IN SCRIPT rather than the heredoc it
       # used to be. `hooks/run_block_size.py` states the reason as a rule of this
       # repository — "a heredoc is undiffable, untestable and invisible to every
-      # linter" — and it bound hardest here: eight branches of that heredoc ended
-      # in no tag and SEVEN OF THE EIGHT left this job green. Six of them refuse
-      # out loud now, and `scripts/tests/test_next_version.py` pins the verdict of
-      # every branch, which nothing could do while they lived in a heredoc.
+      # linter" — and it bound hardest here. COUNTED AT THE JOB, eight outcomes
+      # of this job end in no tag: the four branches of the derivation, plus the
+      # Changelog gate, an already-tagged HEAD, an unconfigured release App, and
+      # the lost side of a two-merge tag race. SEVEN OF THE EIGHT left this job
+      # green. FOUR of them refuse out loud now, and
+      # `scripts/tests/test_next_version.py` pins the verdict of every branch,
+      # which nothing could do while they lived in a heredoc.
       #
       # ITS OUTPUT IS STILL A TAG RATHER THAN A SENTENCE, unchanged: every path
       # that cannot be certain writes an EMPTY `next` and the tagging steps below
-      # skip. There is no default and no best guess. What changed is that six of
-      # those paths now also exit non-zero, so a release this drops is a red run
+      # skip. There is no default and no best guess. What changed is that four of
+      # those outcomes now also exit non-zero, so a release this drops is a red run
       # rather than a step summary nobody opens.
       #
       # WHAT CARRIES THE FAILURE, named rather than assumed: the script's exit

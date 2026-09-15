@@ -2,10 +2,11 @@
 
 WHY THIS FILE EXISTS AT ALL. The derivation used to live in a `python3 - <<'PY'`
 heredoc inside `ci-pr.yaml`, and `hooks/run_block_size.py` says what that costs:
-"a heredoc is undiffable, untestable and invisible to every linter". Eight
-branches of that heredoc ended in no tag and seven of the eight left the job
-GREEN, which is this organisation's most-repeated defect class (ADR-0689,
-ADR-0691, ledgers 701, 715, 720). A refusal nobody can test is a refusal nobody
+"a heredoc is undiffable, untestable and invisible to every linter". Counted at
+the JOB — the basis `next_version.py`'s docstring uses and names — eight outcomes
+of that job ended in no tag and seven of the eight left it GREEN, which is this
+organisation's most-repeated defect class (ADR-0689, ADR-0691, ledgers 701, 715,
+720). Four of the eight fail now. A refusal nobody can test is a refusal nobody
 can trust, so the branches moved into `scripts/next_version.py` and the verdict
 of every one of them is pinned here.
 
@@ -83,9 +84,14 @@ def test_head_already_released_stays_green():
 
     THE ORDER OF THE CHECKS IS THE WHOLE POINT. `v` runs BEFORE the `is HEAD
     already released` step, so a refusal raised on an empty range pre-empts that
-    step's green and reddens every re-run of a main-push run — and every LOST TAG
-    RACE, which `ci-pr.yaml` documents as benign. The empty range is answered
-    here, ahead of both the non-semver and the no-entries refusals.
+    step's green and reddens every RE-RUN of a main-push run on an already-tagged
+    commit. The empty range is answered here, ahead of both the non-semver and the
+    no-entries refusals.
+
+    THE LOST SIDE OF A TAG RACE IS A DIFFERENT GUARD, and this arm must not be
+    credited with it. Measured: with merges A then B, the run for A describes to
+    the PRE-A tag and carries one commit rather than zero, so it derives a version
+    and is absorbed by the `tag it` step's 422 `Reference already exists` arm.
     """
     v = call(messages=[], authors=[], files=[])
     assert v.rc == 0
@@ -171,13 +177,25 @@ def test_non_semver_baseline_beside_plain_tags_names_the_stray():
     ],
 )
 def test_a_bot_only_dependency_merge_synthesises_a_patch(files):
-    """The seven measured instances, and the two still stranded right now.
+    """The eight measured instances, and the two still stranded right now.
 
-    `lifecycle` is one commit ahead of `v0.2.17` and `telemetry` one ahead of
-    `v0.1.17`, both a dependabot Cargo bump, both untagged. The other five
-    shipped only because a LATER human merge happened to cut a tag covering
-    them — so whether a dependency fix ships depends on unrelated future
-    activity, which is indistinguishable from working until nothing follows.
+    TWO METHODS, TWO NUMBERS, and both are named because they answer different
+    questions. Enumerating bot-authored commits on `main` across the FOURTEEN
+    tag-bearing repositories and checking each against its own tag window finds
+    EIGHT that cut no tag of their own; `gateway` carries two adjacent ones,
+    `9c2f531c` and `06a2e5e4`, each synthesising independently. Six of the eight
+    shipped anyway, because a LATER human merge cut a tag covering their range —
+    so whether a dependency fix ships depends on unrelated future activity, which
+    is indistinguishable from working until nothing follows.
+
+    The other method, `compare/<newest tag>...main`, measures what is stranded NOW
+    and finds TWO: `lifecycle` one commit ahead of `v0.2.17` and `telemetry` one
+    ahead of `v0.1.17`, both a dependabot Cargo bump, both untagged.
+
+    Twelve bot commits sit in tag-bearing repositories in all. The other four are
+    outside this population: `yadgar`'s two refuse on the non-semver baseline
+    first, `store 64270982` predates that repository's first tag, and `actions
+    3e1a37d6` has human commits in its range.
     """
     v = call(
         last="v0.2.17",
