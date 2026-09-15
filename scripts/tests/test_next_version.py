@@ -378,7 +378,17 @@ def test_a_real_bot_only_cargo_merge_tags_end_to_end(tmp_path):
     done, out = run(tmp_path)
     assert done.returncode == 0, done.stderr
     assert "next=0.2.18" in out
-    assert (tmp_path / "tag_message.txt").exists()
+
+    # THE TAG MESSAGE IS THE ONE ARTIFACT THAT CANNOT BE CORRECTED LATER. The
+    # `release-tags` ruleset blocks `update` and `deletion` on `refs/tags/v*`
+    # with no bypass actors, so a message naming an empty baseline — which is
+    # what reading git a second time after the range was consumed would
+    # produce — is permanent. Asserting the file merely EXISTS would not catch
+    # that, so its contents are read.
+    written = (tmp_path / "tag_message.txt").read_text(encoding="utf-8")
+    assert written.startswith("v0.2.18\n")
+    assert "since v0.2.17." in written
+    assert "fix(deps)" in written
 
 
 def test_a_real_non_semver_baseline_exits_nonzero(tmp_path):
