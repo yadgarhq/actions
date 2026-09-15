@@ -1433,9 +1433,32 @@ jobs:
           export BODY AUTHOR
           python3 "$dir/pr_body.py"
 
-      # THE DERIVATION, and its output is now a tag rather than a sentence, so
-      # every path that cannot be certain writes an EMPTY `next` and the tagging
-      # step below skips. There is no default and no best guess.
+      # THE DERIVATION, and it is a CHECKED-IN SCRIPT rather than the heredoc it
+      # used to be. `hooks/run_block_size.py` states the reason as a rule of this
+      # repository — "a heredoc is undiffable, untestable and invisible to every
+      # linter" — and it bound hardest here. COUNTED AT THE JOB, eight outcomes
+      # of this job end in no tag: the four branches of the derivation, plus the
+      # Changelog gate, an already-tagged HEAD, an unconfigured release App, and
+      # the lost side of a two-merge tag race. SEVEN OF THE EIGHT left this job
+      # green. FOUR of them refuse out loud now, and
+      # `scripts/tests/test_next_version.py` pins the verdict of every branch,
+      # which nothing could do while they lived in a heredoc.
+      #
+      # ITS OUTPUT IS STILL A TAG RATHER THAN A SENTENCE, unchanged: every path
+      # that cannot be certain writes an EMPTY `next` and the tagging steps below
+      # skip. There is no default and no best guess. What changed is that four of
+      # those outcomes now also exit non-zero, so a release this drops is a red run
+      # rather than a step summary nobody opens.
+      #
+      # WHAT CARRIES THE FAILURE, named rather than assumed: the script's exit
+      # code, through `set -euo pipefail`, to this step, to the `version` job's
+      # conclusion. That is the same mechanism the `gate` step above already
+      # reddens by, which is production evidence rather than a reading.
+      #
+      # AND WHAT IT DOES NOT CARRY. `version` is not in the `passed` job's
+      # `needs:` and there is no required check on a push to `main`, so a refusal
+      # here BLOCKS NOTHING — it converts silence into a red run and a failure
+      # notification. Overstating that would repeat the mistake it fixes.
       - name: what the next version is
         id: v
         env:
@@ -1445,141 +1468,8 @@ jobs:
           # disagreement would surface as a version nobody can explain.
           GATE_DIR: ${{ steps.gate.outputs.dir }}
         run: |
-          python3 - <<'PY'
-          import os, re, subprocess, sys
-
-          sys.path.insert(0, os.environ["GATE_DIR"])
-          from pr_body import bump_for, commit_entries
-
-          def sh(*a):
-              return subprocess.run(a, capture_output=True, text=True).stdout.strip()
-
-          # A BASELINE THIS REFUSES TO COUNT FROM, rather than one it mangles.
-          # `yadgarhq/yadgar` carries `v0.1.0a6` (ADR-0498's prerelease), and
-          # `int("0a6")` raised — which merely reddened a report before and would
-          # now stand between a merge and its release. Anything that is not a
-          # plain `vMAJOR.MINOR.PATCH` yields no version at all.
-          SEMVER = re.compile(r"^v([0-9]+)\.([0-9]+)\.([0-9]+)$")
-
-          last = sh("git", "describe", "--tags", "--abbrev=0", "--match", "v*")
-          rng = f"{last}..HEAD" if last else "HEAD"
-          log = sh("git", "log", rng, "--format=%B%x00")
-
-          # IT ABSORBS MORE FREELY THAN THE GATE DOES, said here rather than
-          # left to be found. `changelog_entries` absorbs only inside an OPEN
-          # entry and only within the `## Changelog` section; this loop has
-          # neither notion, because the derivation never had one — it reads
-          # every line of every commit. So a bullet list under `## Why` written
-          # with no blank line above it can drop from the lenient count too.
-          # The direction is safe: a disagreement writes no tag and leaves main
-          # green, and across 160 real tag windows in eighteen repositories the
-          # two readings never disagreed once.
-          #
-          # BOTH READINGS OVER THE WHOLE RANGE, and the range is why the gate
-          # above is not enough on its own. That gate reads HEAD only, so it
-          # refuses the ambiguous message on the push that lands it — and the
-          # NEXT push, with a clean HEAD, still has the ambiguous commit sitting
-          # in `last..HEAD` and would cut the major from it. Refusing here is
-          # what makes 687(c) closed rather than delayed by one merge.
-          #
-          # THE READER IS `commit_entries` NOW, and it lives in `pr_body.py`
-          # rather than here. It still decides wrappedness once per commit — a
-          # message the wrap never touched absorbs nothing, because six real
-          # messages in the estate carry an unwrapped line of 71 or 72 columns
-          # above a genuine bullet and asking the arithmetic line by line eats
-          # that bullet. What it ALSO does now is REASSEMBLE: a bullet the wrap
-          # broke across two lines used to reach the tag as its first line
-          # alone, and the tag message written below is permanent (ledger 559).
-          # Counting is untouched — a continuation never matched `BULLET`, so it
-          # was never an entry — and a heredoc is the one place in this
-          # repository nothing can test, which is the second reason it moved.
-          entries, matches, lenient = [], [], []
-          for commit in [c for c in log.split("\0") if c.strip()]:
-              e, m, l = commit_entries(commit.splitlines())
-              entries += e
-              matches += m
-              lenient += l
-
-          base = SEMVER.match(last) if last else None
-          ambiguous = bool(matches) and bump_for(matches) != bump_for(lenient)
-          nxt, note = "", ""
-          out = ["## Next version", ""]
-          if not last:
-              out += ["No `v*` tag yet, so there is no baseline to compute from.",
-                      "The first tag of a repository is cut by hand; every one",
-                      "after it is derived from the Changelog."]
-          elif not base:
-              out += [f"`{last}` is not a plain `vMAJOR.MINOR.PATCH` tag, so there",
-                      "is no baseline this can count from and nothing was tagged.",
-                      "Cut a plain one by hand to start the sequence again."]
-          elif not entries:
-              out += [f"No parseable Changelog entries since `{last}`. Nothing to release."]
-          elif ambiguous:
-              # NO TAG AND NO GUESS, which is this step's rule everywhere else
-              # too. A `- feat!:` the wrap pushed to column 0 is a second entry
-              # to one reading and prose to the other, and the two imply
-              # different releases. Nobody can withdraw a tag, so the cheaper
-              # mistake is to cut none and name both readings. It does not
-              # self-heal the way the HEAD gate does — the commit stays in the
-              # range — so the way out is a tag cut by hand, which is already
-              # how the first tag of every repository is cut.
-              out += [f"The Changelog since `{last}` is ambiguous under GitHub's",
-                      "72-column wrap, so no version was derived and nothing was",
-                      f"tagged. Read strictly: {len(matches)} entries implying a",
-                      f"**{bump_for(matches)}** bump. Read as the wrap explains",
-                      f"it: {len(lenient)} entries implying a",
-                      f"**{bump_for(lenient)}**. Cut the intended tag by hand."]
-          else:
-              bump = bump_for(matches)
-              major, minor, patch = (int(g) for g in base.groups())
-
-              # PRE-1.0 IS NOT THE SAME RULE, and getting it wrong publishes a
-              # "compatible" version that is not. Under 0.x a breaking change
-              # bumps MINOR and a feature bumps PATCH.
-              if major == 0:
-                  nxt = f"0.{minor + 1}.0" if bump == "major" else f"0.{minor}.{patch + 1}"
-                  note = f"pre-1.0: a `{bump}` change bumps "
-                  note += "minor" if bump == "major" else "patch"
-              else:
-                  nxt = {"major": f"{major + 1}.0.0",
-                         "minor": f"{major}.{minor + 1}.0",
-                         "patch": f"{major}.{minor}.{patch + 1}"}[bump]
-                  note = f"{bump} bump"
-
-              out += [f"`{last}` → **`v{nxt}`**  ({note})", "",
-                      f"{len(entries)} entries since `{last}`:", ""]
-              out += [f"- {e.lstrip('-* ')}" for e in entries[:25]]
-              if len(entries) > 25:
-                  out += [f"", f"...and {len(entries) - 25} more."]
-
-          # AN ANNOTATION, BECAUSE THIS JOB STAYS GREEN. Every other refusal
-          # here is a report about a release that was never going to happen;
-          # this one is a release that WAS going to happen and now silently does
-          # not, on a job whose conclusion is success. A step summary nobody
-          # opens is how that becomes invisible. The HEAD gate exits 1 for the
-          # same condition; this cannot, because the commit is already merged.
-          if ambiguous:
-              print("::warning::" + " ".join(out[2:]))
-
-          tmp = os.environ["RUNNER_TEMP"]
-          if nxt:
-              # THE TAG MESSAGE IS WRITTEN HERE because this is the only step
-              # that knows what the number was derived FROM, and the ruleset
-              # makes an annotated tag's message the permanent record of it.
-              # Every entry, not the summary's first 25 — a truncated record of
-              # a release cannot be un-truncated later.
-              msg = [f"v{nxt}", "",
-                     f"{note.replace('`', '')}, from {len(entries)} Changelog "
-                     f"entries since {last}.", ""]
-              msg += [f"- {e.lstrip('-* ')}" for e in entries]
-              with open(f"{tmp}/tag_message.txt", "w") as fh:
-                  fh.write("\n".join(msg) + "\n")
-          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
-              fh.write(f"next={nxt}\n")
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
-              fh.write("\n".join(out) + "\n")
-          print("\n".join(out))
-          PY
+          set -euo pipefail
+          python3 "$GATE_DIR/next_version.py"
 
       # BELT AND BRACES rather than the primary defence. A HEAD that already
       # carries a tag also has an empty `last..HEAD`, so the step above would
@@ -1613,16 +1503,36 @@ jobs:
         env:
           CLIENT_ID: ${{ secrets.RELEASE_APP_CLIENT_ID }}
           APP_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          # THROUGH THE ENVIRONMENT RATHER THAN A STEP-LEVEL `if:`, so the
+          # refusal below is REACHABLE by a test. A condition on the step can
+          # only be asserted as text; shell run with this set can be executed.
+          NEXT: ${{ steps.v.outputs.next }}
         run: |
           set -euo pipefail
           # BOTH OR NEITHER. An id without a key fails inside the minting action
           # instead of here, which is a red job in place of a skipped step.
           if [ -n "$CLIENT_ID" ] && [ -n "$APP_KEY" ]; then
             echo "configured=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "_No release App is configured for this repository, so nothing was tagged. See the version job in \`yadgarhq/actions\`._" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
+          echo "configured=false" >> "$GITHUB_OUTPUT"
+          # THE OFF SWITCH IS KEPT, AND IT IS NARROWED TO WHAT IT WAS FOR. The
+          # comment above says this is "how this ships into every repository
+          # before the App behind it exists", and that is still true of a
+          # repository which derives no version: the five carrying no tags reach
+          # here on every merge and must stay quiet.
+          if [ -z "$NEXT" ]; then
+            echo "_No release App is configured for this repository, and no version was derived, so there was nothing to tag. See the version job in \`yadgarhq/actions\`._" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # A DERIVED VERSION THAT CANNOT BE TAGGED IS A FAILURE, not a skip.
+          # Ledger 580 flagged this as a silent success that is merely
+          # UNREACHABLE today rather than absent — both organisation secrets are
+          # `visibility=all` and all nineteen callers pass them — and an
+          # unreachable silent success is still a silent success.
+          echo "::error::v$NEXT was derived from the Changelog and cannot be tagged: no release App is configured for this repository. See the version job in yadgarhq/actions."
+          echo "_\`v$NEXT\` was derived and **not tagged**: no release App is configured here._" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
 
       # A SHORT-LIVED INSTALLATION TOKEN, minted per run and expiring in an
       # hour. Hash-pinned with the version in a comment because it is somebody
