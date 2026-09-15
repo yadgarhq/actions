@@ -226,10 +226,27 @@ jobs:
       # the bump CONTENT, so closing a pull request suppresses that bump for as
       # long as it remains the greatest — permanently, if the producer cuts no
       # further tag. Somebody who closes one because CI was red for an unrelated
-      # reason has silently opted this repository out until the next producer
-      # release, and nothing reports it. The alternative is worse in the common
-      # case: re-proposing a bump a human deliberately declined, every week,
-      # forever. `workflow_dispatch` on the caller is the manual way back in.
+      # reason has opted this repository out until the next producer release. The
+      # alternative is worse in the common case: re-proposing a bump a human
+      # deliberately declined, every week, forever.
+      #
+      # AND `workflow_dispatch` IS NOT THE WAY BACK IN. An earlier revision of
+      # this comment said it was, and that was false. `gh pr list --head` matches
+      # the pull request record's `headRefName`, which OUTLIVES the branch ref —
+      # measured on `yadgarhq/gateway`, where
+      # `git/ref/heads/dependabot/cargo/yadgar-telemetry-v0.1.9` answers 404 and
+      # `gh pr list --head` on that same name still returns `#86 CLOSED`. A
+      # dispatched run recomputes the identical branch name from the identical
+      # bump, finds that record, and skips exactly as the scheduled run did.
+      # Reopening is not free either: GitHub refuses to reopen a pull request
+      # whose head branch was deleted until the branch is restored.
+      #
+      # SO THE SUPPRESSION IS ANNOUNCED RATHER THAN MERELY LOGGED. The ways back
+      # in are all manual and none of them is this workflow: reopen the pull
+      # request (restoring its branch first if it was deleted), or re-pin the
+      # crate by hand. A step-summary line on a green job is the silent-success
+      # class ADR-0689 and ADR-0691 condemn, so the CLOSED arm below writes a
+      # `::warning::` that names the suppressed bump on the run itself.
       #
       # WHAT THIS DELIBERATELY DOES NOT REFUSE: a head branch that exists with NO
       # pull request, which is what a run that pushed and then died leaves behind.
@@ -243,6 +260,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           BRANCH: ${{ steps.plan.outputs.branch }}
+          TITLE: ${{ steps.plan.outputs.title }}
         run: |
           # `pipefail` IS LOAD-BEARING ON THE NEXT LINE, not boilerplate. `gh` is
           # the FIRST command of a pipeline whose exit status would otherwise be
@@ -261,7 +279,26 @@ jobs:
             exit 0
           fi
           echo "proceed=false" >> "$GITHUB_OUTPUT"
-          echo "\`$BRANCH\` already carries a pull request (${states}), so nothing was opened." >> "$GITHUB_STEP_SUMMARY"
+          # CLOSED IS NOT THE SAME OUTCOME AS OPEN, and reporting them the same
+          # way is what made this silent. OPEN means the proposal is in front of
+          # somebody right now and this run has nothing to add. CLOSED means the
+          # bump is SUPPRESSED, and nothing in this workflow will ever propose it
+          # again while it stays the greatest tag — a decision worth a warning on
+          # the run rather than a line in a summary nobody opens.
+          case " $states " in
+            *" CLOSED "*)
+              echo "::warning::${TITLE} is SUPPRESSED. A closed pull request on \`${BRANCH}\` (${states}) already declined this exact bump, and nothing here proposes it again while these stay the greatest tags — a re-run and workflow_dispatch both recompute the same branch name and find the same record. To take it: reopen that pull request, restoring its head branch first if it was deleted, or re-pin the crate by hand."
+              {
+                echo "### Re-pin suppressed"
+                echo
+                echo "\`$BRANCH\` carries a CLOSED pull request (${states}), so this bump was declined and is NOT re-proposed."
+                echo "See the warning on this run for the ways back in."
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            *)
+              echo "_\`$BRANCH\` already carries a pull request (${states}), so nothing was opened._" >> "$GITHUB_STEP_SUMMARY"
+              ;;
+          esac
 
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         if: steps.proposed.outputs.proceed == 'true'
@@ -300,11 +337,22 @@ jobs:
       # The numeric user id is what links the commit to the bot account; the
       # `<id>+<login>@users.noreply.github.com` form is GitHub's own.
       #
-      # THE TOKEN TRAVELS IN A HEADER, NOT IN THE REMOTE URL. `git -c
-      # http.extraheader` is what `actions/checkout` itself uses, and it leaves
-      # nothing in `.git/config` for a later step to read. The checkout above is
-      # `persist-credentials: false`, so this is the only credential in the
-      # working copy at any point.
+      # THE TOKEN TRAVELS IN A HEADER, AND IT REACHES git THROUGH THE
+      # ENVIRONMENT. Not in the remote url, which would persist it into
+      # `.git/config` for any later step to read; and not through `git -c
+      # http.extraheader=...`, which keeps it out of `.git/config` but puts it in
+      # this process's ARGUMENT VECTOR, where anything on the machine that can
+      # read `/proc` can see it for the life of the push. `GIT_CONFIG_COUNT` with
+      # `GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0` is the same configuration by the
+      # same mechanism, sourced from the environment instead, which is the one
+      # place the token already is.
+      #
+      # `actions/checkout` IS NOT THE PRECEDENT FOR THE ARGV FORM, and an earlier
+      # revision of this comment wrongly said it was: checkout writes the header
+      # into `.git/config` with `git config --local` and removes it afterwards
+      # unless `persist-credentials` keeps it. The checkout above is
+      # `persist-credentials: false`, so the environment below is the only
+      # credential the working copy ever sees.
       #
       # THE PULL REQUEST BODY IS THE SQUASH COMMIT MESSAGE in every repository
       # here, and the `version` job derives the release from its `## Changelog`
@@ -330,8 +378,10 @@ jobs:
             git add Cargo.lock
           fi
           git commit --message "$TITLE"
-          git -c "http.extraheader=Authorization: Bearer ${GH_TOKEN}" \
-            push --force origin "HEAD:refs/heads/${BRANCH}"
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0=http.extraheader \
+          GIT_CONFIG_VALUE_0="Authorization: Bearer ${GH_TOKEN}" \
+            git push --force origin "HEAD:refs/heads/${BRANCH}"
           url=$(gh pr create --repo "$GITHUB_REPOSITORY" --base "$base" \
                   --head "$BRANCH" --title "$TITLE" \
                   --body-file "$RUNNER_TEMP/repin_body.md")
