@@ -89,11 +89,13 @@ def flow(pins=None):
 def prettier(pins=None):
     """The MULTI-LINE flow mapping prettier produces once an entry is too long.
 
-    Copied from the shape in `plans/the-parent-chart-and-dogfooding-it.md`, where
-    prettier had already reformatted the plan's own example this way. A real
-    parent Chart.yaml carries BOTH this and `flow` above, entry by entry,
-    depending on length — so a rewriter that handles only one of them handles no
-    real file.
+    MEASURED, not inferred from the plan's rendering. The eight-dependency
+    Chart.yaml of `plans/the-parent-chart-and-dogfooding-it.md` was written to a
+    file in this repository and run through this repository's own prettier hook
+    on 2026-09-19: four entries stayed on one line and four were broken open
+    exactly like this. `PRETTIER_MIX` below is that output verbatim, so a real
+    parent chart carries BOTH shapes and a rewriter handling only one of them
+    handles no real file.
     """
     lines = ["dependencies:"]
     for name, version in (pins or PUBLISHED).items():
@@ -108,6 +110,73 @@ def prettier(pins=None):
 
 
 SHAPES = {"block": block, "flow": flow, "prettier": prettier}
+
+
+# THE MEASURED OUTPUT, verbatim. `pre-commit run prettier` over the plan's own
+# eight-dependency Chart.yaml, 2026-09-19. Four entries fit on a line and four
+# did not, which is why a fixture of one homogeneous shape is not enough: this is
+# what the release path would actually open.
+PRETTIER_MIX = """apiVersion: v2
+name: yadgar
+version: 0.1.0 # the parent's own version; item 3 cuts it
+dependencies:
+  - { name: config, version: 0.1.5, repository: oci://ghcr.io/yadgarhq/charts }
+  - {
+      name: gateway,
+      version: 0.9.48,
+      repository: oci://ghcr.io/yadgarhq/charts,
+    }
+  - { name: iam, version: 0.8.39, repository: oci://ghcr.io/yadgarhq/charts }
+  - { name: iam-db, version: 0.7.40, repository: oci://ghcr.io/yadgarhq/charts }
+  - {
+      name: project,
+      version: 0.1.17,
+      repository: oci://ghcr.io/yadgarhq/charts,
+    }
+  - {
+      name: project-db,
+      version: 0.3.5,
+      repository: oci://ghcr.io/yadgarhq/charts,
+    }
+  - { name: task, version: 0.5.28, repository: oci://ghcr.io/yadgarhq/charts }
+  - {
+      name: task-db,
+      version: 0.6.29,
+      repository: oci://ghcr.io/yadgarhq/charts,
+    }
+"""
+
+
+def test_the_two_shapes_prettier_emits_in_one_file_are_both_rewritten():
+    """The only fixture in this file that is a real tool's output.
+
+    A multi-line entry sits between two single-line ones here, so a rewriter that
+    mis-read where an entry ends would move the wrong pin or none. The parent's
+    own `version: 0.1.0` line and its comment are inside the assertion too: this
+    writes the DEPENDENCY pin and never the parent's own field, which
+    `ci-release.yaml` stamps from the tag (`helm package chart --version
+    "$VERSION"`).
+    """
+    out, old = parent_pin.pin(PRETTIER_MIX, "gateway", "0.9.49")
+    assert old == "0.9.48"
+    assert out == PRETTIER_MIX.replace("0.9.48", "0.9.49")
+    assert parent_pin.pins(out) == {
+        "config": "0.1.5",
+        "gateway": "0.9.49",
+        "iam": "0.8.39",
+        "iam-db": "0.7.40",
+        "project": "0.1.17",
+        "project-db": "0.3.5",
+        "task": "0.5.28",
+        "task-db": "0.6.29",
+    }
+    assert "version: 0.1.0 # the parent's own version; item 3 cuts it" in out
+
+
+def test_a_short_entry_in_that_file_is_rewritten_too():
+    out, old = parent_pin.pin(PRETTIER_MIX, "iam", "0.8.40")
+    assert old == "0.8.39"
+    assert out == PRETTIER_MIX.replace("0.8.39", "0.8.40")
 
 
 # --------------------------------------------------------------- the rewrite
