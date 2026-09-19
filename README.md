@@ -484,6 +484,33 @@ jobs:
       content-root: .
 ```
 
+## The parent chart's pin, published and wired to nothing (ADR-0722)
+
+`scripts/parent_pin.py` rewrites ONE module's `version:` in a parent chart's
+`dependencies:` block and derives the parent's own next version. ADR-0722 rules
+that the release publishing a module chart also cuts a new parent version, so the
+newest published parent always pins the newest released module set.
+
+**No workflow calls it, deliberately.** `yadgarhq/chart` does not exist,
+`ghcr.io/yadgarhq/charts/yadgar` has no tags, and whether creating that
+repository needs the operator's ADR-0574 per-module confirmation is unanswered.
+Publishing a mechanism and adopting it are separate acts (ADR-0607); wiring this
+into `ci-release.yaml` now would add a path nothing exercises to a workflow
+eighteen repositories consume at `@main`.
+
+**The comparison is the reason it is a file rather than three `yq` lines.** It
+refuses to write a version that is not strictly greater than the one pinned,
+compared as integers, naming both numbers. ADR-0690: a lexical ordering of the
+same tags produced nineteen downgrade pull requests titled "bump", and a lexical
+maximum of `gateway`'s 74 published chart tags answers `0.9.9` where the
+semver-greatest is `0.9.48`. A pin written that way is a downgrade that
+publishes, resolves and reports nothing. The parent's own number is read off
+`next_version.compute`, so the estate's pre-1.0 ladder has one home.
+
+```
+python3 scripts/parent_pin.py chart/Chart.yaml gateway 0.9.49 $(git tag --list 'v*')
+```
+
 ## Why org rulesets are not used
 
 They require GitHub Team. Verified 2026-08-30: `orgs/yadgarhq/rulesets` returns
