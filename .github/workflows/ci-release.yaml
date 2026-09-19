@@ -585,13 +585,19 @@ jobs:
   # five times on the day this was written. A step there would have skipped every
   # one of them, silently, for the one module whose shape differs.
   #
-  # `needs.chart.result == 'success'` IS BELT AND BRACES rather than the gate. A
-  # job whose `needs` did not all succeed is skipped by GitHub regardless, so this
-  # cannot be reached with a failed `chart` job. It is written anyway because it is
-  # the property that matters and `scripts/tests/test_parent_bump.py` evaluates it:
-  # `helm package -u` resolves this pin from the REGISTRY, so a pin written for a
-  # chart that never pushed does not fail this release — it fails the NEXT parent
-  # release, in another repository, for a reason nothing there can see.
+  # `needs.chart.result == 'success'` IS THE GATE, NOT BELT AND BRACES — and
+  # that stopped being true the moment the `always()` below was added. Before
+  # it, a job whose `needs` did not all succeed was skipped by GitHub
+  # regardless, so a failed `chart` could never reach this far and the
+  # comparison was redundant with GitHub's own default. `always()` disables
+  # exactly that default, for every result it covers, not only the `skipped`
+  # one it was added for — so a `chart` that FAILED or was CANCELLED now
+  # reaches this line with nothing else standing between it and a bump. This
+  # comparison is what still excludes them, and `scripts/tests/test_parent_bump.py`
+  # evaluates it for the reason it always did: `helm package -u` resolves this
+  # pin from the REGISTRY, so a pin written for a chart that never pushed does
+  # not fail this release — it fails the NEXT parent release, in another
+  # repository, for a reason nothing there can see.
   #
   # THE PARENT DOES NOT PIN ITSELF. `yadgarhq/chart` publishes a chart named
   # `yadgar` which is not in its own `dependencies:`, so `parent_bump.py` would
@@ -608,9 +614,37 @@ jobs:
   #      at all and `protected: false` — so this write lands. The day that
   #      ruleset arrives the release App has to be a bypass actor on it, exactly
   #      as app id 4814165 already is on `yadgarhq/argocd`.
+  # `always()` IS LOAD-BEARING HERE FOR THE SAME REASON IT IS ON `chart`, one
+  # hop further down the graph. MEASURED, via the API rather than the UI, on
+  # `yadgarhq/config` cutting `v0.1.7`, run 35453443606: `image` concluded
+  # `skipped` (no `Containerfile`), `chart` concluded `success`, and `parent`
+  # — needing only `chart`, already `success` — concluded `skipped` with
+  # ZERO steps, started and completed in the same second. WHY is inferred
+  # rather than proven: GitHub does not publish the algorithm behind the
+  # admission check it applies to a job whose `if:` carries none of
+  # `always()`/`success()`/`failure()`/`cancelled()`, and no offline harness
+  # here can execute one to find out. The reading that fits the measurement —
+  # the default check is not scoped to `parent`'s own direct `needs:`, and
+  # `image` skipping poisoned it two hops away despite `chart` standing
+  # between them and concluding `success` — matches a shape GitHub's own
+  # runner tracker carries reports of (`actions/runner#2205`). Either way,
+  # `always()` is the fix GitHub's docs name for a job that must run when
+  # `if:` carries no such function and any needs, direct or not, did not all
+  # conclude `success`: it removes the check whatever its exact scope, and
+  # the explicit comparison below is what still decides admission afterward.
+  #
+  # THE REST OF THE CONDITION IS UNCHANGED, and that is deliberate. Unlike
+  # `chart` reading `needs.image.result`, `parent` reads `needs.chart.result`
+  # for a job it needs DIRECTLY — there is no second, unneeded job to name a
+  # fact about instead. A chart that failed or was cancelled still reads
+  # `!= 'success'` here, so `always()` widens WHEN this job runs without
+  # widening WHAT it accepts: a published chart the parent will never pin
+  # still refuses the bump rather than admitting it.
   parent:
     needs: [detect, chart]
-    if: needs.chart.result == 'success' && github.repository != 'yadgarhq/chart'
+    if: >-
+      always() && needs.chart.result == 'success'
+      && github.repository != 'yadgarhq/chart'
     runs-on: ubuntu-latest
     # THE SAME BOUND AND THE SAME ARITHMETIC AS `deployment`. The worst path here
     # is three write attempts with 5s and 10s backoff plus three tag attempts with
