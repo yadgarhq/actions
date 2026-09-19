@@ -186,6 +186,14 @@ class Gh:
         than a hundred. A truncated list whose greatest entry is missing derives a
         version that already exists, which is exactly the tag race this file
         handles at the bottom; there is no reason to manufacture one.
+
+        IT IS A PREFIX MATCH AND ANSWERS MORE THAN RELEASES, said because the
+        `v` reads like a version filter and is not: a `vendor-drop` tag comes back
+        too, and `yadgarhq/actions` already carries a bare `v1` alongside fifty
+        plain tags. Nothing here filters them out, because `repin.greatest` drops
+        every unorderable entry — so a stray tag cannot become a baseline, and a
+        list holding NOTHING orderable reaches `parent_version`'s no-baseline
+        refusal rather than deriving from the stray.
         """
         done = self.call(
             "api", "--paginate", self.repo("git", "matching-refs", "tags/v"),

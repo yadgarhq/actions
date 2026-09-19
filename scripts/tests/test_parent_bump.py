@@ -472,6 +472,24 @@ def test_a_parent_with_no_tag_is_refused_rather_than_invented():
     assert api.puts == [], "a refused derivation must not leave a pin behind"
 
 
+def test_a_stray_v_tag_is_not_mistaken_for_a_baseline():
+    """`git/matching-refs/tags/v` is a PREFIX match, so it answers more than releases.
+
+    The endpoint returns every ref whose name starts with `tags/v` — a
+    `vendor-drop` or a `version-freeze` tag comes back alongside `v0.1.0`.
+    `repin.greatest` drops anything unorderable, so a stray tag cannot corrupt
+    the derived number; what needs pinning is the other half, that a list which is
+    NON-EMPTY and holds nothing orderable still reaches the no-baseline refusal
+    instead of deriving from the stray. `yadgarhq/actions` already carries a bare
+    `v1` alongside fifty plain tags, so a `v`-prefixed non-release is a real shape
+    in this estate rather than a hypothetical one.
+    """
+    api = Api(tags=["vendor-drop"])
+    text = refused(api)
+    assert "no orderable" in text
+    assert api.puts == [] and api.refs == []
+
+
 def test_a_write_refused_three_times_names_the_ruleset():
     api = Api()
     api.put_failures = 3
