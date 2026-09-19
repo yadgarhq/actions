@@ -199,27 +199,42 @@ jobs:
       # third — an invalid values schema — is NOT, and this step exists so nobody reads
       # a green job as covering it.
       #
-      # WHY NOT NOW: `chart/values.schema.json` does not exist on
-      # `yadgarhq/config@main`. Checked 2026-09-19, where `chart/` holds `Chart.yaml`,
-      # `config/`, `templates/` and `values.yaml` and nothing else. Inventing a schema
-      # here would publish a rule nobody decided, against which an organisation's
-      # perfectly good values file could fail.
+      # WHY NOT NOW, RE-MEASURED 2026-09-19 against `yadgarhq/config@main` at `c66bded`
+      # (config#15). An earlier revision of this comment said the schema did not exist
+      # and that the chart could not be pulled. BOTH WERE WRONG, and the correction
+      # points the same way for a stronger reason.
       #
-      # WHAT UNBLOCKS IT, exactly: `chart/values.schema.json` landing on
-      # `yadgarhq/config@main`. At that point the check is `helm template` — or `helm
-      # lint --strict` — against the PINNED upstream chart the organisation's Argo
-      # `Application` already names, because helm is what enforces `values.schema.json`
-      # and it enforces it at template time. That needs `azure/setup-helm` and a pull
-      # of the chart from `oci://ghcr.io/yadgarhq/charts/config`, neither of which this
-      # job has today. It cannot move into `hooks/seed_repository.py`: that file is
-      # `language: script` and stdlib-only, and the standard library has no JSON Schema
-      # validator.
+      # `chart/values.schema.json` IS on `main`, and the chart IS anonymously pullable:
+      # `oci://ghcr.io/yadgarhq/charts/config` answers HTTP 200 for tags 0.1.0, 0.1.1
+      # and 0.1.2. So nothing mechanical is in the way.
       #
-      # AND IT IS THE CHART'S REFUSAL EITHER WAY. Under ADR-0705 an invalid values file
-      # fails the sync, naming the knob and the file, because a knob whose wrong value
-      # carries real consequence is declared with Helm's `required`. So the absence
-      # here costs an organisation the early warning and costs the installation
-      # nothing.
+      # THE SCHEMA IS CLOSED AND EMPTY — `additionalProperties: false` over
+      # `properties: {}` — because the chart reads no Helm values at all; every knob
+      # lives in `chart/config/<service>.yaml`, copied verbatim by `.Files.Get`. So a
+      # check here would refuse EVERY key in an organisation's values file, which is
+      # the artefact ADR-0705 tells them to write. The schema's own `$comment` calls
+      # itself provisional: `properties` fills in "when a knob becomes a value", and
+      # "this chart does not implement [ADR-0705's delivery model] yet". Enforcing a
+      # rule its author calls temporary, inside somebody else's repository, is a false
+      # refusal — worse here than a missed defect, because the missed defect is caught
+      # at sync and a false refusal blocks their own merge.
+      #
+      # THERE IS ALSO NO `required` KNOB. ADR-0705 describes a no-default knob declared
+      # with Helm's `required`; `grep -rn required chart/templates/` on `main` returns
+      # nothing, and that idiom was deliberately cut — a knob absent from
+      # `chart/config/` would fire the refusal permanently for everyone, with no values
+      # path an adopter could satisfy. This workflow must not describe it as existing.
+      #
+      # WHAT UNBLOCKS IT, checkably: a NON-EMPTY `properties` in that schema. The check
+      # is then `helm template` against the pinned chart with the organisation's values
+      # file, which DELEGATES to helm and duplicates nothing. It needs
+      # `azure/setup-helm` and two more inputs, and it can never move into
+      # `hooks/seed_repository.py`: that file is `language: script` and stdlib-only, and
+      # the standard library has no JSON Schema validator.
+      #
+      # EITHER WAY THE CHART IS THE AUTHORITY. Whatever the schema says, helm enforces
+      # it when Argo renders — so this absence costs an organisation the early warning
+      # and costs the installation nothing.
       - name: "values are NOT schema-validated by this workflow (seam, not a check)"
         if: always()
         run: |
@@ -235,17 +250,24 @@ jobs:
           values file against the chart schema, and a green run above says nothing
           about it.
 
-          Why: `chart/values.schema.json` does not exist on `yadgarhq/config@main`
-          (checked 2026-09-19). There is no schema to validate against, and inventing
-          one here would publish a rule nobody decided.
+          Why, measured against `yadgarhq/config@main` on 2026-09-19:
+          `chart/values.schema.json` **does** exist, and the chart **is** anonymously
+          pullable from `oci://ghcr.io/yadgarhq/charts/config`. Nothing mechanical is
+          in the way. The schema is **closed and empty** —
+          `additionalProperties: false` over `properties: {}` — because the chart reads
+          no Helm values at all; every knob lives in `chart/config/<service>.yaml`.
+          Checking against it today would refuse **every** key in your values file, and
+          the schema's own `$comment` calls itself provisional. Enforcing a temporary
+          rule inside your repository is a false refusal, which is worse than this
+          absence.
 
-          What enforces it meanwhile: the chart, at sync. A knob whose wrong value
-          carries real consequence is declared with Helm `required`, so the sync fails
-          naming the knob and the file (ADR-0705).
+          What enforces it meanwhile: the chart, when Argo renders it. helm applies
+          `values.schema.json` at template time, so an invalid values file fails the
+          sync whether or not this workflow said anything.
 
-          What unblocks a merge-time copy: `chart/values.schema.json` on
-          `yadgarhq/config@main`. The check is then `helm lint --strict` against the
-          pinned upstream chart — helm is what enforces the schema, at template time,
-          and the standard library has no JSON Schema validator, so it can never live
-          in the `language: script` pre-commit hook.
+          What unblocks a merge-time copy: a **non-empty** `properties` in that schema.
+          The check is then `helm template` against the pinned chart with your values
+          file, which delegates to helm and duplicates nothing. It can never live in
+          the `language: script` pre-commit hook — the standard library has no JSON
+          Schema validator.
           SEAM

@@ -460,10 +460,16 @@ D33 guarantee would end at the first organisation that removed it". Deleting thi
 pair costs an organisation the early warning and costs the installation nothing.
 
 Two of rule 3's three refusals are implemented. The third, an invalid values
-schema, is **not**: `chart/values.schema.json` does not exist on
-`yadgarhq/config@main`, and helm is what enforces it at template time, so it can
-never live in a stdlib-only `language: script` hook. The seam names its own
-unblocking condition inside `seed-declaration.yaml`.
+schema, is **not** — and not because the schema is missing. Measured against
+`yadgarhq/config@main` on 2026-09-19: `chart/values.schema.json` exists and the
+chart is anonymously pullable from `oci://ghcr.io/yadgarhq/charts/config`. That
+schema is **closed and empty** (`additionalProperties: false` over
+`properties: {}`), because the chart reads no Helm values at all — every knob
+lives in `chart/config/<service>.yaml`. Checking against it would refuse every key
+in an organisation's values file, under a rule the schema's own `$comment` calls
+provisional. helm enforces it at sync either way, and it can never live in a
+stdlib-only `language: script` hook. The seam names its unblocking condition inside
+`seed-declaration.yaml`: a non-empty `properties`.
 
 An adopting organisation pins a tag rather than `@main` — it is a stranger to this
 repository's release cadence and should choose when it takes a new version.

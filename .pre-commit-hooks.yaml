@@ -741,11 +741,19 @@
 #   python3 hooks/seed_repository.py --root <tree> --part seed-front-matter --report
 #
 # WHAT NEITHER HALF CHECKS, said here rather than left to be found. Rule 3's THIRD
-# refusal — an invalid values schema — is absent: `chart/values.schema.json` does not
-# exist on `yadgarhq/config@main` (checked 2026-09-19), and even once it lands, helm is
-# what enforces it at template time and the standard library has no JSON Schema
-# validator, so it can never live in a `language: script` hook. The seam is in
-# `.github/workflows/seed-declaration.yaml`, which names the unblocking condition.
+# refusal — an invalid values schema — is absent, and NOT for the reason an earlier
+# revision of this comment gave. Re-measured 2026-09-19 against `yadgarhq/config@main`
+# at `c66bded`: `chart/values.schema.json` DOES exist and the chart IS anonymously
+# pullable. It is absent because that schema is CLOSED AND EMPTY —
+# `additionalProperties: false` over `properties: {}`, since the chart reads no Helm
+# values at all — so checking against it would refuse every key in an organisation's
+# values file, which is the artefact ADR-0705 tells them to write, under a rule the
+# schema's own `$comment` calls provisional. It also can never live in a
+# `language: script` hook: helm enforces the schema at template time and the standard
+# library has no JSON Schema validator. Nor is there a `required` knob to lean on —
+# `grep -rn required chart/templates/` returns nothing and that idiom was cut. The seam
+# is in `.github/workflows/seed-declaration.yaml`, which names the unblocking condition:
+# a NON-EMPTY `properties`.
 - id: seed-no-ask-prompt
   name: ADR-0705 — a seed declaration defines no `prompts/ask/` override (D33)
   language: script

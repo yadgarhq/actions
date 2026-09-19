@@ -618,12 +618,17 @@ def test_the_gate_claims_no_schema_validation():
     """THE SEAM, PINNED SO IT CANNOT QUIETLY BECOME A CLAIM.
 
     ADR-0705's rule 3 has THREE refusals. This pair implements two. The third — an
-    invalid values schema — is not implementable here: `chart/values.schema.json`
-    does not exist on `yadgarhq/config@main` (checked 2026-09-19; `chart/` holds
-    `Chart.yaml`, `config/`, `templates/` and `values.yaml` and nothing else), and
-    even once it lands, helm is what enforces it at template time and there is no
-    JSON Schema validator in the standard library. So this gate must never print
-    anything a reader could take for a schema verdict.
+    invalid values schema — is not implementable in a `language: script` hook at all:
+    helm is what enforces `values.schema.json`, at template time, and the standard
+    library has no JSON Schema validator. So this gate must never print anything a
+    reader could take for a schema verdict, and must never reach for a validator.
+
+    THE MEASUREMENT LIVES IN THE GATE'S PROSE, NOT IN AN ASSERTION, and deliberately.
+    An earlier revision of that prose said the schema did not exist on
+    `yadgarhq/config@main`; it does, and the chart is pullable too. A test asserting
+    either fact would have gone stale the same day and reddened this repository for a
+    change in another one. What is pinned here is only what this file controls: that the
+    seam is documented rather than omitted, and that no validator is imported.
     """
     source = GATE.read_text()
     assert "values.schema.json" in source, "the seam must be documented, not omitted"

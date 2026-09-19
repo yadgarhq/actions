@@ -113,14 +113,40 @@ ADR-0705 work that cannot be done outside the seeder or the chart, so attempting
 here would produce a second, weaker authority that disagrees with the first.
 
 - AN INVALID VALUES SCHEMA, which is the third refusal in rule 3 and the one this pair
-  does not implement. `chart/values.schema.json` does not exist on
-  `yadgarhq/config@main` — checked 2026-09-19, where `chart/` holds `Chart.yaml`,
-  `config/`, `templates/` and `values.yaml` and nothing else — so there is no schema to
-  validate against and inventing one would publish a rule nobody decided. Even once it
-  lands this hook cannot do it: helm is what enforces `values.schema.json`, at template
-  time, and there is no JSON Schema validator in the standard library. The seam is in
-  `.github/workflows/seed-declaration.yaml`, which has helm available and names the
-  unblocking condition in the step that is not yet there.
+  does not implement. Re-measured 2026-09-19 against `yadgarhq/config@main` at
+  `c66bded` (config#15), and the earlier revision of this paragraph was WRONG in both
+  directions, so both are corrected here rather than quietly replaced.
+
+  The schema EXISTS. `chart/values.schema.json` is on `main`, and the chart is
+  published and anonymously pullable — `oci://ghcr.io/yadgarhq/charts/config` answers
+  HTTP 200 for tags 0.1.0, 0.1.1 and 0.1.2. So neither thing this paragraph once called
+  a blocker is a blocker.
+
+  IT IS STILL NOT IMPLEMENTED, FOR A BETTER REASON: the schema is CLOSED AND EMPTY.
+  `additionalProperties: false` over `properties: {}`, because the chart reads no Helm
+  values at all — every knob lives in `chart/config/<service>.yaml`, copied verbatim by
+  `.Files.Get`. So validating an adopter's values file against today's schema means
+  refusing EVERY key in it, which is a refusal of the exact artefact ADR-0705 tells an
+  organisation to write. The schema's own `$comment` says it is temporary: `properties`
+  gets filled in "when a knob becomes a value", and "this chart does not implement
+  [ADR-0705's delivery model] yet". A merge-time gate enforcing a rule its author calls
+  provisional is a false refusal in somebody else's repository, which is worse here than
+  a missed defect — the missed defect is caught at sync, and a false refusal blocks
+  their own merge.
+
+  AND THERE IS NO `required` KNOB TO LEAN ON. ADR-0705 describes a knob with no default
+  declared with Helm's `required`; `grep -rn required chart/templates/` on `main`
+  returns nothing, and that idiom was deliberately cut — a knob absent from
+  `chart/config/` would fire the refusal permanently for everyone with no values path
+  an adopter could satisfy. Nothing in this file may describe `required` as something
+  that exists.
+
+  WHAT UNBLOCKS IT, checkably: `chart/values.schema.json` carrying a NON-EMPTY
+  `properties`. The check is then `helm template` against the pinned chart with the
+  organisation's values file, which DELEGATES to helm and duplicates nothing — helm is
+  what enforces the schema, at template time. It can never live in this hook, which is
+  `language: script` and stdlib-only, and the standard library has no JSON Schema
+  validator. The seam is in `.github/workflows/seed-declaration.yaml`.
 - WHETHER RE-SEEDING ACTUALLY UPDATES IN PLACE. That is D35's real property and only a
   re-seed demonstrates it. This half checks that front-matter exists and is readable,
   which is the precondition, not the property.
