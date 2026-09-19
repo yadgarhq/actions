@@ -607,9 +607,19 @@ jobs:
   #
   # INERT UNTIL TWO THINGS ARE TRUE, and NEITHER of them is in this repository:
   #
-  #   1. `yadgarhq/config`'s `release:` job passes `RELEASE_APP_*`. Seven of the
-  #      eight module repositories already do; `config` does not, so its releases
-  #      reach the `cred` step below and REDDEN until that one line is added.
+  #   1. `yadgarhq/config`'s `release:` job passes `RELEASE_APP_*` — TRUE AS OF
+  #      2026-09-19. Measured, not assumed: every one of the eight chart-bearing
+  #      module repositories (`config`, `gateway`, `iam`, `iam-db`, `project`,
+  #      `project-db`, `task`, `task-db`) now wires both secrets to its own
+  #      `release:` job, `config` last, in its own `config#19`. Both names are
+  #      also real organisation secrets visible to `config` — confirmed via
+  #      `repos/yadgarhq/config/actions/organization-secrets` — so the wiring
+  #      resolves to values rather than the two empty strings this paragraph
+  #      used to describe. NOT "so this can no longer happen": the `cred` step
+  #      below is the off switch for exactly the case this measurement stops
+  #      describing — nothing here gates a NINTH repository, or one of these
+  #      eight regressing, omitting them — and its red-not-quiet behaviour is
+  #      why the step exists rather than a condition on this list.
   #   2. `yadgarhq/chart` carries no `main` ruleset today — measured, it has none
   #      at all and `protected: false` — so this write lands. The day that
   #      ruleset arrives the release App has to be a bypass actor on it, exactly
