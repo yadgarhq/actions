@@ -685,6 +685,16 @@ def test_the_parent_is_bumped_only_by_a_module_that_published_a_chart(
     assert ci_verdict.evaluate(condition(), resolver(result, repository)) is runs
 
 
+# WHAT THIS TEST CANNOT SEE, NAMED RATHER THAN LEFT FOR THE NEXT READER TO
+# ASSUME. `ci_verdict.evaluate` reports the TRUTH VALUE of `if:`'s text — it
+# says nothing about whether GitHub would admit the job AT ALL, which is a
+# question this parametrization answered `True` for `("success",
+# "yadgarhq/config")` under BOTH the pre- and post-fix condition, and is
+# exactly the gap that let `parent` skip in production with every clause here
+# reading true. `test_ci_release_skip_propagation.py` is where that question
+# is asked.
+
+
 def test_the_job_is_bounded_so_a_wedged_read_cannot_hold_a_runner():
     """Every job here inherits GitHub's 360-minute default without one."""
     assert workflow()["jobs"]["parent"]["timeout-minutes"] <= 10
