@@ -363,6 +363,52 @@ jobs:
           echo "Publishing with image digest \`$DIGEST\` (git keeps its tag)." \
             >> "$GITHUB_STEP_SUMMARY"
           yq -i ".image.digest = \"$DIGEST\" | del(.image.tag)" chart/values.yaml
+      # STAGED BEFORE THE PUSH, and the order is the point. The two steps below
+      # fetch the gate that runs AFTER publishing; a checkout flake or a missing
+      # file has to fail with nothing published rather than after.
+      #
+      # THE IDIOM IS `ci-pr.yaml`'S, five times over — its `portability`,
+      # `service_immutable` and `passed` jobs among them: a second checkout of
+      # `yadgarhq/actions@main` into `.ci-actions`, skipped when this IS that
+      # repository, and the REPOSITORY NAME rather than the file's presence
+      # decides which copy runs. `@main` because there is no way to ask what ref
+      # this workflow was called at — `github.job_workflow_ref` renders empty as
+      # an expression — and `@main` is what every consumer pins the workflow at,
+      # so the script and the workflow that calls it move together.
+      #
+      # THE `yadgarhq/actions` ARM IS INERT AS SHIPPED, said rather than left to
+      # be discovered: that repository carries no `chart/`, so `detect` reports
+      # `chart=false` and this job never runs there. It is written anyway because
+      # the alternative is an idiom that reads differently here than in the five
+      # places it already appears.
+      - if: github.repository != 'yadgarhq/actions'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: yadgarhq/actions
+          ref: main
+          path: .ci-actions
+      - name: stage the visibility gate, then restore the tree
+        env:
+          # Through the environment, never `${{ }}` inside the script.
+          UNDER_RELEASE: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$UNDER_RELEASE" = "yadgarhq/actions" ]; then
+            src=scripts/chart_publicly_pullable.py
+          else
+            src=.ci-actions/scripts/chart_publicly_pullable.py
+          fi
+          if [ ! -f "$src" ]; then
+            echo "::error::the chart visibility gate is missing at $src"
+            exit 1
+          fi
+          cp "$src" "$RUNNER_TEMP/chart_publicly_pullable.py"
+          # THE SECOND CHECKOUT IS DELETED BEFORE ANYTHING ELSE RUNS. `helm
+          # package` and the gate both work on this workspace, and another
+          # repository's tree inside it is a source of artefacts neither should
+          # ever see.
+          rm -rf .ci-actions
       - name: package and push
         env:
           VERSION: ${{ needs.detect.outputs.version }}
@@ -375,6 +421,63 @@ jobs:
           helm package chart --version "$VERSION" --app-version "$VERSION"
           echo "$TOKEN" | helm registry login "$REGISTRY" -u "$ACTOR" --password-stdin
           helm push ./*-"$VERSION".tgz "oci://${REGISTRY}/${OWNER}/charts"
+
+      # PUBLISHING A CHART DID NOT MAKE IT PULLABLE, and until this step nothing
+      # here said so. A newly created GHCR package is PRIVATE — even from a public
+      # repository — and no API changes that: visibility lives on the package's
+      # own settings page and nowhere else. The push above succeeds, this job goes
+      # green, and the first chart release in any repository ships an artefact no
+      # installation can pull.
+      #
+      # ADR-0705 IS WHAT MAKES THAT FATAL RATHER THAN UNTIDY. An installation
+      # clones nothing: it REFERENCES this published chart from its own GitOps
+      # repository and an upgrade is a version bump. The three Argo
+      # `Application`s already consuming OCI charts in `yadgarhq/deploy` —
+      # `infra/arc.yaml`, `infra/estate-front-runner.yaml`,
+      # `infra/envoy-gateway.yaml` — carry no repository Secret at all, so every
+      # installation's pull is ANONYMOUS by design and a private package fails
+      # each one at sync, with nothing upstream reporting a problem.
+      #
+      # SAME INTENT AS THE `image` JOB'S GUARD ABOVE, deliberately not its
+      # mechanism. That step asks the same question about the image and this
+      # message is shaped after its message on purpose. What is not reused is HOW
+      # it asks: it runs `docker manifest inspect` in a job whose first steps
+      # include `docker/login-action`, so docker answers it from the credentials
+      # on disk — an AUTHENTICATED pull, which succeeds against a private package.
+      # This step is therefore given no token of its own, and that is the whole of
+      # why it can fail: the gate exchanges an anonymous pull token and carries
+      # nothing else. `scripts/tests/test_chart_publicly_pullable.py` pins both
+      # halves — that no credential reaches the registry, and that this step's
+      # `env:` holds none.
+      #
+      # A SCRIPT RATHER THAN SHELL, because shell in this file is untestable by
+      # anything this repository runs: `ci-release.yaml` is tag-triggered, so the
+      # first execution of any change here is post-merge in a consumer. The Python
+      # half is exercised by `scripts/tests/`, which the `pytest-scripts` hook
+      # gates on every commit.
+      - name: an installation with no credential must be able to pull this chart
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          OWNER: ${{ github.repository_owner }}
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: |
+          set -euo pipefail
+          # THE SUMMARY IS WRITTEN ON THE FAILING PATH TOO, which is the only path
+          # anybody reads it on — and a pipe into `tee` would have carried the
+          # gate's status out through `pipefail` and never reached the summary.
+          # The same shape `ci-pr.yaml`'s merge-gate step uses, for the same
+          # reason.
+          rc=0
+          python3 "$RUNNER_TEMP/chart_publicly_pullable.py" \
+            >"$RUNNER_TEMP/chart-pull.txt" 2>"$RUNNER_TEMP/chart-pull.err" || rc=$?
+          cat "$RUNNER_TEMP/chart-pull.txt"
+          cat "$RUNNER_TEMP/chart-pull.err" >&2
+          {
+            echo "## An anonymous pull of the published chart"
+            echo ""
+            cat "$RUNNER_TEMP/chart-pull.txt" "$RUNNER_TEMP/chart-pull.err"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
 
   # PUBLISHING AN IMAGE DID NOT ROLL A POD, and this job is the whole fix. Every
   # module Deployment renders `image: <repo>:latest` with `imagePullPolicy:
