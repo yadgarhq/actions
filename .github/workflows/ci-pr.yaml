@@ -111,6 +111,13 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       rust: ${{ steps.d.outputs.rust }}
+      # THE FACT `precommit`, `portability` and `service_immutable` key their
+      # dependency-resolution step on (ADR-0725, ADR-0691's "name the consumer,
+      # not the gate" — the same reason those three read this output rather than
+      # each carrying its own inline `if [ -d chart ]`, which is the loop above
+      # computing the same thing a fourth time). Loop computes it already;
+      # nothing downstream read it until now.
+      chart: ${{ steps.d.outputs.chart }}
       proto: ${{ steps.d.outputs.proto }}
       text_edit: ${{ steps.e.outputs.text_edit }}
     steps:
@@ -292,6 +299,28 @@ jobs:
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v3.18.4
+
+      # ADR-0725: a chart's dependencies are resolved before anything renders or
+      # lints it, never vendored. The helm-lint hook below shells out to `helm
+      # lint --strict`, and that REFUSES a chart with an unresolved
+      # `dependencies:` key exactly as `helm package` does (measured against
+      # `yadgarhq/chart`'s parent, helm 3.18.4: "chart directory is missing
+      # these dependencies: config,gateway,..." promoted to an error by
+      # `--strict`) — so this has to run before `pre-commit/action` below, not
+      # after. `helm dependency update` alone, not `-u`: there is no package
+      # step in this job to attach the flag to.
+      #
+      # A NO-OP FOR EVERY CHART THAT PRECEDED THE PARENT, for the same reason
+      # the identical line in `ci-release.yaml` is one: measured against
+      # `yadgarhq/config`'s leaf chart (no `dependencies:` key) on helm 3.18.4,
+      # exit 0, no file written, no working-tree change.
+      #
+      # GATED ON `detect`'s `chart` FACT rather than an inline `[ -d chart ]`
+      # here — most consumers have no `chart/` at all, and a bare `helm
+      # dependency update chart` there fails outright rather than no-opping.
+      - name: resolve chart dependencies
+        if: needs.detect.outputs.chart == 'true'
+        run: helm dependency update chart
 
       # protoc, for repositories that generate types from the contract (D16).
       # Gated on the same PROTO_VERSION detection as the drift check, so a repo
@@ -1125,6 +1154,19 @@ jobs:
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v3.18.4
+      # ADR-0725, same step and same reasoning as the `precommit` copy: this
+      # job's `helm_render()` calls `helm template chart` directly, and that
+      # REFUSES a chart with an unresolved `dependencies:` key exactly as
+      # `helm lint --strict` and `helm package` do — measured against
+      # `yadgarhq/chart`'s parent on helm 3.18.4. Gated on `detect`'s `chart`
+      # fact, not an inline `[ -d chart ]`: most consumers have no `chart/` at
+      # all, and `d80_portability.py` itself already branches on
+      # `pathlib.Path("chart").is_dir()`, so this has to agree with that rather
+      # than run unconditionally and fail outright where the script would
+      # simply skip.
+      - name: resolve chart dependencies
+        if: needs.detect.outputs.chart == 'true'
+        run: helm dependency update chart
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.x"
@@ -1240,6 +1282,16 @@ jobs:
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v3.18.4
+      # ADR-0725, same step and same reasoning as the `precommit` and
+      # `portability` copies — this resolves the chart AT THIS CHECKOUT'S HEAD
+      # ONLY. `service_immutable.py` also renders the chart as of the pull
+      # request's BASE, extracted with `git archive` into a directory this step
+      # never touches; that side is resolved inside the script itself, right
+      # after the archive is unpacked, because no workflow-level step can reach
+      # a directory the script creates at run time.
+      - name: resolve chart dependencies
+        if: needs.detect.outputs.chart == 'true'
+        run: helm dependency update chart
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.x"
