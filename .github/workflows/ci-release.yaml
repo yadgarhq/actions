@@ -52,6 +52,12 @@ jobs:
       # and GitHub expressions have no suffix-strip: `replace(x, 'v', '')` is
       # the only inline option and it eats the `v` in `preview` too.
       version: ${{ steps.d.outputs.version }}
+      # THE CHART'S OWN NAME, WHICH IS NOT THE REPOSITORY'S. The `parent` job
+      # below writes this release into the parent chart's `dependencies:`, whose
+      # entries are keyed by CHART name — and `yadgarhq/chart` is already the
+      # counterexample: its chart is named `yadgar`. Empty for a repository with
+      # no `chart/`, which is every repository the `parent` job skips anyway.
+      chartname: ${{ steps.d.outputs.chartname }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -74,6 +80,26 @@ jobs:
               echo "- $k: no \`$f\` → nothing to publish" >> "$GITHUB_STEP_SUMMARY"
             fi
           done
+          # READ RATHER THAN DERIVED, and the difference is not cosmetic. The
+          # parent chart's `dependencies:` entries are keyed by CHART name, and so
+          # is what `helm push` publishes — `chart_publicly_pullable.py` takes the
+          # package name off the TARBALL for exactly this reason rather than off
+          # `github.repository`. Those two names agree in the eight module
+          # repositories and disagree in the ninth: `yadgarhq/chart` publishes
+          # `yadgar`. Deriving the name would be right by coincidence.
+          #
+          # AN UNNAMED CHART IS A REFUSAL. `yq` prints `null` for an absent key
+          # and exits 0, so the empty answer has to be tested here; a pin written
+          # under `null` is a parent nothing can resolve.
+          if [ -f chart/Chart.yaml ]; then
+            name=$(yq '.name' chart/Chart.yaml)
+            if [ -z "$name" ] || [ "$name" = "null" ]; then
+              echo "::error::chart/Chart.yaml declares no name:, so neither the published package nor the parent chart's pin can be named"
+              exit 1
+            fi
+            echo "chartname=$name" >> "$GITHUB_OUTPUT"
+            echo "- chart name: \`$name\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   image:
     needs: detect
@@ -518,6 +544,191 @@ jobs:
             cat "$RUNNER_TEMP/chart-pull.txt" "$RUNNER_TEMP/chart-pull.err"
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
+
+  # A MODULE RELEASE CUTS A NEW PARENT VERSION, which is ADR-0722 and which
+  # REVERSES D66. An adopter installs ONE thing — the parent chart in
+  # `yadgarhq/chart`, at one version, declaring every module as an OCI dependency
+  # pinned exactly (D60) — so a module release that does not reach the parent is a
+  # release no adopter can install. D66 left the parent's version "cut by hand,
+  # deliberately"; the operator reversed that, on the ground that a hand-cut parent
+  # makes every module fix's delivery wait for somebody to remember.
+  #
+  # THIS IS THE WRITING HALF OF A MECHANISM THAT WAS PUBLISHED AND ADOPTED
+  # NOWHERE. `scripts/parent_pin.py` shipped in #82 with 58 test cases and 22
+  # killed mutants, and `grep -rn parent_pin .github/` answered with nothing —
+  # so every refusal it carries was a refusal nothing could reach. This job and
+  # `scripts/parent_bump.py` are the caller. The decisions stay in `parent_pin`:
+  # the semver comparison that ADR-0690 paid for, the equal-version refusal, the
+  # downgrade refusal, and the ladder read off `next_version.compute` rather than
+  # copied.
+  #
+  # WHAT MAKES THE FEATURE WORK AT ALL IS THAT AN APP CUTS THE TAG. Writing the
+  # pin publishes nothing: the parent is published by `yadgarhq/chart`'s own
+  # `ci.yaml`, which fires on `push` to `tags: ["v*"]`. A tag created with
+  # `GITHUB_TOKEN` triggers NO workflow, so that arrangement would leave a pinned
+  # parent nobody ever packaged — inert, and green from every angle. An App token
+  # does trigger it, measured rather than assumed: `yadgarhq/config` carries five
+  # consecutive tag-push runs, `v0.1.1` through `v0.1.5`, whose actor is
+  # `yadgarhq-bot[bot]`, each of them a successful release.
+  #
+  # A DIRECT WRITE RATHER THAN A `repository_dispatch`, and the choice is
+  # narrower than it looks. Dispatch would need a new workflow in `chart`, it runs
+  # only the DEFAULT-BRANCH copy of that workflow, and it answers 204 whether or
+  # not any workflow matched the event — so its exit status is a check that cannot
+  # fail, and confirming it means watching for a run to appear, which the `estate`
+  # step below spends a hundred lines doing. The direct write mirrors the `argocd`
+  # write below instead, which is the mechanism this file already has.
+  #
+  # NOT GATED ON `image`, AND THAT IS THE WHOLE REASON THIS IS NOT A STEP IN
+  # `deployment`. That job requires `needs.image.result == 'success'`, and
+  # `yadgarhq/config` is a parent module with NO `Containerfile` — it released
+  # five times on the day this was written. A step there would have skipped every
+  # one of them, silently, for the one module whose shape differs.
+  #
+  # `needs.chart.result == 'success'` IS BELT AND BRACES rather than the gate. A
+  # job whose `needs` did not all succeed is skipped by GitHub regardless, so this
+  # cannot be reached with a failed `chart` job. It is written anyway because it is
+  # the property that matters and `scripts/tests/test_parent_bump.py` evaluates it:
+  # `helm package -u` resolves this pin from the REGISTRY, so a pin written for a
+  # chart that never pushed does not fail this release — it fails the NEXT parent
+  # release, in another repository, for a reason nothing there can see.
+  #
+  # THE PARENT DOES NOT PIN ITSELF. `yadgarhq/chart` publishes a chart named
+  # `yadgar` which is not in its own `dependencies:`, so `parent_bump.py` would
+  # refuse and every parent release would be red — the feature failing on its own
+  # output. The repository is named as a literal for the same reason the `chart`
+  # job above names `yadgarhq/actions` as one.
+  #
+  # INERT UNTIL TWO THINGS ARE TRUE, and NEITHER of them is in this repository:
+  #
+  #   1. `yadgarhq/config`'s `release:` job passes `RELEASE_APP_*`. Seven of the
+  #      eight module repositories already do; `config` does not, so its releases
+  #      reach the `cred` step below and REDDEN until that one line is added.
+  #   2. `yadgarhq/chart` carries no `main` ruleset today — measured, it has none
+  #      at all and `protected: false` — so this write lands. The day that
+  #      ruleset arrives the release App has to be a bypass actor on it, exactly
+  #      as app id 4814165 already is on `yadgarhq/argocd`.
+  parent:
+    needs: [detect, chart]
+    if: needs.chart.result == 'success' && github.repository != 'yadgarhq/chart'
+    runs-on: ubuntu-latest
+    # THE SAME BOUND AND THE SAME ARITHMETIC AS `deployment`. The worst path here
+    # is three write attempts with 5s and 10s backoff plus three tag attempts with
+    # the same, one token mint and about a dozen `gh api` reads — under two
+    # minutes, and nothing polls. Ten leaves five times that as headroom while
+    # cutting a wedged read short by a factor of thirty-six.
+    timeout-minutes: 10
+    steps:
+      # THE OFF SWITCH, AND HERE IT IS RED RATHER THAN QUIET. It has to be a step
+      # output rather than a condition on the secret, because the `secrets` context
+      # is not available in a step-level `if:` — and it is executed by
+      # `test_parent_bump.py` rather than read, for the reason `ci-pr.yaml`'s twin
+      # gives: a condition on the step can only be asserted as text.
+      #
+      # LEDGER 580'S RULING, APPLIED TO THE SAME SHAPE. `ci-pr.yaml` reddens when a
+      # version was derived and cannot be tagged, because work that was done and
+      # cannot be delivered is a failure rather than a skip. By the time this job
+      # runs the module chart is published and pullable, and ADR-0722 makes the
+      # parent the only thing an adopter installs — so a published chart the parent
+      # will never pin is exactly that shape. The `deployment` job's italic note
+      # was written when no caller passed these secrets at all; seven of eight
+      # module repositories pass them now.
+      - name: is the release App configured here
+        id: cred
+        env:
+          CLIENT_ID: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          APP_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          # BOTH OR NEITHER. An id without a key fails inside the minting action
+          # instead of here, which is a red job in place of a named one.
+          if [ -n "$CLIENT_ID" ] && [ -n "$APP_KEY" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "configured=false" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Published, but the parent chart does NOT pin it"
+            echo ""
+            echo "This repository publishes a module chart and passes no release"
+            echo "App, so the parent chart was not re-pinned and no parent version"
+            echo "was cut. ADR-0722 makes the parent the only thing an adopter"
+            echo "installs, so this release reaches nobody."
+            echo ""
+            echo "The repair is one line in this repository's own ci.yaml: the"
+            echo "release job must pass RELEASE_APP_CLIENT_ID and"
+            echo "RELEASE_APP_PRIVATE_KEY the way its main job already does."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::the parent chart was not re-pinned: no release App is configured for this repository. See the parent job in yadgarhq/actions."
+          exit 1
+
+      # SCOPED TO `chart`, AND IT IS A SECOND MINT RATHER THAN A WIDER FIRST ONE.
+      # The `deployment` job below narrows its token to `repositories: argocd` and
+      # says why; adding `chart` to that list would hand the token that pins the
+      # cluster's images write access to the chart repository, and hand this write
+      # path the power to rewrite every `versions/*.yaml`. The `estate` dispatch
+      # already made the same call for the same reason. Three mints cost two extra
+      # API calls and keep each token unable to do the others' job.
+      #
+      # `repositories:` ALONE DOES NOTHING — the action makes it conditional on
+      # `owner:`, so the two travel together or the default quietly scopes the
+      # token to THIS repository, which is the one place it must never write.
+      # `permission-contents: write` rather than whatever the installation holds,
+      # because zizmor's `github-app` audit fails the blanket form and a later
+      # grant to this App would otherwise be picked up silently.
+      - name: mint a token that can write to the parent chart and nowhere else
+        id: app
+        if: steps.cred.outputs.configured == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: chart
+          permission-contents: write
+
+      # THE ONLY CHECKOUT THIS JOB WANTS IS THIS REPOSITORY'S. Nothing here reads
+      # the caller's tree — the module's name and version arrive from `detect` as
+      # outputs, and the parent's `Chart.yaml` arrives over the API — so the
+      # `.ci-actions` idiom the `chart` job uses, with its copy-one-file-then-
+      # `rm -rf` dance, buys nothing: that dance exists because `helm package`
+      # works on the same workspace. Here the workspace IS the scripts.
+      #
+      # `@main` FOR THE SAME REASON THE FIVE OTHER SITES GIVE: there is no way to
+      # ask what ref this workflow was called at — `github.job_workflow_ref`
+      # renders empty as an expression — and `@main` is what every consumer pins
+      # the workflow at, so the script and the workflow that calls it move
+      # together.
+      - if: steps.cred.outputs.configured == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: yadgarhq/actions
+          ref: main
+
+      # A SCRIPT RATHER THAN SHELL, which is this file's own instinct: the chart
+      # visibility gate above gives the argument at length, and it is sharper
+      # here. `ci-release.yaml` is tag-triggered, so the first execution of any
+      # change to it is post-merge in a consumer against a real published chart
+      # and a real parent — and what this step does is write to another
+      # repository and cut a tag there. The concurrency behaviour, the retries
+      # and every refusal are exercised offline by
+      # `scripts/tests/test_parent_bump.py` against an argv-dispatching `gh` stub
+      # that models the blob sha, so a lost pin is a red test rather than a
+      # published parent claiming a set it does not carry.
+      - name: pin this release in the parent chart and cut its version
+        id: bump
+        if: steps.cred.outputs.configured == 'true'
+        env:
+          # Through the environment, never `${{ }}` inside the script.
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          OWNER: ${{ github.repository_owner }}
+          MODULE: ${{ needs.detect.outputs.chartname }}
+          VERSION: ${{ needs.detect.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 scripts/parent_bump.py
 
   # PUBLISHING AN IMAGE DID NOT ROLL A POD, and this job is the whole fix. Every
   # module Deployment renders `image: <repo>:latest` with `imagePullPolicy:
