@@ -688,3 +688,76 @@
   always_run: true
   pass_filenames: false
   verbose: true
+
+# ADR-0705 — THE TWO HALVES OF MERGE-TIME FEEDBACK ON AN ORGANISATION'S OWN SEED
+# DECLARATION. These are the only entries in this manifest whose intended consumer is
+# NOT a repository in this organisation. An adopting organisation's GitOps repository
+# declares its org and team prompts, wiki pages and memories (D34, D36) and references
+# a pinned upstream chart; these hooks tell it about a bad declaration at commit time
+# instead of at sync.
+#
+# OPTIONAL BY DECISION, NOT BY OVERSIGHT, and the manifest has to say so or a later
+# reader will try to make them mandatory. ADR-0705 moved the D37 gates SERVER-SIDE: the
+# seeder and the chart refuse invalid front-matter, an invalid schema and any
+# `prompts/ask/` definition UNCONDITIONALLY. It then rejected, in as many words,
+# "publishing CI the organisation is required to reference… because the reference is
+# deletable and upstream cannot detect its absence, so the D33 guarantee would end at
+# the first organisation that removed it". These hooks are the early warning. Deleting
+# them costs an organisation the warning and costs the installation nothing.
+#
+# ONE SCRIPT, TWO `entry:` LINES, the same shape as `chart-baseline` above and for the
+# same reason: an organisation declaring only wiki content references the front-matter
+# half and not the other, and that choice is a line in its own `.pre-commit-config.yaml`
+# rather than an exemption inside the gate.
+#
+# `always_run` WITH `pass_filenames: false` on both: the subject is the whole
+# declaration, not the file somebody touched. A `files:` filter would leave a
+# declaration moved elsewhere unjudged, which is the hole `certificate_usages.py`
+# measured when its own scoping let a Certificate at the repository root pass.
+#
+# BOTH REFUSE A TREE THEY FOUND NOTHING IN, rather than passing it — the way
+# `chart_baseline.py` refuses a tree with no `Chart.yaml` and `boot_reads_watched.py`
+# refuses one with no `src/rotate.rs`. A tree holding none of `prompts/agents/`,
+# `content/wiki/` or `content/memories/` is refused, and so is a tree whose roots exist
+# holding zero `*.md`. That is NOT a judgement on an empty organisation: D34 says an
+# organisation declaring no org or team content "simply has no org or team prompts…
+# a complete and usable state, not a degraded one", and such an organisation does not
+# reference these hooks. The refusal message says exactly that.
+#
+# NEITHER IS ADDED TO THIS REPOSITORY'S OWN `.pre-commit-config.yaml`, for the reason
+# `chart-baseline` gives above. `yadgarhq/actions` holds no seed declaration, and both
+# halves refuse a tree with none rather than passing it — so adding them here would
+# redden every commit. What gates this file on every commit is `pytest-scripts`, not the
+# hooks themselves, and the pull request that publishes them says so rather than
+# claiming CI exercised them.
+#
+# ADOPTION IS PER REPOSITORY AND IS NOT AUTOMATIC (ADR-0577, ADR-0607). There is no
+# adopter yet: no organisation has a seed declaration, because the D35 seeder that would
+# read one is unbuilt and blocked behind ADR-0574. Publication is not adoption, so
+# ADR-0584 is satisfied by this comment regardless. An organisation MEASURES its own
+# tree before referencing either half:
+#
+#   python3 hooks/seed_repository.py --root <tree> --part seed-no-ask-prompt --report
+#   python3 hooks/seed_repository.py --root <tree> --part seed-front-matter --report
+#
+# WHAT NEITHER HALF CHECKS, said here rather than left to be found. Rule 3's THIRD
+# refusal — an invalid values schema — is absent: `chart/values.schema.json` does not
+# exist on `yadgarhq/config@main` (checked 2026-09-19), and even once it lands, helm is
+# what enforces it at template time and the standard library has no JSON Schema
+# validator, so it can never live in a `language: script` hook. The seam is in
+# `.github/workflows/seed-declaration.yaml`, which names the unblocking condition.
+- id: seed-no-ask-prompt
+  name: ADR-0705 — a seed declaration defines no `prompts/ask/` override (D33)
+  language: script
+  entry: hooks/seed_repository.py --part seed-no-ask-prompt
+  always_run: true
+  pass_filenames: false
+  verbose: true
+
+- id: seed-front-matter
+  name: ADR-0705 — every declared content file carries readable front-matter (D35, D36)
+  language: script
+  entry: hooks/seed_repository.py --part seed-front-matter
+  always_run: true
+  pass_filenames: false
+  verbose: true
