@@ -614,6 +614,7 @@ jobs:
   #      at all and `protected: false` — so this write lands. The day that
   #      ruleset arrives the release App has to be a bypass actor on it, exactly
   #      as app id 4814165 already is on `yadgarhq/argocd`.
+  #
   # `always()` IS LOAD-BEARING HERE FOR THE SAME REASON IT IS ON `chart`, one
   # hop further down the graph. MEASURED, via the API rather than the UI, on
   # `yadgarhq/config` cutting `v0.1.7`, run 35453443606: `image` concluded
