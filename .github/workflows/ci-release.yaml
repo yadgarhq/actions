@@ -409,6 +409,46 @@ jobs:
           # repository's tree inside it is a source of artefacts neither should
           # ever see.
           rm -rf .ci-actions
+      # `-u` OVER A SEPARATE `helm dependency update` STEP. Every chart in this
+      # estate was a leaf until `yadgarhq/chart`, whose `Chart.yaml` declares
+      # eight OCI dependencies, so this line has never had to resolve anything.
+      # Bare `helm package chart` REFUSES such a chart outright — measured on
+      # helm 3.18.4, 3.20.2 and 4.2.3 alike:
+      #
+      #   Error: found in Chart.yaml, but missing in charts/ directory:
+      #   config, gateway, iam, iam-db, project, project-db, task, task-db
+      #
+      # `-u`/`--dependency-update` (confirmed present on the pinned v3.18.4 via
+      # its own `helm package --help`) resolves every dependency from its
+      # declared `repository:` and exact `version:` before packaging, and on a
+      # failure to resolve names the one dependency and the reason —
+      # `Error: could not download oci://.../gateway: ... gateway:X.Y.Z: not
+      # found` — rather than the bare command's one-shot list of every missing
+      # name. A standalone `helm dependency update chart` step first would give
+      # the identical message and exit code (measured), so the only difference
+      # is that it also refreshes every HTTP chart repository configured on the
+      # runner before touching the OCI ones this chart actually needs — `-u`
+      # does not. One flag, not a second step.
+      #
+      # THIS IS A NO-OP FOR EVERY CHART THAT PRECEDED THE PARENT. Measured
+      # against `yadgarhq/config`'s leaf chart, which has no `dependencies:` key
+      # at all, on both the pinned v3.18.4 and v4.2.3: exit 0, no file written
+      # under `charts/`, nothing in the working tree changes.
+      #
+      # A STALE VENDORED SUBCHART STOPS BEING SILENT FOR WHAT THIS JOB
+      # PUBLISHES. Measured: with `Chart.yaml` pinning a dependency one version
+      # ahead of the tarball already committed under `charts/`, bare `helm
+      # package` packages and ships the OLD subchart under the NEW parent
+      # version, exit 0. `-u` does not trust that committed tarball — it always
+      # re-resolves and re-fetches every declared dependency from the registry
+      # at the version `Chart.yaml` names, overwriting whatever `charts/`
+      # already held, so the artefact this job publishes reflects the pin
+      # rather than whatever happened to be vendored in git. `Chart.lock` is
+      # therefore not something this step reads or needs: `Chart.yaml` here
+      # pins exact versions with no ranges, `-u` regenerates the lock as a
+      # byproduct of resolving against that pin, and — like the digest rewrite
+      # above — it lives only in this ephemeral workspace and is never
+      # committed.
       - name: package and push
         env:
           VERSION: ${{ needs.detect.outputs.version }}
@@ -418,7 +458,7 @@ jobs:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          helm package chart --version "$VERSION" --app-version "$VERSION"
+          helm package chart -u --version "$VERSION" --app-version "$VERSION"
           echo "$TOKEN" | helm registry login "$REGISTRY" -u "$ACTOR" --password-stdin
           helm push ./*-"$VERSION".tgz "oci://${REGISTRY}/${OWNER}/charts"
 
