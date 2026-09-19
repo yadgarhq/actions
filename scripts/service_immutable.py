@@ -251,6 +251,40 @@ def chart_at(revision: str, destination: Path) -> bool:
     return (destination / CHART).is_dir()
 
 
+def resolve_dependencies(chart_directory: Path) -> str | None:
+    """Resolve `chart_directory`'s helm dependencies in place. `None` on success.
+
+    ADR-0725: a chart's dependencies are resolved before it is rendered, never
+    vendored, so `charts/` is never committed. That is true of the checkout
+    this script runs from -- `ci-pr.yaml`'s own workflow step resolves it
+    before this script starts, the same way `precommit` and `portability` now
+    do -- but it is NOT true of `root / CHART` above. `chart_at` just wrote
+    that directory from a bare `git archive`, which is git history and
+    therefore never carries a resolved `charts/` either, so a chart whose
+    `Chart.yaml` at `revision` already declared a dependency hits the exact
+    "missing in charts/ directory" refusal `helm template` gives for the
+    working tree -- one hop later, on the side no workflow step can reach,
+    because this directory does not exist until the script creates it.
+
+    A NO-OP FOR EVERY CHART WITHOUT A `dependencies:` KEY, for the same reason
+    the workflow-level copies of this line are: measured against
+    `yadgarhq/config`'s leaf chart on helm 3.18.4, `helm dependency update`
+    exits 0 and writes nothing. So this runs unconditionally rather than
+    gated on inspecting `Chart.yaml` first -- the inspection would just be a
+    second way to ask the question `helm dependency update` already answers
+    for free.
+    """
+    result = subprocess.run(
+        ["helm", "dependency", "update", str(chart_directory)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return one_line(result.stderr) or f"helm exited {result.returncode}"
+    return None
+
+
 def sources(output: str) -> dict[str, str]:
     """Service name -> the `# Source:` path helm rendered it from.
 
@@ -414,6 +448,20 @@ def main() -> int:
                 f"against. {len(head)} Service(s) rendered here."
             )
             return 0
+        # ADR-0725. This archive just came from `git archive` -- history, so a
+        # `dependencies:` key in `Chart.yaml` as of `revision` is exactly as
+        # unresolved here as it is in a fresh checkout, and `services()` below
+        # shells out to `helm template` the same way the working-tree render
+        # does above. See `resolve_dependencies`'s own docstring for why this
+        # cannot be a workflow-level step instead.
+        dependency_failure = resolve_dependencies(root / CHART)
+        if dependency_failure:
+            print(
+                f"::error::could not resolve the chart's dependencies as of "
+                f"`{revision}`, so the comparison has only one side: "
+                f"{dependency_failure}"
+            )
+            return 1
         base, _, failure = services(root / CHART)
 
     if failure:

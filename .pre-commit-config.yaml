@@ -197,6 +197,37 @@ repos:
         entry: python scripts/helm_pin_agrees.py
         pass_filenames: false
         always_run: true
+      # ADR-0725. `ci-pr.yaml`'s `precommit`, `portability` and
+      # `service_immutable` jobs each install helm and, until today, resolved no
+      # chart dependency first — `ci-release.yaml`'s `chart` job had the same
+      # gap, closed in #83. Every one of them refuses outright on a chart with a
+      # `dependencies:` key: `Error: found in Chart.yaml, but missing in
+      # charts/ directory: ...`, measured against `yadgarhq/chart`'s parent on
+      # helm 3.18.4.
+      #
+      # LOCAL AND NOT PUBLISHED, the same reasoning `helm-pin-agrees` and
+      # `no-build-cache` give: no consumer repository installs helm of its own —
+      # they call `ci-pr.yaml`/`ci-release.yaml` and get these steps, which this
+      # gate reads from here.
+      #
+      # WHAT IT CANNOT PROVE, said in the script's own docstring rather than
+      # only here: that resolution runs BEFORE the thing that consumes it, in
+      # the two jobs where the consumer is a `uses:` step or a Python
+      # subprocess call this parser cannot see inside. It proves the weaker and
+      # still load-bearing property — that a resolution step exists in the same
+      # job at all — which is the entire shape of the defect these three jobs
+      # had.
+      #
+      # `always_run` with `pass_filenames: false`, for the reason `helm-pin-agrees`
+      # gives: the subject is every helm-installing job in the directory, not the
+      # file somebody happened to touch.
+      - id: chart-dependencies-resolved
+        name: every job installing helm resolves a chart's dependencies first
+        language: python
+        additional_dependencies: ["pyyaml==6.0.3"]
+        entry: python scripts/chart_dependencies_resolved.py
+        pass_filenames: false
+        always_run: true
       # LEDGER 715. `containers/rust-build/Containerfile` runs `apt-get upgrade
       # -y`, and that line is the whole of the weekly security refresh — the
       # `FROM` is digest-pinned, so a rebuild on its own moves nothing. It works

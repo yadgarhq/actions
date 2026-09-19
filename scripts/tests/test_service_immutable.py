@@ -19,6 +19,10 @@ HONEST:
     left out because no chart in the estate renders it and the transitions the
     apiserver refuses depend on the live Service rather than the field. Widening
     the gate to it is allowed; doing so SILENTLY is what this test prevents.
+  * `test_a_dependency_declared_at_base_is_resolved` is ADR-0725's regression:
+    the BASE chart is rendered from a bare `git archive`, which never carries a
+    resolved `charts/` any more than a fresh checkout does, and nothing else in
+    this suite would notice `resolve_dependencies()` quietly stop running.
 
 REAL `git` AND REAL `helm`, no mocks. The gate shells out to both, and the
 defects it has already had -- a base ref that did not resolve, a `# Source:`
@@ -421,6 +425,63 @@ def test_the_count_is_reported_on_a_clean_run(repo):
     root, base = repo
     write(root, {"chart/templates/service.yaml": service(headless=True, port=50052)})
     commit(root, "move the port")
+
+    result = run(root, base)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Compared 2 immutable field(s) across 1 Service(s)" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# ADR-0725: a chart's dependencies are resolved before either side renders
+# ---------------------------------------------------------------------------
+
+
+def test_a_dependency_declared_at_base_is_resolved(repo):
+    """The regression this gate could reintroduce with no warning.
+
+    `chart_at` writes the BASE chart from a bare `git archive` -- history, so a
+    `dependencies:` key there is exactly as unresolved as a fresh checkout's
+    would be without `ci-pr.yaml`'s workflow-level step. The dependency here is
+    a local `file://` sibling INSIDE `chart/`, never an OCI pull -- so
+    `git archive chart` carries it, this test needs no network, and what is
+    under test is `resolve_dependencies()` alone. Before that function existed,
+    this failed with "helm template failed on the chart as of `<base>`": the
+    "missing in charts/ directory" refusal moved one hop later rather than
+    being fixed.
+    """
+    root, _ = repo
+    write(
+        root,
+        {
+            "chart/Chart.yaml": (
+                CHART_YAML
+                + 'dependencies:\n'
+                + "  - name: subchart\n"
+                + "    version: 0.1.0\n"
+                + '    repository: "file://./vendor-src/subchart"\n'
+            ),
+            "chart/vendor-src/subchart/Chart.yaml": (
+                "apiVersion: v2\nname: subchart\nversion: 0.1.0\n"
+            ),
+            "chart/vendor-src/subchart/templates/cm.yaml": (
+                "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: sub\n"
+            ),
+        },
+    )
+    base = commit(root, "declare a dependency")
+    write(root, {"chart/templates/service.yaml": service(headless=True, port=50052)})
+    commit(root, "move the port")
+
+    # `ci-pr.yaml`'s `precommit`/`portability`/`service_immutable` jobs each run
+    # this before the gate starts, for the checkout's HEAD only -- reproduced
+    # here so the BASE side, resolved inside the gate itself, is the only thing
+    # this test actually exercises.
+    subprocess.run(
+        ["helm", "dependency", "update", "chart"],
+        cwd=str(root),
+        check=True,
+        capture_output=True,
+    )
 
     result = run(root, base)
     assert result.returncode == 0, result.stdout + result.stderr
