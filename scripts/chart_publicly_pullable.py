@@ -2,28 +2,38 @@
 """The chart this release just pushed must be pullable BY A CLIENT WITH NO CREDENTIAL.
 
 `ci-release.yaml`'s `chart` job packages the chart, pushes it to
-`oci://ghcr.io/<owner>/charts` and reports success. A newly created GHCR package
-is PRIVATE — even from a public repository — and there is no API that changes
-that: visibility lives on the package's own settings page and nowhere else. So
-the FIRST publish of any chart package goes green carrying an artefact nobody can
-pull, and nothing upstream says a word.
+`oci://ghcr.io/<owner>/charts` and reports success. That success is not itself
+proof the package is pullable — this job never sets visibility, and this gate is
+what turns "the push succeeded" into "an installation can actually pull it".
 
-THAT IS A LIVE DEFECT RATHER THAN A HISTORICAL ONE, measured 2026-09-19. The
-organisation holds seven chart packages — `charts/iam`, `charts/iam-db`,
-`charts/task`, `charts/task-db`, `charts/project`, `charts/project-db` and
-`charts/gateway` — and all seven are public because somebody visited seven
-settings pages by hand. `charts/config` does not exist yet, and `yadgarhq/config`
-is the one chart-bearing repository with no `Containerfile`; it calls this
-workflow at `@main`. Its first release publishes a package nothing can pull, and
-so does every new module's after it.
+AN EARLIER VERSION OF THIS FILE ASSUMED A NEWLY CREATED GHCR PACKAGE IS PRIVATE
+BY DEFAULT, EVEN FROM A PUBLIC REPOSITORY. ADR-0723 measured the opposite and is
+the record that holds: `yadgarhq/config` tagged `v0.1.0` on 2026-09-19, and the
+`charts/config` package this job created was PUBLIC from the moment it existed —
+this gate ran seconds later, with no credential, and passed. There was no window
+for anybody to visit a settings page by hand. The organisation's seven earlier
+chart packages — `charts/iam`, `charts/iam-db`, `charts/task`, `charts/task-db`,
+`charts/project`, `charts/project-db` and `charts/gateway` — DID each need a
+manual flip when they were first created, which is why this file believed what
+it did; that is not what a public repository's push does today.
 
-ADR-0705 IS WHAT MAKES THAT FATAL RATHER THAN UNTIDY. An installation clones
-nothing: it references this published chart from its own GitOps repository and an
-upgrade is a version bump. The three Argo `Application`s in `yadgarhq/deploy`
-that already consume OCI charts — `infra/arc.yaml`, `infra/estate-front-runner.yaml`,
-`infra/envoy-gateway.yaml` — carry NO repository Secret at all, so every
-installation's pull is anonymous by design. A private package therefore fails
-every installation at sync, with the release that produced it green.
+THE GATE STAYS FOR WHAT IT ACTUALLY VERIFIES, not for a defect it no longer has
+evidence of. Package visibility is a GitHub-side behaviour this file does not
+control and cannot read except by asking the registry, and there is no API that
+sets it either: a private package's only fix lives on the package's own settings
+page. Trusting today's measurement to hold on every future release would make a
+release green on an assumption; this gate asks the same question an installation
+asks, every time, and names the one-time manual fix on the day the answer is no
+rather than assuming it never will be.
+
+ADR-0705 IS WHAT MAKES A PRIVATE PACKAGE FATAL RATHER THAN UNTIDY. An
+installation clones nothing: it references this published chart from its own
+GitOps repository and an upgrade is a version bump. The three Argo
+`Application`s in `yadgarhq/deploy` that already consume OCI charts —
+`infra/arc.yaml`, `infra/estate-front-runner.yaml`, `infra/envoy-gateway.yaml` —
+carry NO repository Secret at all, so every installation's pull is anonymous by
+design. A private package therefore fails every installation at sync, with the
+release that produced it green.
 
 SAME INTENT AS THE `image` JOB'S OWN GUARD, DELIBERATELY NOT ITS MECHANISM. That
 step (`ci-release.yaml`, "verify an adopter can actually pull this") asks the same
@@ -373,10 +383,9 @@ def main(fetch=None, sleep=None):
             "inspect. `helm push` was handed the same glob, so either this "
             "release published no chart or it published something this gate "
             "cannot name — and a glob that matched nothing is not a pass. This "
-            "gate exists because a GHCR package is PRIVATE until somebody makes "
-            "it public, and an installation's pull is anonymous (ADR-0705); "
-            "reporting success here having inspected nothing is the failure it "
-            "was written to stop.",
+            "gate exists to verify a published chart is anonymously pullable "
+            "(ADR-0705); reporting success here having inspected nothing is the "
+            "failure it was written to stop.",
             file=sys.stderr,
         )
         return 1
@@ -412,8 +421,8 @@ def main(fetch=None, sleep=None):
             lines += [
                 f"`{reference}` was packaged and pushed, and {detail}",
                 "",
-                "A new GitHub package is private by default and **no API can "
-                "change it** — it is a one-time manual step per package:",
+                "This package is private, and no API can change that — it is a "
+                "one-time manual step per package:",
                 "",
                 f"  {settings_url(owner, repository)}",
                 "",
