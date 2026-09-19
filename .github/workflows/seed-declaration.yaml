@@ -1,0 +1,273 @@
+# MERGE-TIME FEEDBACK ON AN ORGANISATION'S OWN SEED DECLARATION (ADR-0705, rule 3).
+#
+# OPTIONAL, AND THAT IS THE DESIGN RATHER THAN A HEDGE. ADR-0705 moved the gates D37
+# put in template CI SERVER-SIDE: "the seeder and the chart refuse invalid front-matter,
+# an invalid schema and any `prompts/ask/` definition unconditionally, and upstream
+# additionally publishes an OPTIONAL reusable workflow and pre-commit hook an
+# organisation may reference for merge-time feedback." The decision rejected
+# "publishing CI the organisation is required to reference" in as many words, "because
+# the reference is deletable and upstream cannot detect its absence, so the D33
+# guarantee would end at the first organisation that removed it".
+#
+# So this workflow is a convenience: a red pull request instead of a red sync. An
+# organisation that deletes it loses the early warning and loses nothing else. Nothing
+# it checks is the only thing between a bad input and a cluster — every check is one
+# the seeder also makes, unconditionally, where nobody can delete it.
+#
+# HOW AN ORGANISATION REFERENCES IT, from its own repository, in or out of this
+# organisation:
+#
+#   name: seed declaration
+#   on: [pull_request]
+#   jobs:
+#     declaration:
+#       uses: yadgarhq/actions/.github/workflows/seed-declaration.yaml@vX.Y.Z
+#       with:
+#         content-root: .
+#
+# `vX.Y.Z` IS A PLACEHOLDER AND NOT A VERSION, deliberately. Use the first release tag
+# that carries this file — `git ls-remote --tags` on this repository, or the releases
+# page. A draft of this comment named a concrete tag that ALREADY EXISTED and therefore
+# could never contain this workflow, which is worse than a placeholder: it reads as
+# instruction rather than as something to fill in.
+#
+# PIN A TAG, not `@main`. The in-organisation repositories pin `@main` deliberately —
+# they move with this repository and a change here is meant to reach them at once —
+# but an adopting organisation is a stranger to this repository's release cadence and
+# should choose when it takes a new version.
+#
+# IT TAKES NO SECRETS AND NEEDS NO REGISTRY, so a fork's pull request can run it.
+#
+# THERE IS NO WAY TO SWITCH EITHER HALF OFF, and that is deliberate. The pre-commit
+# hooks are published as TWO ids precisely so an organisation can reference one and not
+# the other — that choice is a line in its own `.pre-commit-config.yaml`. Giving this
+# workflow the same two switches would add a configuration in which it runs, reports
+# green, and has inspected nothing, which is the defect class this estate has now
+# measured five times. A reference to this workflow means the whole rule.
+name: seed declaration
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "the ref to judge (default: the event's own)"
+        type: string
+        required: false
+        default: ""
+      content-root:
+        description: >-
+          the directory holding `prompts/agents/`, `content/wiki/` and
+          `content/memories/`. Default `.`, the repository root. A path that is not a
+          directory REFUSES rather than passing — a declaration this job cannot find
+          is a misconfiguration, not an absence of problems.
+        type: string
+        required: false
+        default: "."
+
+# NO WRITES AND NO TOKEN MINTING. This job reads a tree and runs python over it.
+permissions:
+  contents: read
+
+jobs:
+  declaration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x"
+
+      # A SECOND CHECKOUT, ONLY WHEN THE REPOSITORY UNDER REVIEW ISN'T
+      # `yadgarhq/actions`. This is a reusable workflow: the checkout above is the
+      # CALLING repository, so nothing from this repository is on disk. Same mechanism
+      # as `ci-pr.yaml`'s `portability` and `no-test-skips` jobs, at `@main` for the
+      # same reason they give: there is no way to ask which ref this workflow was
+      # called at — `github.job_workflow_ref` renders empty as an expression — and
+      # `@main` keeps the gate and the workflow that calls it moving together.
+      #
+      # THIS REPOSITORY IS PUBLIC (verified 2026-09-19), which is what makes the
+      # checkout work for a caller outside this organisation. An adopting
+      # organisation's `GITHUB_TOKEN` can read it because anyone can.
+      - if: github.repository != 'yadgarhq/actions'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: yadgarhq/actions
+          ref: main
+          path: .ci-actions
+
+      - name: stage the gate, then restore the tree
+        id: stage
+        env:
+          # Through the environment, never `${{ }}` inside the script — the habit
+          # zizmor audits for, kept even where the value is trustworthy.
+          UNDER_REVIEW: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # THIS REPOSITORY REVIEWS ITSELF FROM ITS OWN CHECKOUT, which is what
+          # `ci-self.yaml` exists for: a change to a shared gate must be tested by the
+          # version in the pull request rather than by the merged copy. The test is the
+          # repository NAME rather than whether the file happens to be present, so that
+          # no repository under review can supply its own gate.
+          if [ "$UNDER_REVIEW" = "yadgarhq/actions" ]; then
+            src=hooks/seed_repository.py
+          else
+            src=.ci-actions/hooks/seed_repository.py
+          fi
+          if [ ! -f "$src" ]; then
+            echo "::error::the seed-declaration gate is missing at $src"
+            exit 1
+          fi
+          cp "$src" "$RUNNER_TEMP/seed_repository.py"
+          # THE SECOND CHECKOUT IS DELETED BEFORE THE GATE RUNS. The gate walks the
+          # tree for a `prompts/ask/` path, and `actions/checkout` can only write
+          # inside the workspace — so leaving it there would let this repository's own
+          # files sit inside the tree under review.
+          rm -rf .ci-actions
+          echo "Seed-declaration gate staged from \`$src\`." >> "$GITHUB_STEP_SUMMARY"
+
+      # HALF ONE. D33 gives the `ask` system prompt no override — no user, team or org
+      # layer and no merging of layers — and ADR-0705 says a seed repository able to
+      # define one "would end that guarantee at the first organisation that tried".
+      # A path is a path, so this half is exact at merge time.
+      - name: no `prompts/ask/` definition (D33)
+        env:
+          CONTENT_ROOT: ${{ inputs.content-root }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## \`prompts/ask/\` (D33)"
+            echo ''
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # THE FENCE IS CLOSED WHETHER THE GATE PASSED OR NOT. Under
+          # `pipefail` a bare invocation aborts the step on a refusal and
+          # leaves the summary holding an unterminated code fence, which
+          # swallows every section after it — exactly when an operator most
+          # needs to read them. Measured by rendering this block.
+          status=0
+          python3 "$RUNNER_TEMP/seed_repository.py" \
+            --part seed-no-ask-prompt --root "$CONTENT_ROOT" \
+            | tee -a "$GITHUB_STEP_SUMMARY" || status=$?
+          printf '```\n\n' >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      # HALF TWO. D35 derives a seeded record's identity deterministically from the
+      # source file, so re-seeding updates it in place; D36 makes front-matter
+      # "mandatory and lint-enforced". A content file without readable front-matter
+      # either duplicates on every upgrade or cannot be updated at all.
+      #
+      # THIS RUNS EVEN WHEN THE HALF ABOVE FAILED, so both halves report on one run.
+      # Without it a `prompts/ask/` file hides every front-matter finding behind it, and
+      # the organisation fixes one class per red run — which is how a gate becomes
+      # something people learn to work around. The job still fails, because a failed
+      # step fails the job.
+      #
+      # GATED ON THE STAGING STEP RATHER THAN A BARE `always()`, which would run this
+      # after a failed staging and print "no such file" underneath the real error. The
+      # condition names the one thing this step actually depends on.
+      - name: front-matter on every content file (D35, D36)
+        if: always() && steps.stage.outcome == 'success'
+        env:
+          CONTENT_ROOT: ${{ inputs.content-root }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## front-matter (D35, D36)"
+            echo ''
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # THE FENCE IS CLOSED WHETHER THE GATE PASSED OR NOT. Under
+          # `pipefail` a bare invocation aborts the step on a refusal and
+          # leaves the summary holding an unterminated code fence, which
+          # swallows every section after it — exactly when an operator most
+          # needs to read them. Measured by rendering this block.
+          status=0
+          python3 "$RUNNER_TEMP/seed_repository.py" \
+            --part seed-front-matter --root "$CONTENT_ROOT" --report \
+            | tee -a "$GITHUB_STEP_SUMMARY" || status=$?
+          printf '```\n\n' >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      # THE SEAM, AND IT IS A STATED ABSENCE RATHER THAN A CHECK.
+      #
+      # ADR-0705's rule 3 names THREE refusals. The two above are implemented. The
+      # third — an invalid values schema — is NOT, and this step exists so nobody reads
+      # a green job as covering it.
+      #
+      # WHY NOT NOW, RE-MEASURED 2026-09-19 against `yadgarhq/config@main` at `c66bded`
+      # (config#15). An earlier revision of this comment said the schema did not exist
+      # and that the chart could not be pulled. BOTH WERE WRONG, and the correction
+      # points the same way for a stronger reason.
+      #
+      # `chart/values.schema.json` IS on `main`, and the chart IS anonymously pullable:
+      # `oci://ghcr.io/yadgarhq/charts/config` answers HTTP 200 for tags 0.1.0, 0.1.1
+      # and 0.1.2. So nothing mechanical is in the way.
+      #
+      # THE SCHEMA IS CLOSED AND EMPTY — `additionalProperties: false` over
+      # `properties: {}` — because the chart reads no Helm values at all; every knob
+      # lives in `chart/config/<service>.yaml`, copied verbatim by `.Files.Get`. So a
+      # check here would refuse EVERY key in an organisation's values file, which is
+      # the artefact ADR-0705 tells them to write. The schema's own `$comment` calls
+      # itself provisional: `properties` fills in "when a knob becomes a value", and
+      # "this chart does not implement [ADR-0705's delivery model] yet". Enforcing a
+      # rule its author calls temporary, inside somebody else's repository, is a false
+      # refusal — worse here than a missed defect, because the missed defect is caught
+      # at sync and a false refusal blocks their own merge.
+      #
+      # THERE IS ALSO NO `required` KNOB. ADR-0705 describes a no-default knob declared
+      # with Helm's `required`; `grep -rn required chart/templates/` on `main` returns
+      # nothing, and that idiom was deliberately cut — a knob absent from
+      # `chart/config/` would fire the refusal permanently for everyone, with no values
+      # path an adopter could satisfy. This workflow must not describe it as existing.
+      #
+      # WHAT UNBLOCKS IT, checkably: a NON-EMPTY `properties` in that schema. The check
+      # is then `helm template` against the pinned chart with the organisation's values
+      # file, which DELEGATES to helm and duplicates nothing. It needs
+      # `azure/setup-helm` and two more inputs, and it can never move into
+      # `hooks/seed_repository.py`: that file is `language: script` and stdlib-only, and
+      # the standard library has no JSON Schema validator.
+      #
+      # EITHER WAY THE CHART IS THE AUTHORITY. Whatever the schema says, helm enforces
+      # it when Argo renders — so this absence costs an organisation the early warning
+      # and costs the installation nothing.
+      - name: "values are NOT schema-validated by this workflow (seam, not a check)"
+        if: always()
+        run: |
+          set -euo pipefail
+          # A QUOTED heredoc, so the markdown below reaches the summary verbatim and
+          # this block needs no `disable=SC2016` directive — the same reason
+          # `hooks/actionlint.sh` writes its own message this way.
+          cat >> "$GITHUB_STEP_SUMMARY" <<'SEAM'
+          ## values schema — NOT CHECKED HERE
+
+          ADR-0705 rule 3 names three refusals. This workflow implements two: the
+          `prompts/ask/` path and content front-matter. It does **not** validate your
+          values file against the chart schema, and a green run above says nothing
+          about it.
+
+          Why, measured against `yadgarhq/config@main` on 2026-09-19:
+          `chart/values.schema.json` **does** exist, and the chart **is** anonymously
+          pullable from `oci://ghcr.io/yadgarhq/charts/config`. Nothing mechanical is
+          in the way. The schema is **closed and empty** —
+          `additionalProperties: false` over `properties: {}` — because the chart reads
+          no Helm values at all; every knob lives in `chart/config/<service>.yaml`.
+          Checking against it today would refuse **every** key in your values file, and
+          the schema's own `$comment` calls itself provisional. Enforcing a temporary
+          rule inside your repository is a false refusal, which is worse than this
+          absence.
+
+          What enforces it meanwhile: the chart, when Argo renders it. helm applies
+          `values.schema.json` at template time, so an invalid values file fails the
+          sync whether or not this workflow said anything.
+
+          What unblocks a merge-time copy: a **non-empty** `properties` in that schema.
+          The check is then `helm template` against the pinned chart with your values
+          file, which delegates to helm and duplicates nothing. It can never live in
+          the `language: script` pre-commit hook — the standard library has no JSON
+          Schema validator.
+          SEAM

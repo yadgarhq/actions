@@ -33,11 +33,12 @@ starts `ci-release`. See [Cutting the release tag](#cutting-the-release-tag).
 
 ## The workflows
 
-| Workflow            | Runs on      | Does                                    |
-| ------------------- | ------------ | --------------------------------------- |
-| `ci-validation.yml` | called       | pre-commit, detected linters, licences  |
-| `ci-pr.yaml`        | pull request | calls `ci-validation`, then tests       |
-| `ci-release.yaml`   | tag          | image → digest → chart → sign → publish |
+| Workflow                | Runs on      | Does                                                                              |
+| ----------------------- | ------------ | --------------------------------------------------------------------------------- |
+| `ci-validation.yml`     | called       | pre-commit, detected linters, licences                                            |
+| `ci-pr.yaml`            | pull request | calls `ci-validation`, then tests                                                 |
+| `ci-release.yaml`       | tag          | image → digest → chart → sign → publish                                           |
+| `seed-declaration.yaml` | called       | optional merge-time feedback on an organisation's own seed declaration (ADR-0705) |
 
 `ci-pr` **calls** `ci-validation` rather than repeating it. A pull request needs
 both linting and tests, so two independent workflows would be two definitions of
@@ -440,6 +441,47 @@ copying:
     - id: cargo-clippy
     - id: cargo-deny
     - id: gitleaks
+```
+
+## Merge-time feedback for an adopting organisation (ADR-0705)
+
+`seed-declaration.yaml` and the `seed-no-ask-prompt` / `seed-front-matter` hooks
+are the only things published here whose intended consumer is **outside** this
+organisation. An organisation's own GitOps repository declares its org and team
+prompts, wiki pages and memories (D34, D36); this pair tells it about a bad
+declaration at commit or merge time.
+
+They are **optional, and that is the decision rather than an oversight.**
+ADR-0705 moved the real gates server-side — the seeder and the chart refuse
+invalid front-matter, an invalid schema and any `prompts/ask/` definition
+unconditionally — and rejected requiring an organisation to reference upstream CI
+"because the reference is deletable and upstream cannot detect its absence, so the
+D33 guarantee would end at the first organisation that removed it". Deleting this
+pair costs an organisation the early warning and costs the installation nothing.
+
+Two of rule 3's three refusals are implemented. The third, an invalid values
+schema, is **not** — and not because the schema is missing. Measured against
+`yadgarhq/config@main` on 2026-09-19: `chart/values.schema.json` exists and the
+chart is anonymously pullable from `oci://ghcr.io/yadgarhq/charts/config`. That
+schema is **closed and empty** (`additionalProperties: false` over
+`properties: {}`), because the chart reads no Helm values at all — every knob
+lives in `chart/config/<service>.yaml`. Checking against it would refuse every key
+in an organisation's values file, under a rule the schema's own `$comment` calls
+provisional. helm enforces it at sync either way, and it can never live in a
+stdlib-only `language: script` hook. The seam names its unblocking condition inside
+`seed-declaration.yaml`: a non-empty `properties`.
+
+An adopting organisation pins a tag rather than `@main` — it is a stranger to this
+repository's release cadence and should choose when it takes a new version.
+`vX.Y.Z` below is a placeholder: use the first release tag that carries the file,
+not a number copied from here.
+
+```yaml
+jobs:
+  declaration:
+    uses: yadgarhq/actions/.github/workflows/seed-declaration.yaml@vX.Y.Z
+    with:
+      content-root: .
 ```
 
 ## Why org rulesets are not used
