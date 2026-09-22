@@ -19,6 +19,14 @@ HONEST:
     left out because no chart in the estate renders it and the transitions the
     apiserver refuses depend on the live Service rather than the field. Widening
     the gate to it is allowed; doing so SILENTLY is what this test prevents.
+  * `test_a_chart_that_renders_nothing_is_refused` and
+    `test_a_new_chart_that_renders_nothing_by_design_is_accepted` are the two
+    halves of the DERIVED document floor, and neither means anything without the
+    other. The first is the regression -- a chart that rendered documents and now
+    renders none is still refused. The second is ADR-0752's `yadgarhq/platform`,
+    whose default render is empty on purpose. A floor that cannot tell them apart
+    is either a gate that refuses a ruled design or a gate that passes having
+    read nothing.
   * `test_a_dependency_declared_at_base_is_resolved` is ADR-0725's regression:
     the BASE chart is rendered from a bare `git archive`, which never carries a
     resolved `charts/` any more than a fresh checkout does, and nothing else in
@@ -357,7 +365,13 @@ def test_an_unresolvable_base_refuses_rather_than_skipping(repo):
 
 
 def test_a_chart_that_renders_nothing_is_refused(repo):
-    """A render that said nothing is not a chart without a Service."""
+    """A render that said nothing is not a chart without a Service.
+
+    THE REGRESSION THE DOCUMENT FLOOR EXISTS FOR, and the case that keeps the
+    derived floor honest. The base here renders two documents, so the floor
+    derives to 1 and this is still refused -- lifting the floor for a chart that
+    NEVER rendered anything must not lift it for a chart that stopped.
+    """
     root, base = repo
     write(
         root,
@@ -373,6 +387,144 @@ def test_a_chart_that_renders_nothing_is_refused(repo):
     result = run(root, base)
     assert result.returncode == 1, result.stdout
     assert "produced 0 document(s)" in result.stdout
+    # The floor is named as DERIVED and the base count it came from is printed,
+    # so a reader can tell this refusal from the constant one it replaced.
+    assert "against a floor of 1 derived from the 2 document(s)" in result.stdout
+
+
+def test_a_chart_that_loses_its_only_documents_is_refused(tmp_path):
+    """The same regression where no Service is involved at all.
+
+    `yadgarhq/config` renders ConfigMaps and no Service, so the missing-Service
+    comparison below can never fire on it and the DOCUMENT floor is the only
+    thing standing between it and a silent emptying. This is that repository's
+    shape: one document at the base, a condition flipped, nothing here.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    git(root, "init", "-q", "-b", "main")
+    git(root, "config", "user.email", "suite@example.invalid")
+    git(root, "config", "user.name", "suite")
+    write(
+        root,
+        {
+            "chart/Chart.yaml": CHART_YAML,
+            "chart/values.yaml": "render: true\n",
+            "chart/templates/cm.yaml": (
+                "{{- if .Values.render }}\napiVersion: v1\nkind: ConfigMap\n"
+                "metadata:\n  name: {{ .Chart.Name }}\n{{- end }}\n"
+            ),
+        },
+    )
+    base = commit(root, "a chart of ConfigMaps and no Service")
+    write(root, {"chart/values.yaml": "render: false\n"})
+    commit(root, "flip the condition off")
+
+    result = run(root, base)
+    assert result.returncode == 1, result.stdout
+    assert "produced 0 document(s)" in result.stdout
+    assert "against a floor of 1 derived from the 1 document(s)" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# ADR-0752: a chart whose default render is empty BY DESIGN
+# ---------------------------------------------------------------------------
+
+
+def _empty_by_design(root):
+    """A chart every one of whose objects sits behind a `create` toggle.
+
+    `yadgarhq/platform`'s shape, reduced to the one property that matters here:
+    `helm template` exits 0 and emits no document.
+    """
+    write(
+        root,
+        {
+            "chart/Chart.yaml": CHART_YAML,
+            "chart/values.yaml": "create: false\n",
+            "chart/templates/account.yaml": (
+                "{{- if .Values.create }}\n" + ACCOUNT + "{{- end }}\n"
+            ),
+        },
+    )
+
+
+def test_a_new_chart_that_renders_nothing_by_design_is_accepted(tmp_path):
+    """ADR-0752 and `yadgarhq/platform`, which is why the floor was derived.
+
+    That decision requires the chart to "install on a bare cluster rendering
+    nothing and requiring no CRD". The constant floor refused exactly this, and a
+    ruled design and a gate cannot both be right -- so the gate moved. The base
+    here has no `chart/` at all, which is `platform`'s first pull request.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    git(root, "init", "-q", "-b", "main")
+    git(root, "config", "user.email", "suite@example.invalid")
+    git(root, "config", "user.name", "suite")
+    write(root, {"README.md": "no chart yet\n"})
+    base = commit(root, "base")
+    _empty_by_design(root)
+    commit(root, "add a chart that renders nothing at its defaults")
+
+    result = run(root, base)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "new on this branch" in result.stdout
+    # THE COUNT IS ASSERTED AND PRINTED ON THIS PATH TOO. A gate that passes
+    # having examined nothing is the defect; a gate that passes having examined
+    # nothing AND SAID SO against the floor it derived is a measurement.
+    assert "produced 0 document(s) here, 0 of them Service(s)" in result.stdout
+    assert "against a floor of 0" in result.stdout
+
+
+def test_a_chart_that_rendered_nothing_and_still_renders_nothing_is_accepted(tmp_path):
+    """The second pull request against a by-design-empty chart.
+
+    The base now HAS the chart and it renders nothing, so this is the arm the
+    `config` reasoning was already written for -- a chart that rendered none and
+    still renders none is a fact about the repository -- extended from Services
+    to documents. Nothing is listed anywhere for it to work.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    git(root, "init", "-q", "-b", "main")
+    git(root, "config", "user.email", "suite@example.invalid")
+    git(root, "config", "user.name", "suite")
+    _empty_by_design(root)
+    base = commit(root, "a chart that renders nothing at its defaults")
+    write(root, {"chart/templates/account.yaml": None})
+    commit(root, "edit the chart, still rendering nothing")
+
+    result = run(root, base)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (
+        "produced 0 document(s) here against a floor of 0 derived from the 0"
+        in result.stdout
+    )
+
+
+def test_the_floor_rises_the_moment_the_base_renders_a_document(tmp_path):
+    """The narrowing has a bottom, and this is where it stops.
+
+    A by-design-empty chart that starts rendering something has a floor of 1 from
+    the next pull request onwards. Without this, "the floor rises to 1" in the
+    script's comment would be a claim rather than a behaviour.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    git(root, "init", "-q", "-b", "main")
+    git(root, "config", "user.email", "suite@example.invalid")
+    git(root, "config", "user.name", "suite")
+    _empty_by_design(root)
+    commit(root, "a chart that renders nothing at its defaults")
+    write(root, {"chart/values.yaml": "create: true\n"})
+    base = commit(root, "turn the toggle on by default")
+    write(root, {"chart/values.yaml": "create: false\n"})
+    commit(root, "turn it back off")
+
+    result = run(root, base)
+    assert result.returncode == 1, result.stdout
+    assert "against a floor of 1 derived from the 1 document(s)" in result.stdout
 
 
 def test_a_broken_chart_is_refused_rather_than_reported_clean(repo):
