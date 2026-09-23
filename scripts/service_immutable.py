@@ -188,17 +188,36 @@ SOURCE = re.compile(r"^#\s*Source:\s*(\S+)\s*$")
 # that repository's floor to 0 from the next run onwards. So the exposure is
 # PERMANENT rather than one-shot, and a follow-up is not a remedy for it.
 #
-# SO THE ENTRY POINT IS GUARDED, ON THE ONE ARM THAT STILL HOLDS EVIDENCE. There
-# are two ways to reach an empty render, and they carry different evidence even
-# though their output is identical:
+# SO THE ENTRY POINT IS GUARDED, AND THE ENTRY POINT ALONE. There are two ways to
+# reach an empty render. Their output is identical, and so -- this is the part an
+# earlier revision of this comment got wrong -- is the evidence available on each:
 #
 #   * THE BASE RENDERED ZERO. This repository has been empty and is empty still.
-#     Nothing here distinguishes design from a long-standing accident, and
-#     tightening this arm refuses `yadgarhq/platform`'s SECOND pull request
-#     onwards -- the ruled design, from its second day. LEFT AS IT IS.
+#     LEFT AS IT IS, AND THAT IS A CHOICE RATHER THAN A LIMITATION. This comment
+#     used to justify it by saying nothing here distinguishes design from a
+#     long-standing accident, and that tightening this arm would refuse
+#     `yadgarhq/platform` from its second pull request onwards. BOTH HALVES WERE
+#     FALSE, measured on 2026-09-23, and a future maintainer deciding whether to
+#     tighten this should know what it would really cost.
+#
+#     The evidence IS available here. `declared_alternate_values` reads the HEAD
+#     working tree and nothing else; not one line of it depends on `base_exists`,
+#     so the same file is exactly as readable on this arm as on the one below.
+#     And `platform` SATISFIES that predicate today -- see the paragraph below,
+#     which is the fact that falsifies the old justification. Applying the
+#     obligation here would turn exactly ONE thing red: the suite's
+#     `test_a_chart_that_rendered_nothing_and_still_renders_nothing_is_accepted`,
+#     whose fixture declares nothing on purpose.
+#
+#     THE REAL REASONS ARE TWO, and neither is about evidence. First, an
+#     obligation belongs at the MOMENT OF ENTRY rather than standing over every
+#     future pull request of a repository forever; a chart that answered once has
+#     answered. Second, applying it here would impose it RETROACTIVELY on any
+#     repository that already merged an empty render, which never had the chance
+#     to declare anything at the moment this gate could have asked.
 #   * THE BASE CHART IS ABSENT. The chart is new on this branch, which is the one
-#     moment a repository can enter the empty state, and the one moment something
-#     is still checkable. So this arm asks for evidence: a repository whose chart
+#     moment a repository can ENTER the empty state, and so the one moment at
+#     which asking is not retroactive. So this arm asks: a repository whose chart
 #     renders nothing at its defaults must DECLARE, in the tree, the values under
 #     which it does render -- `example/values.yaml`, or helm's own
 #     `chart/ci/*-values.yaml` convention. See `declared_alternate_values`.
@@ -217,8 +236,19 @@ SOURCE = re.compile(r"^#\s*Source:\s*(\S+)\s*$")
 # calls `fail` when `.Capabilities.APIVersions.Has "cert-manager.io/v1"` is
 # false, and helm never populates a CRD-backed group without a live cluster or
 # `--api-versions`. So this is a structural check on the tree and nothing more,
-# and a chart that is new, renders nothing by accident AND happens to carry an
+# and a chart that is new, renders nothing by accident AND carries a QUALIFYING
 # alternate values file still passes.
+#
+# THAT RESIDUAL IS DISCHARGED DELIBERATELY, NOT BY ACCIDENT, and both halves of
+# the older wording -- "happens to carry" -- overstated it in opposite
+# directions. Measured on a real `platform` clone on 2026-09-23:
+# `printf 'zzz_never_read_by_this_chart: 1\n' > example/values.yaml` gives exit
+# 0, so ONE junk line nobody's chart reads satisfies this. Whoever writes that
+# line meant to. But merely CARRYING the file is not enough either: it must parse
+# to a non-empty mapping that differs from `chart/values.yaml`, and two of the
+# three `example/values.yaml` files in this estate parse to `{}` and would NOT
+# discharge it. So the obligation is weak against someone who wants to defeat it
+# and is not weak against someone who has simply copied the house convention.
 MINIMUM_DOCUMENTS = 1
 
 # PART TWO IS DERIVED FROM HISTORY TOO, the same trick `versions_pinned.py` uses:
@@ -490,7 +520,17 @@ def declared_alternate_values() -> list[str]:
     for an adopter to copy beside their own Argo `Application`, and
     `chart/ci/*-values.yaml` is helm's own: `helm lint` and `helm test` read that
     directory precisely as "the values this chart is meant to be exercised
-    under". A repository that uses either is already saying the thing this asks.
+    under".
+
+    USING EITHER NAME IS NOT ITSELF THE DECLARATION, and saying so would claim
+    more than the code below checks. What counts is what the file PARSES to, and
+    the estate says why the distinction matters: all three `example/values.yaml`
+    files in it were read on 2026-09-23, and only `yadgarhq/platform`'s qualifies.
+    `yadgarhq/chart`'s parses to `{}` -- its own header says "COPYING IT AS IT
+    STANDS CHANGES NOTHING: this file is `{}`" -- and `yadgarhq/config`'s parses
+    to `{}` with a `chart/values.yaml` that is `{}` too, so it fails the emptiness
+    test and the difference test both. The house convention for this FILENAME is
+    an empty file, and two of its three instances would not discharge this.
 
     A CANDIDATE COUNTS ONLY IF IT PARSES TO A NON-EMPTY MAPPING AND DIFFERS FROM
     `chart/values.yaml`, and both halves are load-bearing. An empty file parses
@@ -528,7 +568,7 @@ def declares_nothing(revision: str, rendered: int) -> str:
         f"empty on purpose (ADR-0752) states in the tree the values that turn it "
         f"on; a render that broke by accident does not, and that difference is the "
         f"only evidence there is, because the two produce byte-identical output. "
-        f"THIS IS THE ONLY RUN THAT CAN ASK. An empty render that merges is what "
+        f"THIS IS THE ONLY RUN THAT ASKS. An empty render that merges is what "
         f"the next pull request reads as its BASE, so the floor derives to 0 again "
         f"and stays there for as long as the emptiness lasts -- this gate never "
         f"speaks about this repository again. TO SHIP IT: commit the values file "

@@ -474,14 +474,20 @@ def _new_repo(tmp_path, readme="no chart yet\n"):
 
 
 def test_a_new_chart_that_renders_nothing_and_declares_nothing_is_refused(tmp_path):
-    """THE ONE RUN THAT CAN ASK, and the case the derived floor alone lets past.
+    """THE ONE RUN THAT ASKS, and the case the derived floor alone lets past.
 
     A chart new on this branch whose render is empty BY ACCIDENT produces exactly
     what ADR-0752's design produces, so the floor cannot tell them apart. The
     floor's own bound does not save it either: the accident merges, the merged
     emptiness is the NEXT run's base, the floor derives to 0 again and stays
-    there. This arm is the only moment anything is still checkable, and what it
-    asks for is a values file in the tree -- see `declared_alternate_values`.
+    there. This arm is the moment the question is asked, and what it asks for is a
+    values file in the tree -- see `declared_alternate_values`.
+
+    IT IS THE ONLY RUN THAT ASKS, NOT THE ONLY RUN THAT COULD. The file is readable
+    from the working tree on either arm; the choice to ask here alone is about
+    WHEN an obligation attaches, not about where the evidence is. See the
+    `MINIMUM_DOCUMENTS` comment and
+    `test_a_chart_that_rendered_nothing_and_still_renders_nothing_is_accepted`.
 
     The chart here is `_empty_by_design`'s, unchanged and undeclared.
     """
@@ -506,6 +512,56 @@ def test_an_empty_alternate_values_file_does_not_discharge_the_obligation(tmp_pa
     _empty_by_design(root)
     write(root, {"example/values.yaml": ""})
     commit(root, "add a chart whose render broke, and an empty values file")
+
+    result = run(root, base)
+    assert result.returncode == 1, result.stdout
+    assert "declares no alternate values file" in result.stdout
+
+
+def test_an_alternate_values_file_that_parses_to_an_empty_mapping_does_not_count(
+    tmp_path,
+):
+    """`{}` is the house convention for this filename, so it must be pinned here.
+
+    THE EMPTINESS TEST AND THE TYPE TEST ARE SEPARATE HALVES, and the suite pinned
+    only one of them until this case. `touch example/values.yaml` parses to `None`,
+    which BOTH halves reject -- so with that as the only empty fixture, either half
+    alone kept the suite green and neither was load-bearing in the test.
+
+    A LITERAL `{}` SEPARATES THEM. It IS a mapping, so the type test admits it, and
+    only the emptiness test refuses it. This is not a hypothetical shape: two of
+    the three `example/values.yaml` files in this estate parse to exactly `{}`
+    today, and `yadgarhq/chart`'s own header says so of itself -- "COPYING IT AS IT
+    STANDS CHANGES NOTHING: this file is `{}`". So the house convention for this
+    filename is a file that does NOT discharge this obligation, and a file that
+    does not discharge it must not pass quietly.
+    """
+    root, base = _new_repo(tmp_path)
+    _empty_by_design(root)
+    write(root, {"example/values.yaml": "{}\n"})
+    commit(root, "add a chart whose render broke, and an empty mapping")
+
+    result = run(root, base)
+    assert result.returncode == 1, result.stdout
+    assert "declares no alternate values file" in result.stdout
+
+
+def test_an_alternate_values_file_that_is_not_a_mapping_does_not_count(tmp_path):
+    """The other half, and the only case the type test alone refuses.
+
+    A LIST IS NON-EMPTY AND DIFFERS FROM THE DEFAULTS, so the emptiness test and
+    the difference test both admit it and the type test is the only thing left.
+    Helm reads a values file as a mapping and nothing else, so a document that is
+    not one names no values under which this chart renders, whatever it holds.
+
+    Read it with the empty-mapping case above. Between them the two fixtures pin
+    both halves that `declared_alternate_values` calls load-bearing; before them
+    the suite would have stayed green with either half deleted.
+    """
+    root, base = _new_repo(tmp_path)
+    _empty_by_design(root)
+    write(root, {"example/values.yaml": "- a\n"})
+    commit(root, "add a chart whose render broke, and a list where a mapping goes")
 
     result = run(root, base)
     assert result.returncode == 1, result.stdout
@@ -609,10 +665,23 @@ def test_a_chart_that_rendered_nothing_and_still_renders_nothing_is_accepted(tmp
     to documents. Nothing is listed anywhere for it to work.
 
     THIS FIXTURE DECLARES NO ALTERNATE VALUES FILE, AND THAT IS THE POINT. The
-    discriminator lives on the base-ABSENT arm alone; tightening this one would
-    refuse `yadgarhq/platform`'s second pull request onwards, which is the ruled
-    design from its second day. So this stays green, and with it the fact the
-    script's comment now states plainly: an UNFIXED empty render is invisible to
+    discriminator lives on the base-ABSENT arm alone, and this test is the ONLY
+    thing in the suite that tightening this arm would turn red -- measured, by
+    applying the obligation to this arm and running the suite.
+
+    AN EARLIER REVISION SAID THIS FIXTURE EXISTS BECAUSE TIGHTENING HERE WOULD
+    REFUSE `yadgarhq/platform` FROM ITS SECOND PULL REQUEST ONWARDS. That was
+    FALSE and is retracted. `declared_alternate_values` reads the head working
+    tree only -- nothing in it depends on `base_exists` -- and `platform` at
+    `ac40e6a` SATISFIES the predicate, so the obligation applied here would refuse
+    it on no pull request at all.
+
+    THE RESTRICTION IS STILL RIGHT, for the two reasons the script's comment now
+    gives: an obligation belongs at the moment of ENTRY rather than standing over
+    a repository's every future pull request, and applying it here would impose it
+    RETROACTIVELY on repositories that already merged an empty render and never
+    had the chance to declare anything. So this stays green, and with it the fact
+    the script's comment states plainly: an UNFIXED empty render is invisible to
     this gate from then on.
     """
     root = tmp_path / "repo"
@@ -640,7 +709,10 @@ def test_the_floor_rises_the_moment_the_base_renders_a_document(tmp_path):
     the next pull request onwards, and without this case that would be a claim
     rather than a behaviour.
 
-    READ IT WITH THE TEST TWO ABOVE, because alone it is the reassuring half and
+    READ IT WITH THE TEST ONE ABOVE --
+    `test_a_chart_that_rendered_nothing_and_still_renders_nothing_is_accepted`,
+    named rather than counted to, because counting to it is what went wrong here
+    once already -- because alone it is the reassuring half and
     the script's comment once overclaimed exactly this. The base here renders a
     document only because the chart was FIXED. A chart still rendering nothing
     has a base that renders nothing too, so its floor stays 0 and never rises --
