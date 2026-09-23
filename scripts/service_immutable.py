@@ -147,12 +147,111 @@ SOURCE = re.compile(r"^#\s*Source:\s*(\S+)\s*$")
 # a floor. A gate people have to exempt a repository from is a gate they learn to
 # work around.
 #
-# PART ONE IS ABSOLUTE. `helm template` producing NO DOCUMENT is not a chart
-# without a Service, it is a render that said nothing -- and that is the state in
-# which this gate reports agreement having read nothing.
+# PART ONE IS A DOCUMENT FLOOR, AND IT IS DERIVED RATHER THAN ABSOLUTE. It was
+# absolute once: `helm template` producing NO DOCUMENT was refused outright, on
+# the reasoning that a render which said nothing is not a chart without a
+# Service. That reasoning is still right about the case it was written for, and
+# on 2026-09-23 it met a chart it was wrong about. `yadgarhq/platform` (ADR-0752)
+# renders NOTHING at its defaults ON PURPOSE -- every object it owns sits behind
+# a `create` toggle defaulting false, so the chart "installs on a bare cluster
+# rendering nothing and requiring no CRD". An absolute floor and that ruled
+# design cannot both hold, and the design is the one that was ruled.
+#
+# SO THE DOCUMENT FLOOR IS DERIVED THE WAY PART TWO IS, from THIS repository's
+# own render at the BASE, and the two parts now share one argument. A chart that
+# rendered documents at the base and renders none here has lost them -- a
+# template renamed, a condition flipped, a file deleted -- and Argo prunes every
+# one of them, so that is the state the floor exists to catch and it is still
+# refused. A chart whose BASE rendered nothing either is new on this branch or
+# renders nothing by design, and in both cases the emptiness is a fact about the
+# repository rather than a check declining to run. NOTHING IS LISTED ANYWHERE
+# for this to work, which is the property D54 is about: an allowlist naming
+# `platform` would be exactly the exemption this comment already refuses.
+#
+# WHAT THE DERIVED FLOOR GIVES UP, said here rather than discovered later: a
+# chart that is NEW on this branch and renders nothing BY ACCIDENT passes the
+# floor, because the accident and ADR-0752's design produce byte-identical
+# output. That is the direct price of the shape above.
+#
+# AND THE BOUND ON IT WAS STATED WRONGLY HERE ONCE, which is worth recording
+# because the wrong version is the reassuring one. This paragraph used to say the
+# floor "rises to 1 for that repository the moment its base renders a single
+# document, so the pull request AFTER the accident is refused". The floor rises
+# only once the accident is FIXED. An accident left unfixed renders nothing at
+# the HEAD, merges, and is then what the NEXT pull request reads as its BASE --
+# so the base render is empty too, the floor derives to 0 again, and it stays 0
+# for as long as the emptiness lasts. This gate never speaks about that
+# repository again. The suite pins exactly that:
+# `test_a_chart_that_rendered_nothing_and_still_renders_nothing_is_accepted` is
+# green. The same mechanism runs for an empty render that reaches `main` without
+# this gate having run at all -- an admin merge, a direct push -- which drops
+# that repository's floor to 0 from the next run onwards. So the exposure is
+# PERMANENT rather than one-shot, and a follow-up is not a remedy for it.
+#
+# SO THE ENTRY POINT IS GUARDED, AND THE ENTRY POINT ALONE. There are two ways to
+# reach an empty render. Their output is identical, and so -- this is the part an
+# earlier revision of this comment got wrong -- is the evidence available on each:
+#
+#   * THE BASE RENDERED ZERO. This repository has been empty and is empty still.
+#     LEFT AS IT IS, AND THAT IS A CHOICE RATHER THAN A LIMITATION. This comment
+#     used to justify it by saying nothing here distinguishes design from a
+#     long-standing accident, and that tightening this arm would refuse
+#     `yadgarhq/platform` from its second pull request onwards. BOTH HALVES WERE
+#     FALSE, measured on 2026-09-23, and a future maintainer deciding whether to
+#     tighten this should know what it would really cost.
+#
+#     The evidence IS available here. `declared_alternate_values` reads the HEAD
+#     working tree and nothing else; not one line of it depends on `base_exists`,
+#     so the same file is exactly as readable on this arm as on the one below.
+#     And `platform` SATISFIES that predicate today -- see the paragraph below,
+#     which is the fact that falsifies the old justification. Applying the
+#     obligation here would turn exactly ONE thing red: the suite's
+#     `test_a_chart_that_rendered_nothing_and_still_renders_nothing_is_accepted`,
+#     whose fixture declares nothing on purpose.
+#
+#     THE REAL REASONS ARE TWO, and neither is about evidence. First, an
+#     obligation belongs at the MOMENT OF ENTRY rather than standing over every
+#     future pull request of a repository forever; a chart that answered once has
+#     answered. Second, applying it here would impose it RETROACTIVELY on any
+#     repository that already merged an empty render, which never had the chance
+#     to declare anything at the moment this gate could have asked.
+#   * THE BASE CHART IS ABSENT. The chart is new on this branch, which is the one
+#     moment a repository can ENTER the empty state, and so the one moment at
+#     which asking is not retroactive. So this arm asks: a repository whose chart
+#     renders nothing at its defaults must DECLARE, in the tree, the values under
+#     which it does render -- `example/values.yaml`, or helm's own
+#     `chart/ci/*-values.yaml` convention. See `declared_alternate_values`.
+#
+# THAT OBLIGATION NAMES NO REPOSITORY, which is the property D54 is about and the
+# reason it is not the exemption this comment already refuses. It is uniform and
+# positive: every chart new on a branch whose default render is empty owes the
+# same artefact. `yadgarhq/platform` satisfies it today unchanged -- its
+# `example/values.yaml` header already documents itself as a test input its own
+# suite renders -- and a chart whose render broke by accident on its first pull
+# request almost never carries one.
+#
+# WHAT IT IS NOT, said plainly. It is not a proof that the chart renders
+# anything: nothing is rendered a second time here, on purpose. Rendering
+# `platform`'s own `example/values.yaml` offline FAILS -- `_require_api.tpl`
+# calls `fail` when `.Capabilities.APIVersions.Has "cert-manager.io/v1"` is
+# false, and helm never populates a CRD-backed group without a live cluster or
+# `--api-versions`. So this is a structural check on the tree and nothing more,
+# and a chart that is new, renders nothing by accident AND carries a QUALIFYING
+# alternate values file still passes.
+#
+# THAT RESIDUAL IS DISCHARGED DELIBERATELY, NOT BY ACCIDENT, and both halves of
+# the older wording -- "happens to carry" -- overstated it in opposite
+# directions. Measured on a real `platform` clone on 2026-09-23:
+# `printf 'zzz_never_read_by_this_chart: 1\n' > example/values.yaml` gives exit
+# 0, so ONE junk line nobody's chart reads satisfies this. Whoever writes that
+# line meant to. But merely CARRYING the file is not enough either: it must parse
+# to a non-empty mapping that differs from `chart/values.yaml`, and two of the
+# three `example/values.yaml` files in this estate parse to `{}` and would NOT
+# discharge it. So the obligation is weak against someone who wants to defeat it
+# and is not weak against someone who has simply copied the house convention.
 MINIMUM_DOCUMENTS = 1
 
-# PART TWO IS DERIVED FROM HISTORY, the same trick `versions_pinned.py` uses:
+# PART TWO IS DERIVED FROM HISTORY TOO, the same trick `versions_pinned.py` uses:
 # history answers the question the working tree cannot. The floor for THIS
 # repository is the number of Services the chart rendered at the BASE. A chart
 # that rendered one Service and now renders none has had a template renamed, a
@@ -405,6 +504,80 @@ def procedure(
     )
 
 
+def values_data(path: Path) -> object:
+    """A values file parsed, or `None` when it is absent or will not parse."""
+    try:
+        return yaml.safe_load(path.read_text())
+    except (OSError, yaml.YAMLError):
+        return None
+
+
+def declared_alternate_values() -> list[str]:
+    """The alternate-values files this repository declares. See `MINIMUM_DOCUMENTS`.
+
+    TWO NAMES, AND BOTH ARE CONVENTIONS THAT ALREADY EXIST rather than a third
+    invented here. `example/values.yaml` is the file `yadgarhq/platform` ships
+    for an adopter to copy beside their own Argo `Application`, and
+    `chart/ci/*-values.yaml` is helm's own: `helm lint` and `helm test` read that
+    directory precisely as "the values this chart is meant to be exercised
+    under".
+
+    USING EITHER NAME IS NOT ITSELF THE DECLARATION, and saying so would claim
+    more than the code below checks. What counts is what the file PARSES to, and
+    the estate says why the distinction matters: all three `example/values.yaml`
+    files in it were read on 2026-09-23, and only `yadgarhq/platform`'s qualifies.
+    `yadgarhq/chart`'s parses to `{}` -- its own header says "COPYING IT AS IT
+    STANDS CHANGES NOTHING: this file is `{}`" -- and `yadgarhq/config`'s parses
+    to `{}` with a `chart/values.yaml` that is `{}` too, so it fails the emptiness
+    test and the difference test both. The house convention for this FILENAME is
+    an empty file, and two of its three instances would not discharge this.
+
+    A CANDIDATE COUNTS ONLY IF IT PARSES TO A NON-EMPTY MAPPING AND DIFFERS FROM
+    `chart/values.yaml`, and both halves are load-bearing. An empty file parses
+    to `None`, which DIFFERS from a populated default, so a bare difference test
+    would be satisfied by `touch example/values.yaml` -- an obligation one
+    keystroke discharges is not an obligation. And a byte-for-byte alternate of
+    the defaults renders exactly the same nothing, so it is no alternate at all.
+
+    THE COMPARISON IS ON PARSED DATA, NOT BYTES, so a copy that differs only in
+    its comments does not count while a file that sets one key differently does.
+    Comments are the half of a values file that changes nothing.
+    """
+    candidates = [Path("example/values.yaml")]
+    candidates += sorted((CHART / "ci").glob("*-values.yaml"))
+    default = values_data(CHART / "values.yaml")
+    found = []
+    for candidate in candidates:
+        data = values_data(candidate)
+        if not isinstance(data, dict) or not data or data == default:
+            continue
+        found.append(str(candidate))
+    return found
+
+
+def declares_nothing(revision: str, rendered: int) -> str:
+    """The refusal for a chart that is new on this branch and renders nothing."""
+    return (
+        f"`{CHART}` does not exist at `{revision}`, so this chart is new on this "
+        f"branch and its floor is 0 -- there is no base render to derive a higher "
+        f"one from. `helm template` produced {rendered} document(s) here, and this "
+        f"repository declares no alternate values file under which the chart "
+        f"renders anything: neither `example/values.yaml` nor "
+        f"`{CHART}/ci/*-values.yaml` exists, parses to a non-empty mapping and "
+        f"differs from `{CHART}/values.yaml`. A chart whose DEFAULT render is "
+        f"empty on purpose (ADR-0752) states in the tree the values that turn it "
+        f"on; a render that broke by accident does not, and that difference is the "
+        f"only evidence there is, because the two produce byte-identical output. "
+        f"THIS IS THE ONLY RUN THAT ASKS. An empty render that merges is what "
+        f"the next pull request reads as its BASE, so the floor derives to 0 again "
+        f"and stays there for as long as the emptiness lasts -- this gate never "
+        f"speaks about this repository again. TO SHIP IT: commit the values file "
+        f"the chart is meant to render under, or fix the render. This names no "
+        f"repository and is no allowlist: every chart new on a branch whose "
+        f"default render is empty owes the same file."
+    )
+
+
 def main() -> int:
     if not CHART.is_dir():
         print(
@@ -428,48 +601,98 @@ def main() -> int:
         )
         return 1
 
-    if rendered < MINIMUM_DOCUMENTS:
-        print(
-            f"::error::`helm template` succeeded on `{CHART}` and produced "
-            f"{rendered} document(s), and {MINIMUM_DOCUMENTS} is the fewest this "
-            f"gate can read. A chart that renders NOTHING is not a chart without "
-            f"a Service, it is a render that said nothing -- and in that state "
-            f"this gate reports agreement having read one empty side. Check what "
-            f"`helm template {CHART}` prints."
-        )
-        return 1
-
+    # THE BASE SIDE IS RENDERED BEFORE ANY FLOOR IS APPLIED, and the order IS the
+    # floor's derivation: how many documents this repository is required to
+    # render is a question only the base render answers. It used to be answered
+    # by a constant above this line, which is why the refusal could fire before
+    # the base had been looked at.
+    #
+    # `base_failure` is its own name rather than a second use of `failure`: that
+    # one carries the HEAD render's verdict, and reusing it would make this
+    # arm's correctness depend on the early return above staying where it is.
+    base: dict[str, tuple[dict, str | None]] = {}
+    base_rendered = 0
+    base_failure: str | None = None
     with tempfile.TemporaryDirectory() as scratch:
         root = Path(scratch)
-        if not chart_at(revision, root):
-            print(
-                f"`{CHART}` does not exist at `{revision}`, so this chart is new "
-                f"on this branch and there is no earlier Service to compare "
-                f"against. {len(head)} Service(s) rendered here."
-            )
-            return 0
-        # ADR-0725. This archive just came from `git archive` -- history, so a
-        # `dependencies:` key in `Chart.yaml` as of `revision` is exactly as
-        # unresolved here as it is in a fresh checkout, and `services()` below
-        # shells out to `helm template` the same way the working-tree render
-        # does above. See `resolve_dependencies`'s own docstring for why this
-        # cannot be a workflow-level step instead.
-        dependency_failure = resolve_dependencies(root / CHART)
-        if dependency_failure:
-            print(
-                f"::error::could not resolve the chart's dependencies as of "
-                f"`{revision}`, so the comparison has only one side: "
-                f"{dependency_failure}"
-            )
-            return 1
-        base, _, failure = services(root / CHART)
+        base_exists = chart_at(revision, root)
+        if base_exists:
+            # ADR-0725. This archive just came from `git archive` -- history, so
+            # a `dependencies:` key in `Chart.yaml` as of `revision` is exactly
+            # as unresolved here as it is in a fresh checkout, and `services()`
+            # below shells out to `helm template` the same way the working-tree
+            # render does above. See `resolve_dependencies`'s own docstring for
+            # why this cannot be a workflow-level step instead.
+            dependency_failure = resolve_dependencies(root / CHART)
+            if dependency_failure:
+                print(
+                    f"::error::could not resolve the chart's dependencies as of "
+                    f"`{revision}`, so the comparison has only one side: "
+                    f"{dependency_failure}"
+                )
+                return 1
+            base, base_rendered, base_failure = services(root / CHART)
 
-    if failure:
+    if base_failure:
         print(
             f"::error::`helm template` failed on the chart as of `{revision}`, so "
-            f"the comparison has only one side: {failure}"
+            f"the comparison has only one side: {base_failure}"
         )
         return 1
+
+    # THE DOCUMENT FLOOR, derived. See `MINIMUM_DOCUMENTS` above for the whole
+    # argument. It is checked BEFORE the missing-Service comparison below on
+    # purpose: a chart that lost every document usually lost a Service with them,
+    # and "your chart renders nothing" is the refusal that names the defect,
+    # where "`x` is gone" names one symptom of it.
+    floor = MINIMUM_DOCUMENTS if base_rendered else 0
+    if rendered < floor:
+        print(
+            f"::error::`helm template` succeeded on `{CHART}` and produced "
+            f"{rendered} document(s), against a floor of {floor} derived from the "
+            f"{base_rendered} document(s) the same chart produced at `{revision}`. "
+            f"A chart that rendered something and now renders NOTHING is not a "
+            f"chart without a Service, it is a render that said nothing -- and in "
+            f"that state this gate reports agreement having read one empty side. "
+            f"Argo CD prunes what a chart stops rendering, so every object this "
+            f"chart used to carry is deleted with it. Check what "
+            f"`helm template {CHART}` prints. The floor is derived from this "
+            f"repository's own base render and is listed nowhere: a chart that "
+            f"renders nothing at its defaults BY DESIGN has a floor of 0 and is "
+            f"not refused here."
+        )
+        return 1
+
+    if not base_exists:
+        # THE DISCRIMINATOR, and it is on THIS arm alone. See `MINIMUM_DOCUMENTS`
+        # for why the base-rendered-zero arm above is left as it is, and why the
+        # one moment a repository can ENTER the empty state is the one moment
+        # anything is still checkable. `base_exists` already separates the two
+        # arms; until now it only changed the wording of the message.
+        declared = declared_alternate_values() if rendered < MINIMUM_DOCUMENTS else []
+        if rendered < MINIMUM_DOCUMENTS and not declared:
+            print(f"::error::{declares_nothing(revision, rendered)}")
+            return 1
+        # THE EVIDENCE IS NAMED ON THE PASS TOO. A gate that lets an empty render
+        # through on the strength of a file nobody can see from the log has asked
+        # for nothing a reader can check.
+        evidence = ""
+        if declared:
+            names = ", ".join(f"`{path}`" for path in declared)
+            evidence = (
+                f" This chart renders nothing at its defaults and declares "
+                f"{names} as values it is meant to render under."
+            )
+        print(
+            f"`{CHART}` does not exist at `{revision}`, so this chart is new on "
+            f"this branch and there is no earlier Service to compare against. "
+            f"`helm template` produced {rendered} document(s) here, {len(head)} of "
+            f"them Service(s), against a floor of {floor} -- there is no base "
+            f"render to derive a higher one from. Nothing was compared, and that "
+            f"is a fact about the branch rather than a check declining to run."
+            + evidence
+        )
+        return 0
 
     # THE DERIVED FLOOR. See `MINIMUM_DOCUMENTS` above for why it is not a
     # constant. A Service the chart used to render and no longer does is exactly
@@ -513,10 +736,19 @@ def main() -> int:
     # THE COUNT IS PRINTED WHETHER OR NOT ANYTHING IS WRONG, so a reader can tell
     # "compared six fields across one Service and they agree" from "compared
     # nothing". The two look identical without it, and only one of them is a pass.
+    #
+    # THE DOCUMENT COUNT IS PRINTED BESIDE IT for the same reason, and it is the
+    # half that stayed silent on a pass. A chart that renders nothing at its
+    # defaults compares no field at all, so on that chart the first sentence is
+    # "compared nothing" for ever -- and the only thing that distinguishes a
+    # by-design empty render from a render that broke is the count of documents
+    # read set against the floor derived for this repository. So both are stated.
     summary = (
         f"Compared {fields_compared} immutable field(s) across {inspected} "
         f"Service(s) present in both this tree and `{revision}` "
-        f"({len(head)} rendered here, {len(base)} there)."
+        f"({len(head)} rendered here, {len(base)} there). "
+        f"`helm template` produced {rendered} document(s) here against a floor of "
+        f"{floor} derived from the {base_rendered} it produced at `{revision}`."
     )
 
     if not problems:
