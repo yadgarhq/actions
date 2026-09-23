@@ -634,11 +634,17 @@ def test_a_chart_that_rendered_nothing_and_still_renders_nothing_is_accepted(tmp
 
 
 def test_the_floor_rises_the_moment_the_base_renders_a_document(tmp_path):
-    """The narrowing has a bottom, and this is where it stops.
+    """The narrowing has a bottom, and this is where it stops -- ONCE FIXED.
 
     A by-design-empty chart that starts rendering something has a floor of 1 from
-    the next pull request onwards. Without this, "the floor rises to 1" in the
-    script's comment would be a claim rather than a behaviour.
+    the next pull request onwards, and without this case that would be a claim
+    rather than a behaviour.
+
+    READ IT WITH THE TEST TWO ABOVE, because alone it is the reassuring half and
+    the script's comment once overclaimed exactly this. The base here renders a
+    document only because the chart was FIXED. A chart still rendering nothing
+    has a base that renders nothing too, so its floor stays 0 and never rises --
+    which is why the discriminator on the base-absent arm exists.
     """
     root = tmp_path / "repo"
     root.mkdir()
