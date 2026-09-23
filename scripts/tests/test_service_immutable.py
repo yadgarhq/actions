@@ -27,6 +27,15 @@ HONEST:
     whose default render is empty on purpose. A floor that cannot tell them apart
     is either a gate that refuses a ruled design or a gate that passes having
     read nothing.
+  * `test_a_new_chart_that_renders_nothing_and_declares_nothing_is_refused` is
+    the other half of `test_a_new_chart_that_renders_nothing_by_design_is_
+    accepted`, and it is the one that had to be constructed. Without it the
+    derived floor lets a chart that broke on its FIRST pull request through for
+    ever: the merged emptiness becomes the next run's BASE, so the floor derives
+    to 0 again and never rises. The two charts render byte-identically; the only
+    thing between them is whether the repository declares the values it does
+    render under, and a test that only fed the gate the declaring one would
+    certify the fixture.
   * `test_a_dependency_declared_at_base_is_resolved` is ADR-0725's regression:
     the BASE chart is rendered from a bare `git archive`, which never carries a
     resolved `charts/` any more than a fresh checkout does, and nothing else in
@@ -449,6 +458,76 @@ def _empty_by_design(root):
     )
 
 
+def _new_repo(tmp_path, readme="no chart yet\n"):
+    """A repository whose `main` holds a README and no `chart/` at all.
+
+    `yadgarhq/platform`'s first pull request, which is the shape the base-absent
+    arm is written for. Returns `(root, base_sha)`.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    git(root, "init", "-q", "-b", "main")
+    git(root, "config", "user.email", "suite@example.invalid")
+    git(root, "config", "user.name", "suite")
+    write(root, {"README.md": readme})
+    return root, commit(root, "base")
+
+
+def test_a_new_chart_that_renders_nothing_and_declares_nothing_is_refused(tmp_path):
+    """THE ONE RUN THAT CAN ASK, and the case the derived floor alone lets past.
+
+    A chart new on this branch whose render is empty BY ACCIDENT produces exactly
+    what ADR-0752's design produces, so the floor cannot tell them apart. The
+    floor's own bound does not save it either: the accident merges, the merged
+    emptiness is the NEXT run's base, the floor derives to 0 again and stays
+    there. This arm is the only moment anything is still checkable, and what it
+    asks for is a values file in the tree -- see `declared_alternate_values`.
+
+    The chart here is `_empty_by_design`'s, unchanged and undeclared.
+    """
+    root, base = _new_repo(tmp_path)
+    _empty_by_design(root)
+    commit(root, "add a chart whose render broke")
+
+    result = run(root, base)
+    assert result.returncode == 1, result.stdout
+    assert "produced 0 document(s) here" in result.stdout
+    assert "declares no alternate values file" in result.stdout
+
+
+def test_an_empty_alternate_values_file_does_not_discharge_the_obligation(tmp_path):
+    """`touch example/values.yaml` is not a declaration.
+
+    An empty file parses to `None`, which DIFFERS from a populated
+    `chart/values.yaml` -- so a bare difference test would accept it, and an
+    obligation one keystroke discharges is not an obligation.
+    """
+    root, base = _new_repo(tmp_path)
+    _empty_by_design(root)
+    write(root, {"example/values.yaml": ""})
+    commit(root, "add a chart whose render broke, and an empty values file")
+
+    result = run(root, base)
+    assert result.returncode == 1, result.stdout
+    assert "declares no alternate values file" in result.stdout
+
+
+def test_an_alternate_values_file_equal_to_the_defaults_does_not_count(tmp_path):
+    """A copy of the defaults renders exactly the same nothing.
+
+    The comparison is on PARSED data rather than bytes, so this copy differs in
+    its comments and still does not count.
+    """
+    root, base = _new_repo(tmp_path)
+    _empty_by_design(root)
+    write(root, {"example/values.yaml": "# a copy, with a comment\ncreate: false\n"})
+    commit(root, "add a chart whose render broke, and a copy of its defaults")
+
+    result = run(root, base)
+    assert result.returncode == 1, result.stdout
+    assert "declares no alternate values file" in result.stdout
+
+
 def test_a_new_chart_that_renders_nothing_by_design_is_accepted(tmp_path):
     """ADR-0752 and `yadgarhq/platform`, which is why the floor was derived.
 
@@ -456,25 +535,69 @@ def test_a_new_chart_that_renders_nothing_by_design_is_accepted(tmp_path):
     nothing and requiring no CRD". The constant floor refused exactly this, and a
     ruled design and a gate cannot both be right -- so the gate moved. The base
     here has no `chart/` at all, which is `platform`'s first pull request.
+
+    THE ONE DIFFERENCE FROM THE REFUSED CASE ABOVE is `example/values.yaml`. The
+    renders are identical; `platform` carries that file today unchanged.
     """
-    root = tmp_path / "repo"
-    root.mkdir()
-    git(root, "init", "-q", "-b", "main")
-    git(root, "config", "user.email", "suite@example.invalid")
-    git(root, "config", "user.name", "suite")
-    write(root, {"README.md": "no chart yet\n"})
-    base = commit(root, "base")
+    root, base = _new_repo(tmp_path)
     _empty_by_design(root)
+    write(root, {"example/values.yaml": "# turn the layer on\ncreate: true\n"})
     commit(root, "add a chart that renders nothing at its defaults")
 
     result = run(root, base)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "new on this branch" in result.stdout
-    # THE COUNT IS ASSERTED AND PRINTED ON THIS PATH TOO. A gate that passes
-    # having examined nothing is the defect; a gate that passes having examined
-    # nothing AND SAID SO against the floor it derived is a measurement.
+    # THE COUNT IS PRINTED ON THIS PATH TOO. A gate that passes having examined
+    # nothing is the defect; a gate that passes having examined nothing AND SAID
+    # SO against the floor it derived is a measurement. It is printed and not
+    # asserted here: `floor` is provably 0 on this arm, so the comparison above
+    # cannot fail. The number is asserted HERE, where it can.
     assert "produced 0 document(s) here, 0 of them Service(s)" in result.stdout
     assert "against a floor of 0" in result.stdout
+    # The evidence the gate accepted is named, so the pass can be checked.
+    assert "declares `example/values.yaml`" in result.stdout
+
+
+def test_a_new_chart_that_renders_something_owes_no_values_file(tmp_path):
+    """The control on the discriminator, and without it the obligation is wrong.
+
+    What is asked for is owed by a chart whose DEFAULT render is empty, and by
+    nothing else. Every repository that adds a normal chart on a branch -- one
+    that renders its objects at its defaults -- must still pass carrying no
+    `example/values.yaml` and no `chart/ci/`. A gate that asked every new chart
+    for a second values file would be a new rule nobody decided.
+    """
+    root, base = _new_repo(tmp_path)
+    write(
+        root,
+        {
+            "chart/Chart.yaml": CHART_YAML,
+            "chart/templates/service.yaml": service(headless=True),
+        },
+    )
+    commit(root, "add a chart that renders a Service")
+
+    result = run(root, base)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "produced 1 document(s) here, 1 of them Service(s)" in result.stdout
+    assert "declares" not in result.stdout
+
+
+def test_helms_own_ci_values_convention_counts(tmp_path):
+    """`chart/ci/*-values.yaml` is the second accepted name, and not an alias.
+
+    helm reads that directory as "the values this chart is meant to be exercised
+    under", so a repository using it is already saying what this asks. Without
+    this case the convention would be documented and unreachable.
+    """
+    root, base = _new_repo(tmp_path)
+    _empty_by_design(root)
+    write(root, {"chart/ci/on-values.yaml": "create: true\n"})
+    commit(root, "add a chart that renders nothing at its defaults")
+
+    result = run(root, base)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "declares `chart/ci/on-values.yaml`" in result.stdout
 
 
 def test_a_chart_that_rendered_nothing_and_still_renders_nothing_is_accepted(tmp_path):
@@ -484,6 +607,13 @@ def test_a_chart_that_rendered_nothing_and_still_renders_nothing_is_accepted(tmp
     `config` reasoning was already written for -- a chart that rendered none and
     still renders none is a fact about the repository -- extended from Services
     to documents. Nothing is listed anywhere for it to work.
+
+    THIS FIXTURE DECLARES NO ALTERNATE VALUES FILE, AND THAT IS THE POINT. The
+    discriminator lives on the base-ABSENT arm alone; tightening this one would
+    refuse `yadgarhq/platform`'s second pull request onwards, which is the ruled
+    design from its second day. So this stays green, and with it the fact the
+    script's comment now states plainly: an UNFIXED empty render is invisible to
+    this gate from then on.
     """
     root = tmp_path / "repo"
     root.mkdir()
