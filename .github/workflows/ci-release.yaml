@@ -264,15 +264,40 @@ jobs:
         run: |
           cosign sign --yes "$IMAGE"
 
-      # A published package is PRIVATE by default, even from a public
-      # repository, and there is no API to change that — visibility lives on the
-      # package's own settings page and nowhere else. Publishing therefore
-      # succeeds, this workflow goes green, and only an adopter discovers the
-      # problem, as `unauthorized` rendered by most clients as "not found".
+      # A push reports success without saying whether anybody else can pull what
+      # it pushed. Visibility is a GitHub-side property this job never sets, and
+      # there is no API that sets it either — it lives on the package's own
+      # settings page and nowhere else. So the workflow checks what an adopter
+      # EXPERIENCES rather than what it just did, and names the one-time manual
+      # fix on the day the answer is no. Same instinct as the detection step
+      # narrating what it skipped: a silent wrong state is worse than a red build.
       #
-      # So the workflow checks what an adopter experiences rather than what it
-      # just did. Same instinct as the detection step narrating what it skipped:
-      # a silent wrong state is worse than a red build.
+      # THIS COMMENT NO LONGER CLAIMS A NEW PACKAGE IS PRIVATE BY DEFAULT.
+      # ADR-0723 measured the opposite for a package pushed from a public
+      # repository, and `scripts/chart_publicly_pullable.py` was corrected in #83
+      # while this step was left saying the refuted thing. The gate stays for what
+      # it verifies, not for a defect it no longer has evidence of.
+      #
+      # LEDGER 976 — THE READ IS MADE ANONYMOUS, AND UNTIL NOW IT WAS NOT. This
+      # job's third step is `docker/login-action`, which writes a credential into
+      # the docker CLI's configuration directory, and `docker manifest inspect`
+      # answers from whatever is on disk. So this step performed an AUTHENTICATED
+      # pull — and an authenticated pull of a PRIVATE package succeeds. It
+      # reported "Anonymous pull works" about a request that was not anonymous and
+      # could not fail for the reason it exists: the fifth check-that-cannot-fail
+      # this estate has measured (ADR-0645). The `chart` job's own guard below is
+      # headed "SAME INTENT, DELIBERATELY NOT ITS MECHANISM" and names exactly
+      # this mistake; the prose was right and the step was never fixed.
+      #
+      # `DOCKER_CONFIG` POINTED AT AN EMPTY DIRECTORY is the whole fix: no
+      # `config.json`, so no `auths` entry and no credential helper, so docker
+      # performs the anonymous token exchange an adopter's client performs. It is
+      # WEAKER THAN THE CHART GATE'S ASSERTION and that is worth stating: that
+      # gate asserts the two requests' headers are byte-identical under poisoned
+      # environment values, which is an equality; this is an absence, and an
+      # absence is easier to lose. `scripts/tests/test_image_visibility_is_anonymous.py`
+      # executes this very block against a stub registry to keep the absence
+      # honest, with the paired public-package case ADR-0646 requires.
       - name: verify an adopter can actually pull this
         env:
           REF: ${{ env.REGISTRY }}/${{ github.repository }}:${{ needs.detect.outputs.version }}
@@ -280,7 +305,10 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if docker manifest inspect "$REF" >/dev/null 2>&1; then
+          anon="$RUNNER_TEMP/anonymous-docker-config"
+          rm -rf "$anon"
+          mkdir -p "$anon"
+          if DOCKER_CONFIG="$anon" docker manifest inspect "$REF" >/dev/null 2>&1; then
             echo "Anonymous pull of $REF works." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -288,8 +316,8 @@ jobs:
             echo "### Published, but NOT publicly pullable"
             echo ""
             echo "\`$REF\` was pushed and signed, but an anonymous pull is refused."
-            echo "A new GitHub package is private by default and **no API can change it** —"
-            echo "it is a one-time manual step per package:"
+            echo "**No API can change a package's visibility** — it is a one-time"
+            echo "manual step per package:"
             echo ""
             echo "  https://github.com/orgs/${OWNER}/packages/container/$(basename "$REPO")/settings"
             echo ""

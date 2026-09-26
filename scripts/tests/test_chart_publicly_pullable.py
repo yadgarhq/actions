@@ -1,13 +1,24 @@
 """What `chart_publicly_pullable.py` REFUSES, pinned so it cannot quietly stop refusing.
 
 THE GATE EXISTS BECAUSE A CHART PUBLISH CANNOT FAIL TODAY. `ci-release.yaml`'s
-`chart` job packages, pushes and reports success, and a newly created GHCR
-package is PRIVATE — so the first chart release goes green carrying an artefact
-no installation can pull. ADR-0705 makes that fatal rather than untidy: an
-installation references the published chart from its own GitOps repository, and
-the three Argo `Application`s already consuming OCI charts in `yadgarhq/deploy`
-carry no repository Secret at all. Every installation's pull is anonymous by
-design.
+`chart` job packages, pushes and reports success, and that success is not itself
+proof the package is pullable — the job never sets visibility, and nothing else
+asks. ADR-0705 makes a package no installation can pull fatal rather than
+untidy: an installation references the published chart from its own GitOps
+repository, and the three Argo `Application`s already consuming OCI charts in
+`yadgarhq/deploy` carry no repository Secret at all. Every installation's pull
+is anonymous by design.
+
+LEDGER 992 — THIS DOCSTRING DOES NOT CLAIM A NEW GHCR PACKAGE IS PRIVATE BY
+DEFAULT. ADR-0723 measured the opposite and is the record that holds:
+`yadgarhq/config` tagged `v0.1.0` on 2026-09-19, and the `charts/config` package
+that push created was PUBLIC from the moment it existed. `#83` corrected
+`chart_publicly_pullable.py`'s own docstring and its refusal messages, and left
+this file saying the refuted thing — so a reader of the tests believed a premise
+the module under test had already dropped. The gate stays for what it VERIFIES,
+not for a defect it no longer has evidence of: visibility is a GitHub-side
+behaviour no API sets, so this asks the registry the question an installation
+asks, every release.
 
 MOST OF THIS FILE IS RED CASES, for the reason `test_helm_pin_agrees.py` gives: a
 suite that only feeds a gate conforming input certifies the fixture rather than

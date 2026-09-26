@@ -95,6 +95,8 @@ repos:
         language: system
         entry: python3 hooks/run_block_size.py
         files: ^\.github/workflows/.*\.ya?ml$
+        # LEDGER 934, kept identical to `.pre-commit-hooks.yaml`.
+        verbose: true
       # Defined locally rather than pulled from this repository's own published
       # hooks: a repository referencing its own rev cannot validate a change
       # before that change is tagged. The version is kept identical to
@@ -273,3 +275,5 @@ repos:
         entry: hooks/no_test_skips.py
         always_run: true
         pass_filenames: false
+        # LEDGER 934, kept identical to `.pre-commit-hooks.yaml`.
+        verbose: true

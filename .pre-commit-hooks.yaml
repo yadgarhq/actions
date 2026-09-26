@@ -306,11 +306,31 @@
 # records: a python-language hook pip-installs this repository, and the failure
 # surfaces in the consuming repo as an install error rather than a hook error.
 # The script is stdlib-only and carries a shebang and the executable bit.
+# LEDGER 934 — `verbose: true`, AND IT IS THE SAME RULE THE `chart-baseline`
+# ENTRY BELOW ALREADY STATES. pre-commit shows a PASSING hook's output only when
+# asked, so every count this script prints — "N `run:` block(s) measured" — was
+# invisible in all eighteen consumers, which is exactly where somebody has to
+# read it. ADR-0645's whole demand is that a green verdict be distinguishable
+# from one that measured nothing, and a number nobody sees does not distinguish
+# anything. Four entries in this file carry the flag for that reason:
+# `run-block-size`, `no-compiled-in-defaults`, `certificate-usages` and
+# `no-test-skips`.
+#
+# WHICH ENTRIES DO *NOT* GET IT, said here so a later reader does not "finish
+# the job". `verbose: true` on a hook that prints no count adds a line and no
+# evidence. `observe-coverage` and `complexity` print nothing at all on a pass;
+# `boot-reads-watched` prints a sentence with no number, and its non-vacuity is
+# already enforced by an exit code rather than by a line (it REFUSES on 0 reads
+# judged). Those three stay quiet until they have a number to show.
+#
+# IT CHANGES DISPLAY AND NEVER A VERDICT. `verbose` is a pre-commit display
+# setting; no consumer's exit status moves because of it.
 - id: run-block-size
   name: a run block must stay small enough to lint
   language: script
   entry: hooks/run_block_size.py
   files: ^\.github/workflows/.*\.ya?ml$
+  verbose: true
 
 # LEDGER 648. The ADR-0569 gate, published. It was a 131-line shell script
 # copied byte-identically into five repositories — gateway, iam, iam-db, task
@@ -343,6 +363,9 @@
   entry: hooks/no_compiled_in_defaults.sh
   always_run: true
   pass_filenames: false
+  # LEDGER 934. "searching N Rust file(s) under <roots>" is this gate's
+  # non-vacuity evidence, and it was printed where nobody could see it.
+  verbose: true
 
 # LEDGER 720. The EKU wall — a cert-manager leaf names `server auth` XOR
 # `client auth` — published so the rule stops being one repository's local hook.
@@ -386,6 +409,10 @@
   entry: hooks/certificate_usages.py
   always_run: true
   pass_filenames: false
+  # LEDGER 934. "inspected N Certificate(s), M of them leaves … skipped K
+  # templated file(s) this scan cannot read" — the skipped count in particular
+  # is a thing a reviewer needs and could not see.
+  verbose: true
 
 # LEDGER 726. THE OTHER DIRECTION OF THE WATCH SET. ADR-0523 makes a process
 # exit when the material it read at boot is replaced underneath it, and every
@@ -517,6 +544,10 @@
   entry: hooks/no_test_skips.py
   always_run: true
   pass_filenames: false
+  # LEDGER 934. The `examined:` line this gate's own docstring calls the thing
+  # that separates "clean" from "walked an empty tree" was printed on the pass
+  # path and hidden by pre-commit in every consumer.
+  verbose: true
 
 # LEDGER 511, STAGE 5, SPLIT IN TWO BY LEDGER 911. `docs/plans/chart-hardening.md`
 # asked whether ledger 511 is one shared chart decision or N local fixes. It priced

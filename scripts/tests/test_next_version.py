@@ -350,10 +350,36 @@ def test_the_ladder_is_unchanged(last, changelog, expected):
 # ---------------------------------------------------------------------------
 
 
+def _git_env():
+    """The environment a fixture repository is built in, with the caller's out.
+
+    HERMETIC BECAUSE IT HAD TO BE, and the failure is worth recording. This file
+    is run by the `pytest-scripts` pre-commit hook DURING a `git commit`, and
+    `git commit` exports `GIT_DIR` and `GIT_INDEX_FILE` to everything it spawns.
+    A nested `git` in a temporary directory then obeys the OUTER repository
+    instead of its own: the four real-repository tests below died on
+    `git commit ... -m root` returning 1, and the fixture's commits were being
+    written into the repository being committed to.
+
+    `pre-commit run --all-files` exports neither, so the suite was green in CI
+    and on demand, and red only on the one path that matters.
+
+    `test_service_immutable.py` reached the same conclusion first and carries the
+    same helper; this is that fix, applied to the file that was missed.
+    """
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
 def git(cwd, *args):
     subprocess.run(
-        ["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
-        cwd=cwd, check=True, capture_output=True, text=True,
+        # `core.hooksPath` is neutralised for the reason the helper above is
+        # hermetic: a developer with pre-commit installed through
+        # `init.templateDir` gets its hook copied into every `git init`, and the
+        # fixture's first commit then fails with "No .pre-commit-config.yaml
+        # file was found".
+        ["git", "-c", "core.hooksPath=/dev/null",
+         "-c", "user.name=t", "-c", "user.email=t@t", *args],
+        cwd=cwd, check=True, capture_output=True, text=True, env=_git_env(),
     )
 
 
@@ -374,7 +400,10 @@ def build(tmp_path, commits, tag=None):
 
 def run(tmp_path):
     """The script as the workflow runs it: a subprocess, reading its exit code."""
-    env = dict(os.environ)
+    # `_git_env` rather than the ambient environment: the script under test runs
+    # git itself, so an inherited `GIT_DIR` would point it at the outer
+    # repository just as it does the fixture builder above.
+    env = _git_env()
     env.update(
         GITHUB_OUTPUT=str(tmp_path / "out.txt"),
         GITHUB_STEP_SUMMARY=str(tmp_path / "summary.md"),
@@ -388,6 +417,42 @@ def run(tmp_path):
         capture_output=True, text=True,
     )
     return done, (tmp_path / "out.txt").read_text(encoding="utf-8")
+
+
+def test_the_fixture_harness_ignores_the_ambient_git_repository(tmp_path, monkeypatch):
+    """The harness runs inside a `git commit`, and must not inherit its repository.
+
+    Every test below this one builds a repository and reads it back. If the
+    ambient `GIT_DIR` wins, all of them address a DIFFERENT repository, and the
+    damage is not confined to a red suite: `build`'s commits land in whichever
+    repository the hook was invoked from. This pins the isolation rather than
+    the symptom — the ambient repository's history is read before and after, and
+    must not have moved.
+    """
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    git(outer, "init", "-q", "-b", "main")
+    git(outer, "commit", "-q", "--allow-empty", "-m", "outer")
+
+    def outer_commits():
+        done = subprocess.run(
+            ["git", "rev-list", "--count", "HEAD"], cwd=outer,
+            check=True, capture_output=True, text=True, env=_git_env(),
+        )
+        return done.stdout.strip()
+
+    before = outer_commits()
+    monkeypatch.setenv("GIT_DIR", str(outer / ".git"))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(outer / ".git" / "index"))
+
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    build(fixture, [(message(), HUMAN, "src/main.rs")], tag="v0.2.17")
+    done, out = run(fixture)
+
+    assert done.returncode == 0, done.stderr
+    assert "next=0.2.18" in out
+    assert outer_commits() == before
 
 
 def test_a_real_bot_only_cargo_merge_tags_end_to_end(tmp_path):
