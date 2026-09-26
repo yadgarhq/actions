@@ -75,6 +75,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 GATE = Path(__file__).resolve().parents[2] / "hooks" / "observe_coverage.py"
 
 
@@ -1140,3 +1142,102 @@ def test_a_marker_does_not_inherit_the_next_item_once_its_own_is_deleted(tmp_pat
     result = run(crate(tmp_path, src__service__rpc_rs=drifted))
     assert result.returncode == 1, result.stdout
     assert "`update` opens no observe::Call" in result.stdout
+
+
+# --------------------------------------------------------------------------
+# Ledger 843 — the refusal says which conjunct stopped, for BOTH conjuncts.
+# --------------------------------------------------------------------------
+#
+# The crediting rule has two conjuncts (see the gate's module docstring): the
+# call sits in the caller's RESULT POSITION, and the callee's `Call::start` is
+# the callee's FIRST STATEMENT. Conjunct 2's failure named itself — "its
+# `Call::start` is not its first statement". Every way conjunct 1 can fail
+# collapsed into one hint, `("no-result", None)`, whose tail is the empty
+# string — so a handler whose result is a `?`, a `match`, a second `return` or
+# a statement ending in `;` was refused with `opens no observe::Call` and
+# nothing else. The author reads that as "add a Call", tries the obvious edit,
+# and the gate says the same thing again.
+
+
+def _impl(body: str) -> str:
+    return (
+        "use super::*;\n\n"
+        "#[tonic::async_trait]\n"
+        "impl TaskService for Task {\n"
+        "    async fn create(&self, req: Request<Create>) -> Result<Response<Reply>, Status> {\n"
+        f"{body}"
+        "    }\n"
+        "}\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        # A `?` is a second exit, and an invisible one.
+        ("        Ok(store(req).await?)\n", "`?`"),
+        # The result opens a block, so each arm is its own path.
+        (
+            "        match store(req).await {\n"
+            "            Ok(r) => Ok(r),\n"
+            "            Err(e) => Err(e),\n"
+            "        }\n",
+            "block",
+        ),
+        # No tail expression at all.
+        ("        let _ = store(req).await;\n", "`;`"),
+        # More than one way out.
+        (
+            "        if req.done() {\n"
+            "            return Ok(Response::default());\n"
+            "        }\n"
+            "        return store(req).await;\n",
+            "`return`",
+        ),
+    ],
+)
+def test_a_conjunct_one_failure_says_why(tmp_path, body, expected):
+    """LEDGER 843. Refusing without a reason is refusing without a fix.
+
+    Each body below fails conjunct 1 a DIFFERENT way, and the message has to say
+    which — the same courtesy conjunct 2 already extends. The verdict is
+    unchanged by this: every one of these was refused before and is refused now.
+    """
+    result = run(crate(tmp_path, src__service__rpc_rs=_impl(body)))
+    assert result.returncode == 1, result.stdout
+    assert "`create` opens no observe::Call" in result.stdout
+    assert expected in result.stdout
+    # The bare message — the ledger's actual complaint — must not be printable.
+    assert "`create` opens no observe::Call\n" not in result.stdout
+
+
+def test_the_reason_is_not_pasted_onto_every_refusal(tmp_path):
+    """THE COMPANION ASSERTION (ADR-0646). A tail hard-wired to one sentence
+    would satisfy every row above. These two refusals are for DIFFERENT reasons
+    and must not read alike — conjunct 2's wording on a conjunct-2 failure, and
+    a conjunct-1 wording on a conjunct-1 failure."""
+    conditional = crate(
+        tmp_path / "a",
+        src__service__rpc_rs=_impl("        inner(req).await\n"),
+        src__service__inner_rs="""\
+use super::*;
+
+pub(super) async fn inner(req: Request<Create>) -> Result<Response<Reply>, Status> {
+    if req.done() {
+        let call = Call::start(SERVICE, "Create", Kind::Write, tel(rid()));
+        call.ok();
+    }
+    store(req).await
+}
+""",
+    )
+    first = run(conditional)
+    assert first.returncode == 1, first.stdout
+    assert "is not its first statement" in first.stdout
+
+    question = run(
+        crate(tmp_path / "b", src__service__rpc_rs=_impl("        Ok(store(req).await?)\n"))
+    )
+    assert question.returncode == 1, question.stdout
+    assert "is not its first statement" not in question.stdout
+    assert "`?`" in question.stdout

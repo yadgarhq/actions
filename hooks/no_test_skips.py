@@ -125,6 +125,27 @@ def audit_cargo(text: str):
     and `measured` counts benchmark-mode entries that report no pass. The floor
     on executed tests is an AGGREGATE rather than per-line, because a crate with
     no doc-tests still prints a `0 passed` line for them.
+
+    LEDGER 844 ASKED FOR TWO CHANGES AND GETS NEITHER, stated here so the row
+    stops being re-filed as an open defect.
+
+    "It refuses a run that produced no `test result:` line" is the DESIGN, not a
+    defect: see this module's header, AN AUDIT OVER NOTHING FAILS (ADR-0645). A
+    layer that reports green having read no summary is indistinguishable from
+    one that read a good summary, and that exact shape produced a wrong
+    conclusion in the session this file was written in.
+
+    "It cannot read `cargo nextest`, a `harness = false` target or libtest JSON"
+    is TRUE and is deliberately left alone, because widening the accepted set
+    adds a new way to PASS a gate whose whole posture is to fail closed on
+    output it does not recognise. Measured across all nineteen unarchived
+    repositories on 2026-09-26: zero `harness = false` targets in any
+    `Cargo.toml`, zero references to `nextest` in any workflow or manifest, and
+    zero `--format json` test invocations. There is no consumer producing such
+    output, so there is no false red to fix and nothing to measure a second
+    format against. The first repository that adopts one of them is the input
+    that earns the change — and it is a change to what a green audit means, so
+    it is the operator's call rather than a bug fix.
     """
     matches = [m for m in (CARGO_RESULT.match(ln) for ln in text.splitlines()) if m]
     ignored_names = [
@@ -609,6 +630,23 @@ ADDOPTS_NARROWING = re.compile(
 )
 COLLECT_IGNORE = re.compile(r"^\s*collect_ignore(_glob)?\s*=")
 
+# LEDGER 848 — THE PYTHON HALF OF `examined: … test items`, and it counts what
+# PYTEST WOULD COLLECT rather than what looks like a test. pytest's default
+# `python_functions` is `test*`, so the name prefix IS the collection rule, and
+# a method of a `Test…` class carries the same prefix and is matched by the same
+# pattern with indentation. `async def` is included because an asyncio test is
+# still a collected item.
+#
+# IT COUNTS FUNCTIONS, NOT RUN-TIME ITEMS, which is what the Rust half counts
+# too: a parametrised function is one line here and several items at run time,
+# so this repository's own tree reports 701 beside a suite pytest collects as
+# 794. Stated rather than left for somebody to read as a defect.
+#
+# IT NEVER REFUSES ANYTHING. This is a count printed beside the verdict, so an
+# over- or under-count costs legibility rather than a false green — which is why
+# a name prefix is enough here while nothing else in this file keys on one.
+PY_TEST_ITEM = re.compile(r"^[ \t]*(?:async[ \t]+)?def[ \t]+test\w*[ \t]*\(", re.MULTILINE)
+
 
 def scan_invocations(path: Path, text: str):
     """Findings for every test invocation in a command file."""
@@ -653,13 +691,23 @@ def layer_one(root: Path):
 
     Returns (problems, examined) — the second is what makes a green verdict
     readable, per ADR-0645.
+
+    LEDGER 848 — EVERY COUNT NAMES THE LANGUAGE IT COUNTED. `test items` used to
+    be incremented in the Rust loop alone, so a Python-only repository read
+    `0 test items` on a scan that had walked its whole suite and would have
+    refused any marker in it. ADR-0645 wants this line to separate "clean" from
+    "examined nothing"; an unqualified zero said the second about a tree where
+    the first was true. That is the false BLIND-SPOT reading — the reader
+    concludes the gate is not looking, and a gate believed not to be looking is
+    one nobody re-reads. Both halves are now counted and both are labelled.
     """
     problems: list[str] = []
     examined = {
         "rust files": 0,
-        "test items": 0,
+        "rust test items": 0,
         "ignored attributes": 0,
         "python files": 0,
+        "python test items": 0,
         "command files": 0,
         "workflows": 0,
     }
@@ -676,7 +724,7 @@ def layer_one(root: Path):
         examined["rust files"] += 1
         rel = path.relative_to(root)
         for line, kind, name, attrs in rust_items(text):
-            examined["test items"] += 1
+            examined["rust test items"] += 1
             if any(IGNORE_ATTR.match(a) for a in attrs):
                 examined["ignored attributes"] += 1
                 why = ignored_is_covered(path, named, unfiltered, calls_shared)
@@ -702,6 +750,7 @@ def layer_one(root: Path):
     for path in walk(root, (".py",)):
         text = read(path)
         examined["python files"] += 1
+        examined["python test items"] += len(PY_TEST_ITEM.findall(text))
         rel = path.relative_to(root)
         for idx, line in enumerate(text.splitlines(), start=1):
             for pattern, label in PY_SKIPS:

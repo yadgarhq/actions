@@ -653,7 +653,77 @@ def test_an_empty_tree_reports_what_it_examined(tmp_path):
     result = run(root)
     assert result.returncode == 0
     assert "0 rust files" in result.stdout
-    assert "0 test items" in result.stdout
+    assert "0 rust test items" in result.stdout
+    assert "0 python test items" in result.stdout
+
+
+def test_a_python_only_repository_is_not_reported_as_zero_test_items(tmp_path):
+    """LEDGER 848. The count that says what Layer 1 examined must not read as
+    zero in a repository the scan covers.
+
+    `examined:` counted test items in the RUST loop only, under the unqualified
+    label `test items`. So a Python-only repository — and this estate has
+    several — read `0 test items` on a scan that had walked its whole suite and
+    would have refused any skip marker in it. ADR-0645 wants that line to
+    separate "clean" from "examined nothing"; an unqualified zero on a covered
+    tree says the second about a tree where the first is true, which is the
+    false BLIND-SPOT reading rather than the false green.
+
+    THE FIXTURE CARRIES A SKIP MARKER'S NEAR-MISS, not a marker, because the
+    point is the count on a GREEN run: a red run prints the same line, and the
+    number is only misleading where somebody trusts the pass.
+    """
+    root = tree(
+        tmp_path,
+        {
+            "tests/test_suite.py": (
+                "def test_one():\n"
+                "    assert True\n"
+                "\n"
+                "\n"
+                "async def test_two():\n"
+                "    assert True\n"
+                "\n"
+                "\n"
+                "class TestGroup:\n"
+                "    def test_three(self):\n"
+                "        assert True\n"
+                "\n"
+                "\n"
+                "def helper():\n"
+                "    return 1\n"
+            )
+        },
+    )
+    result = run(root)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "3 python test items" in result.stdout
+    assert "0 rust test items" in result.stdout
+    # THE LABEL ITSELF, not only the number. An unqualified `N test items` is
+    # the thing ledger 848 is about, so it must not be printable at all.
+    assert not re.search(r"\d+ test items", result.stdout)
+
+
+def test_the_python_test_item_count_is_not_a_constant(tmp_path):
+    """THE COMPANION ASSERTION (ADR-0646). The test above passes under a counter
+    hard-wired to 3. This is the same fixture with one test function removed,
+    and it must report one fewer — so the number is a measurement."""
+    root = tree(
+        tmp_path,
+        {
+            "tests/test_suite.py": (
+                "def test_one():\n"
+                "    assert True\n"
+                "\n"
+                "\n"
+                "def helper():\n"
+                "    return 1\n"
+            )
+        },
+    )
+    result = run(root)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "1 python test items" in result.stdout
 
 
 def test_the_gate_does_not_refuse_its_own_repository(tmp_path):
@@ -898,7 +968,7 @@ def test_an_ignored_test_in_an_agent_worktree_is_not_reported(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert ".claude" not in result.stdout + result.stderr
     assert "1 rust files" in result.stdout
-    assert "1 test items" in result.stdout
+    assert "1 rust test items" in result.stdout
 
 
 def test_the_same_ignored_test_in_the_repository_is_still_refused(tmp_path):

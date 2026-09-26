@@ -796,7 +796,16 @@ def _top_segments(blank: str, lo: int, hi: int):
 
 
 def _result_span(blank: str, lo: int, hi: int):
-    """The unit's RESULT POSITION — (start, end) — or None when it has no single one.
+    """The unit's RESULT POSITION — ((start, end), None) — or (None, why).
+
+    LEDGER 843 — THE `why` IS THE POINT OF THE SECOND ELEMENT. Conjunct 2's
+    failure has always named itself in the refusal ("its `Call::start` is not
+    its first statement"); every way conjunct 1 could fail collapsed into one
+    hint with an EMPTY tail, so a handler whose result is a `?` or a `match` was
+    told only that it opens no `Call` — which it can already see. The reasons
+    are returned from the site that decides rather than re-derived by a second
+    reader of the same body, because two readings of one rule is the drift this
+    file's own docstring warns about elsewhere.
 
     CONJUNCT 1 OF THE CREDITING RULE. A callee's `Call::start` may stand in for
     its caller's only when the call IS the caller's result: its tail expression,
@@ -804,7 +813,7 @@ def _result_span(blank: str, lo: int, hi: int):
     because a `Call` on one of them is not a `Call` on the others — which is
     exactly the loosening this replaces.
 
-    So the answer is None when:
+    So the span is None, and a `why` is returned beside it, when:
 
       - the body contains a `?`. That is an exit, and an invisible one.
       - the body contains more than one `return`, or one that is not its last
@@ -821,37 +830,44 @@ def _result_span(blank: str, lo: int, hi: int):
     ilo, ihi = _inner_span(blank, lo, hi)
     body = blank[ilo:ihi]
     if "?" in body:
-        return None
+        return None, "it leaves through a `?`, which is a second and invisible exit"
     segs = _top_segments(blank, ilo, ihi)
     returns = len(RETURN_KW.findall(body))
     if returns:
         if returns > 1:
-            return None
+            return None, "it has more than one `return`, so it has more than one way out"
         filled = [(a, b) for a, b in segs if blank[a:b].strip()]
         if not filled:
-            return None
+            return None, "it has a `return` this rule could not locate in its body"
         s, e = filled[-1]
         if not blank[s:e].lstrip().startswith("return"):
-            return None  # the sole `return` is not the last statement
+            return None, "its sole `return` is not its last statement"
         s = blank.index("return", s) + len("return")
     else:
         s, e = segs[-1]
         if not blank[s:e].strip():
-            return None  # the body ends in `;` — no tail expression
+            return None, "its body ends in `;`, so it has no tail expression to be its result"
     depth = 0
     for k in range(s, e):
         c = blank[k]
         if c in "([{":
             if c == "{" and depth == 0:
-                return None  # a block, not a single result
+                return None, (
+                    "its result opens a block — a `match`, an `if`, a `for` — and each "
+                    "arm is its own path, so none of them is the result"
+                )
             depth += 1
         elif c in ")]}":
             depth -= 1
-    return s, e
+    return (s, e), None
 
 
 def _result_call(blank: str, lo: int, hi: int):
-    """(name, module_hint) for the ONE call in the unit's result position, or None.
+    """((name, module_hint), None) for the ONE call in the result position, else (None, why).
+
+    LEDGER 843: `why` is the sentence the refusal prints, for the same reason
+    `_result_span` returns one. Both halves of conjunct 1 can stop here, and an
+    author told only "opens no observe::Call" cannot tell which.
 
     THE OUTERMOST CALL ONLY, which is the sound reading of "the call is the tail
     expression". `measured(DISCOVER, || discover(&id))` credits `measured` and
@@ -866,29 +882,40 @@ def _result_call(blank: str, lo: int, hi: int):
     false green rather than a hypothesis: `iam` defines `fn new` in more than one
     module, so `Response::new(..)` reached the crate table under the name `new`.
     """
-    span = _result_span(blank, lo, hi)
+    span, why = _result_span(blank, lo, hi)
     if span is None:
-        return None
+        return None, why
     seg = blank[span[0] : span[1]].strip()
     m = RESULT_CALL.match(seg)
     if not m:
-        return None
+        return None, "its result is not a call this rule can follow"
     name = m.group("method") or m.group("fn")
     if name in NOT_A_CALL:
-        return None
+        return None, (
+            f"its result is a `{name}` expression, which is control flow rather "
+            "than a delegation"
+        )
     close = _match_bracket(seg, m.end() - 1)
     if close < 0 or not TAIL_SUFFIX.match(seg[close:]):
-        return None  # something follows the call, so the call is not the result
+        # something follows the call, so the call is not the result
+        return None, (
+            f"something follows the call to `{name}` in its result, so that call is "
+            "not the whole of it"
+        )
     hint = None
     raw = m.group("path")
     if raw:
         parts = [x for x in raw.replace(" ", "").split("::") if x]
         parts = [x for x in parts if x not in ("crate", "super", "self", "Self")]
         if not all(SNAKE.fullmatch(x) for x in parts):
-            return None  # a foreign type's associated function
+            # a foreign type's associated function
+            return None, (
+                f"its result is `{raw.replace(' ', '')}{name}(..)`, an associated "
+                "function of a type this crate does not model"
+            )
         if parts:
             hint = parts[-1]
-    return name, hint
+    return (name, hint), None
 
 
 def _opens_call_unconditionally(blank: str, lo: int, hi: int) -> bool:
@@ -961,9 +988,9 @@ def _instrumented(crate: Crate, path: str, lo: int, hi: int):
     blank = crate.files[path][1]
     if CALL in blank[lo:hi]:
         return True, None
-    call = _result_call(blank, lo, hi)
+    call, why = _result_call(blank, lo, hi)
     if call is None:
-        return False, ("no-result", None)
+        return False, ("no-result", why)
     name, module_hint = call
     target = crate.resolve(name, module_hint, path)
     if target is AMBIGUOUS:
@@ -972,7 +999,13 @@ def _instrumented(crate: Crate, path: str, lo: int, hi: int):
         # Only a snake_case name is worth naming as a dead end. `Some(..)` and
         # `Outcome { .. }` are constructors, not calls the rule failed to follow,
         # and reporting them as such makes the hint noise.
-        return False, (("unfollowed", name) if SNAKE.fullmatch(name) else ("no-result", None))
+        if SNAKE.fullmatch(name):
+            return False, ("unfollowed", name)
+        return False, (
+            "no-result",
+            f"its result is `{name}(..)`, a constructor rather than a call this "
+            "rule can follow",
+        )
     tblank = crate.files[target.path][1]
     if _opens_call_unconditionally(tblank, target.lo, target.hi):
         return True, None
@@ -1003,6 +1036,9 @@ def _check(path: str, label: str, lo: int, hi: int, idx: int, crate: Crate):
             f" (`{hint[1]}` is this unit's result, but its `Call::start` is not its "
             "first statement, so it does not run on every path into it)"
         )
+    elif kind == "no-result" and hint[1]:
+        # LEDGER 843. Conjunct 1 stopped, and the bare message used to end here.
+        tail = f" (and no callee can be credited for it: {hint[1]})"
     else:
         tail = ""
     yield f"{path}: `{label}` opens no observe::Call{tail}"

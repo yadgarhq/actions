@@ -1678,6 +1678,28 @@ jobs:
   # which is exactly what the general rule derives from `detect`'s own
   # `github.event_name != 'push'`. `test_the_old_first_step_is_preserved_by_the_
   # general_rule` pins that it still catches the matrix it was written for.
+  #
+  # LEDGER 1003 / 940 — WHY `version` IS NOT IN THE LIST BELOW, written down so
+  # the absence stops reading as an oversight. `version` runs on
+  # `github.event_name == 'push' && github.ref == 'refs/heads/main'`, which is
+  # AFTER a merge. Nothing a post-merge job concludes can block the merge that
+  # already happened, so putting it under this gate buys visibility and not
+  # enforcement — which is ledger 940's own reading of it.
+  #
+  # AND THE EDIT IS NOT FREE. This gate reads each job's `if:` and evaluates it
+  # over a closed whitelist of context references, refusing anything it has not
+  # been taught. `github.ref` is not in that whitelist. Measured 2026-09-26 by
+  # feeding `version`'s real condition to `ci_verdict.make_resolver`:
+  #
+  #   Refused: condition "github.event_name == 'push' && github.ref ==
+  #   'refs/heads/main'" reads github.ref, which this gate has not been taught.
+  #
+  # So adding the job without teaching the resolver would refuse `ci / passed`
+  # in this repository and in all eighteen consumers — an estate-wide red in
+  # place of a post-merge annotation. Teaching it changes what "may merge" means
+  # everywhere, and the gate's own docstring requires a new reference to arrive
+  # "together with the assertion that makes it a reason". That is a decision,
+  # not a defect fix, and it is left to the operator.
   passed:
     if: always()
     needs:
