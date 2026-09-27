@@ -136,6 +136,13 @@ def crd_docs(docs):
 # `platform.bootstrap.iamKeys.create`). Flipping only `enabled` left the whole
 # platform layer on in the all-off render, so the property below was proved for
 # every chart except the ones it mattered most for (ledger 1059, ADR-0806).
+#
+# `create` IS OVERLOADED, and the direction of the risk is known. Charts also use
+# it for "bring your own" — `serviceAccount.create: false` means the adopter
+# supplies one. On 2026-09-27 all 12 boolean `create` keys across the ten chart
+# consumers were operator guards, so flipping them is right today. A future
+# bring-your-own `create` could make the all-off render fail for a missing
+# object (a false RED, loud and fixable); it cannot make it pass wrongly.
 TOGGLES = ("enabled", "create")
 
 
@@ -209,10 +216,11 @@ if have_chart:
     declared = api_flags[1::2]
     if declared:
         w(
-            "Every render below passes the operator API versions this chart "
-            "declares in `chart/ci/api-versions.txt`: "
+            "The defaults and release-shaped renders below pass the operator "
+            "API versions this chart declares in `chart/ci/api-versions.txt`: "
             + ", ".join(f"`{v}`" for v in declared)
-            + "."
+            + ". The all-off render is always bare: it gets none of them, "
+            "because it stands for a cluster with no operator installed."
         )
         w()
 
@@ -244,7 +252,13 @@ if have_chart:
         yaml.safe_dump(off, fh)
         off_path = fh.name
 
-    off_docs, err = helm_render(off_path, "all-off", api_flags)
+    # THE ALL-OFF RENDER IS ALWAYS BARE: no `--api-versions`, whatever the chart
+    # declares (review of #92). It is the bare-cluster proof, and a bare cluster
+    # has no operator API at all. Handing it the declaration would let a
+    # `require-api` check that NO toggle guards pass here, and the gate would
+    # call a chart portable that cannot install without the operator. The
+    # declaration belongs to the defaults and release-shaped renders only.
+    off_docs, err = helm_render(off_path, "all-off")
     survivors = set() if err else {c[0] + "|" + c[3] for c in crd_docs(off_docs)}
 
     # ---- 1. what the DEFAULTS ask an adopter for -------------------------

@@ -75,10 +75,40 @@ def test_comments_and_blank_lines_are_not_entries(tmp_path):
     ]
 
 
-def test_a_kind_qualified_entry_is_accepted(tmp_path):
-    """helm's own `--api-versions` accepts `group/version/Kind` as well."""
+def test_a_kind_qualified_entry_is_refused_and_says_why(tmp_path):
+    """helm accepts `group/version/Kind`, but the estate's `require-api` asks
+    `.Capabilities.APIVersions.Has "<group/version>"`, and a Kind-form entry
+    never satisfies that (measured on helm 3 and 4). Accepting it would be a
+    declaration that declares nothing the checks read."""
     directory = chart(tmp_path, "keda.sh/v1alpha1/ScaledObject\n")
-    assert declared_api_versions(directory) == ["keda.sh/v1alpha1/ScaledObject"]
+    with pytest.raises(DeclarationError) as raised:
+        declared_api_versions(directory)
+    message = str(raised.value)
+    assert str(directory / DECLARATION) + ":1" in message
+    assert "keda.sh/v1alpha1" in message
+    assert "Has" in message
+
+
+def test_a_byte_order_mark_is_not_part_of_the_first_entry(tmp_path):
+    """An editor that writes UTF-8 with a BOM must not turn the first line into
+    a refusal -- or, worse, into a string helm is handed verbatim."""
+    directory = chart(tmp_path)
+    path = directory / DECLARATION
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"\xef\xbb\xbfkeda.sh/v1alpha1\n")
+    assert declared_api_versions(directory) == ["keda.sh/v1alpha1"]
+
+
+def test_a_file_that_is_not_utf8_is_refused_by_file_not_by_traceback(tmp_path):
+    directory = chart(tmp_path)
+    path = directory / DECLARATION
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"keda.sh/v1alpha1\n\xff\xfe\n")
+    with pytest.raises(DeclarationError) as raised:
+        declared_api_versions(directory)
+    message = str(raised.value)
+    assert str(path) in message
+    assert "UTF-8" in message
 
 
 def test_an_empty_declaration_means_no_flags(tmp_path):

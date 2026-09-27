@@ -70,7 +70,10 @@ REPO = Path(__file__).resolve().parents[2]
 #   `_require_api`  a list of API versions; the render fails unless each one
 #                   arrived as `--api-versions`, the way the estate's
 #                   `require-api` render checks refuse an offline render of a
-#                   kind the target has not declared (ADR-0806).
+#                   kind the target has not declared (ADR-0806). An entry may
+#                   instead be `{api: <version>, when: a.dotted.path}`, which
+#                   requires the API only while that path is truthy -- the
+#                   GUARDED check a real chart writes behind its toggle.
 #   `STUB_LOG`      when set in the environment, every argv is appended to that
 #                   file as one JSON line, so a test can assert exactly what the
 #                   gate handed helm.
@@ -135,6 +138,10 @@ if values.get("_fail"):
     sys.stderr.write("stub helm: `_fail` is set in the values\\n")
     sys.exit(1)
 for needed in values.get("_require_api") or []:
+    if isinstance(needed, dict):
+        if not get(values, needed["when"]):
+            continue
+        needed = needed["api"]
     if needed not in api_versions:
         sys.stderr.write("stub helm: this render needs the API %s\\n" % needed)
         sys.exit(1)
@@ -481,19 +488,23 @@ def test_both_toggle_words_are_flipped_at_any_depth(tmp_path):
 DECLARATION = "chart/ci/api-versions.txt"
 
 
-def test_a_declared_api_version_reaches_every_render(tmp_path):
+def test_declared_versions_reach_the_defaults_and_release_renders_only(tmp_path):
     """ADR-0806 (1). The estate's module charts refuse, at render time, a kind
     the target has not declared; offline, only `--api-versions` declares it. A
-    chart whose default render needs KEDA declares that once, and all three of
-    this gate's renders must carry it — the stub refuses any render that does
-    not, so a pass here means defaults, all-off and release-shaped all got it."""
+    chart whose DEFAULT render needs KEDA declares that once, and the defaults
+    and release-shaped renders carry it.
+
+    THE ALL-OFF RENDER NEVER DOES. It is the bare-cluster proof, and a bare
+    cluster has no operator API at all; handing it the declaration would let a
+    `require-api` check that no toggle guards pass there. Here the check IS
+    guarded, so the bare all-off render passes with no flags."""
     log = tmp_path / "helm.log"
     root = tree(
         tmp_path,
         {
-            "chart/values.yaml": "_require_api: [keda.sh/v1alpha1]\n_render:\n"
-            + DEPLOYMENT
-            + container(),
+            "chart/values.yaml": "autoscaling:\n  enabled: true\n"
+            "_require_api:\n  - {api: keda.sh/v1alpha1, when: autoscaling.enabled}\n"
+            "_render:\n" + DEPLOYMENT + container(),
             DECLARATION: "# KEDA, for autoscaling.enabled\nkeda.sh/v1alpha1\n",
         },
     )
@@ -501,17 +512,39 @@ def test_a_declared_api_version_reaches_every_render(tmp_path):
     assert result.returncode == 0, result.stdout
     calls = [json.loads(line) for line in log.read_text().splitlines()]
     assert len(calls) == 3
-    for call in calls:
-        assert call[:5] == [
-            "template",
-            "d80-render",
-            "chart",
-            "--api-versions",
-            "keda.sh/v1alpha1",
-        ]
+    defaults, all_off, release = calls
+    flags = ["--api-versions", "keda.sh/v1alpha1"]
+    assert defaults == ["template", "d80-render", "chart", *flags]
+    assert release[:5] == ["template", "d80-render", "chart", *flags]
+    assert "--api-versions" not in all_off
     # The declaration is named on the pass, so a reader can see what the
-    # renders were told the cluster has.
+    # renders were told the cluster has, and which render was not told.
     assert "`keda.sh/v1alpha1`" in result.stdout
+    assert "The all-off render is always bare" in result.stdout
+
+
+def test_an_unguarded_check_the_declaration_would_hide_is_refused(tmp_path):
+    """THE FALSE GREEN the all-off render must not give (review of #92).
+
+    A `require-api` check behind NO toggle cannot be switched off, so the chart
+    cannot install on a bare cluster -- exactly D80's property. If the all-off
+    render received the declaration, the check would pass there and the gate
+    would call the chart portable. It must refuse instead."""
+    root = tree(
+        tmp_path,
+        {
+            "chart/values.yaml": "_require_api: [keda.sh/v1alpha1]\n_render:\n"
+            + DEPLOYMENT
+            + container(),
+            DECLARATION: "keda.sh/v1alpha1\n",
+        },
+    )
+    result = run(root)
+    assert result.returncode == 1, result.stdout
+    assert "cannot switch its optional parts off" in result.stdout
+    assert "keda.sh/v1alpha1" in result.stdout
+    # The defaults render DID get the declaration, so it is not what failed.
+    assert "failed on the default values" not in result.stdout
 
 
 def test_the_same_chart_without_the_declaration_is_refused(tmp_path):

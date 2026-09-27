@@ -200,8 +200,14 @@ Every shared gate that renders the chart offline reads that one file through
 `scripts/api_versions.py` and passes each entry as `--api-versions`: the
 `helm-lint` hook, this `portability` job, and the `service_immutable` job (whose
 base side reads the file as it was at the base). A chart with no file renders
-exactly as before. A line that is not one API version is refused by file and
-line.
+exactly as before. A line that is not one `group/version` is refused by file and
+line, and so is the `group/version/Kind` form, which the charts' `require-api`
+checks never match.
+
+**The all-off render is always bare.** It gets no `--api-versions`, whatever the
+chart declares, because it stands for a cluster with no operator. A render check
+that no toggle guards therefore still fails it, which is the point: that chart
+cannot install on a bare cluster.
 
 ### The gate is a checked-in script, and that costs a second checkout
 

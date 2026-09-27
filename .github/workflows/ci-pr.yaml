@@ -1219,7 +1219,7 @@ jobs:
           reader="$(dirname "$src")/api_versions.py"
           for file in "$src" "$reader"; do
             if [ ! -f "$file" ]; then
-              echo "::error::the D80 gate is missing at $file"
+              echo "::error::the D80 gate or the gate's reader is missing at $file"
               exit 1
             fi
           done
@@ -1339,7 +1339,7 @@ jobs:
           reader="$(dirname "$src")/api_versions.py"
           for file in "$src" "$reader"; do
             if [ ! -f "$file" ]; then
-              echo "::error::the Service immutability gate is missing at $file"
+              echo "::error::the Service immutability gate or the gate's reader is missing at $file"
               exit 1
             fi
           done

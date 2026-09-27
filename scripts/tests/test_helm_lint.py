@@ -177,6 +177,16 @@ def test_a_malformed_declaration_is_refused_before_helm_runs(tmp_path):
     assert "chart/ci/api-versions.txt:1" in result.stderr
 
 
+def test_a_declaration_that_is_not_utf8_is_refused_without_a_traceback(tmp_path):
+    root = repository(tmp_path, "")
+    (root / "chart" / "ci" / "api-versions.txt").write_bytes(b"\xff\xfe\n")
+    result, calls = run(root)
+    assert result.returncode == 1
+    assert calls == []
+    assert "Traceback" not in result.stderr
+    assert "chart/ci/api-versions.txt" in result.stderr
+
+
 def test_the_hook_is_published_as_this_script():
     """The manifest entry is what consumers run; the script is only reachable
     through it. `language: script` runs the file directly, so it needs the
