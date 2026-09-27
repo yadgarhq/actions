@@ -37,12 +37,13 @@ WHAT THIS SUITE THEREFORE DOES NOT PROVE, in the gate's own idiom: that a real
 Go-templated chart emits the documents the stub emits. It proves what the gate
 concludes FROM a set of rendered documents, and that the values it hands the
 second render are the ones that turn a chart's optional parts off. The stub is
-values-driven for exactly that reason — `flip_enabled`'s output decides what
+values-driven for exactly that reason — `flip_toggles`'s output decides what
 renders, so the seam is under test rather than mocked past.
 
 Run: python3 -m pytest scripts/tests/ -q
 """
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -57,7 +58,7 @@ REPO = Path(__file__).resolve().parents[2]
 #   `_render`       the documents this chart emits. An entry carrying `when:
 #                   a.dotted.path` renders only while that path is truthy, which
 #                   is how a real chart guards a resource behind an `enabled`
-#                   key — and is what makes `flip_enabled` decide the second
+#                   key — and is what makes `flip_toggles` decide the second
 #                   render rather than the stub.
 #   `@IMAGE@`       substituted the way every real chart in this estate writes
 #                   its image reference: `repository@digest` WHEN A DIGEST IS
@@ -66,8 +67,17 @@ REPO = Path(__file__).resolve().parents[2]
 #   `_fail`         render fails outright.
 #   `_fail_unless`  render fails while the named path is falsy, which is the
 #                   chart that cannot be turned off without breaking.
+#   `_require_api`  a list of API versions; the render fails unless each one
+#                   arrived as `--api-versions`, the way the estate's
+#                   `require-api` render checks refuse an offline render of a
+#                   kind the target has not declared (ADR-0806).
+#   `STUB_LOG`      when set in the environment, every argv is appended to that
+#                   file as one JSON line, so a test can assert exactly what the
+#                   gate handed helm.
 STUB_HELM = '''
 """A stand-in for `helm template`. See test_d80_portability.py for the contract."""
+import json
+import os
 import sys
 
 import yaml
@@ -92,15 +102,21 @@ def get(values, path):
 
 
 argv = sys.argv[1:]
+if os.environ.get("STUB_LOG"):
+    with open(os.environ["STUB_LOG"], "a") as log:
+        log.write(json.dumps(argv) + "\\n")
 if not argv or argv[0] != "template":
     sys.stderr.write("stub helm: only `helm template` is modelled\\n")
     sys.exit(2)
 
-positional, overrides, rest = [], [], argv[1:]
+positional, overrides, api_versions, rest = [], [], [], argv[1:]
 index = 0
 while index < len(rest):
     if rest[index] in ("-f", "--values"):
         overrides.append(rest[index + 1])
+        index += 2
+    elif rest[index] == "--api-versions":
+        api_versions.append(rest[index + 1])
         index += 2
     else:
         positional.append(rest[index])
@@ -118,6 +134,10 @@ for path in overrides:
 if values.get("_fail"):
     sys.stderr.write("stub helm: `_fail` is set in the values\\n")
     sys.exit(1)
+for needed in values.get("_require_api") or []:
+    if needed not in api_versions:
+        sys.stderr.write("stub helm: this render needs the API %s\\n" % needed)
+        sys.exit(1)
 guard = values.get("_fail_unless")
 if guard and not get(values, guard):
     sys.stderr.write("stub helm: this chart does not render while `%s` is false\\n" % guard)
@@ -183,11 +203,13 @@ def tree(tmp_path, files):
     return root
 
 
-def run(root, repo="yadgarhq/iam", summary=None):
+def run(root, repo="yadgarhq/iam", summary=None, log=None):
     environment = {
         "D80_REPO": repo,
         "PATH": str(root.parent / "stub-bin") + ":/usr/bin:/bin",
     }
+    if log:
+        environment["STUB_LOG"] = str(log)
     if summary:
         environment["GITHUB_STEP_SUMMARY"] = str(summary)
     return subprocess.run(
@@ -257,13 +279,13 @@ def test_a_crd_no_value_can_turn_off_is_refused(tmp_path):
     # It names the resource, the group and what to do about it.
     assert "ScaledObject/worker" in result.stdout
     assert "keda.sh" in result.stdout
-    assert "every `enabled` key false" in result.stdout
+    assert "every `enabled` and `create` key false" in result.stdout
 
 
 def test_the_same_resource_behind_an_enabled_key_passes(tmp_path):
-    """THE PAIR, and the seam it holds down is `flip_enabled`.
+    """THE PAIR, and the seam it holds down is `flip_toggles`.
 
-    Identical to the test above but for the guard. If `flip_enabled` ever stopped
+    Identical to the test above but for the guard. If `flip_toggles` ever stopped
     flipping — or stopped reaching a nested key — the second render would keep
     the ScaledObject and THIS test goes red, not the one above it.
     """
@@ -390,6 +412,161 @@ def test_a_chart_that_cannot_render_with_everything_off_is_refused(tmp_path):
     result = run(root)
     assert result.returncode == 1, result.stdout
     assert "cannot switch its optional parts off" in result.stdout
+
+
+# ------------------------------- `create` toggles are switched off too (ledger 1059)
+
+
+def test_a_crd_behind_a_create_key_passes(tmp_path):
+    """LEDGER 1059, ADR-0806 (2). The estate's `-db` charts and `platform` guard
+    their operator-backed resources behind keys named `create`, not `enabled`.
+    Before this, the all-off render left every one of them on, so the gate
+    proved nothing about the toggle that carries the whole platform layer."""
+    root = tree(
+        tmp_path,
+        {
+            "chart/values.yaml": "database:\n  create: true\n_render:\n"
+            + DEPLOYMENT
+            + container()
+            + guarded(SCALED_OBJECT, "database.create")
+        },
+    )
+    result = run(root)
+    assert result.returncode == 0, result.stdout
+    assert "`database.create`" in result.stdout
+    assert "**Yes.** The all-off render contains only built-in" in result.stdout
+
+
+def test_a_create_key_left_true_by_the_all_off_render_would_be_refused(tmp_path):
+    """THE RED CASE for the pair above, and the reason the flip is bool-only.
+
+    `create: "true"` is a STRING, which the flip does not touch — the same rule
+    `enabled` has always had, and the one ADR-0797 validates in the charts with
+    `kindIs "bool"`. So the resource survives the all-off render and the gate
+    must refuse it, naming both toggle words."""
+    root = tree(
+        tmp_path,
+        {
+            "chart/values.yaml": 'database:\n  create: "true"\n_render:\n'
+            + DEPLOYMENT
+            + container()
+            + guarded(SCALED_OBJECT, "database.create")
+        },
+    )
+    result = run(root)
+    assert result.returncode == 1, result.stdout
+    assert "ScaledObject/worker" in result.stdout
+    assert "every `enabled` and `create` key false" in result.stdout
+    flipped = [l for l in result.stdout.splitlines() if l.startswith("Keys this render")]
+    assert "`database.create`" not in "".join(flipped)
+
+
+def test_both_toggle_words_are_flipped_at_any_depth(tmp_path):
+    root = tree(
+        tmp_path,
+        {
+            "chart/values.yaml": "platform:\n  enabled: true\n"
+            "  nats:\n    create: true\n  bootstrap:\n    iamKeys:\n      create: true\n"
+            "_render:\n" + DEPLOYMENT + container()
+        },
+    )
+    result = run(root)
+    assert result.returncode == 0, result.stdout
+    for key in ("platform.enabled", "platform.nats.create", "platform.bootstrap.iamKeys.create"):
+        assert f"`{key}`" in result.stdout
+
+
+# --------------------- declared operator API versions reach every render (ADR-0806)
+
+DECLARATION = "chart/ci/api-versions.txt"
+
+
+def test_a_declared_api_version_reaches_every_render(tmp_path):
+    """ADR-0806 (1). The estate's module charts refuse, at render time, a kind
+    the target has not declared; offline, only `--api-versions` declares it. A
+    chart whose default render needs KEDA declares that once, and all three of
+    this gate's renders must carry it — the stub refuses any render that does
+    not, so a pass here means defaults, all-off and release-shaped all got it."""
+    log = tmp_path / "helm.log"
+    root = tree(
+        tmp_path,
+        {
+            "chart/values.yaml": "_require_api: [keda.sh/v1alpha1]\n_render:\n"
+            + DEPLOYMENT
+            + container(),
+            DECLARATION: "# KEDA, for autoscaling.enabled\nkeda.sh/v1alpha1\n",
+        },
+    )
+    result = run(root, log=log)
+    assert result.returncode == 0, result.stdout
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert len(calls) == 3
+    for call in calls:
+        assert call[:5] == [
+            "template",
+            "d80-render",
+            "chart",
+            "--api-versions",
+            "keda.sh/v1alpha1",
+        ]
+    # The declaration is named on the pass, so a reader can see what the
+    # renders were told the cluster has.
+    assert "`keda.sh/v1alpha1`" in result.stdout
+
+
+def test_the_same_chart_without_the_declaration_is_refused(tmp_path):
+    """THE RED CASE for the test above: identical but for the file."""
+    root = tree(
+        tmp_path,
+        {
+            "chart/values.yaml": "_require_api: [keda.sh/v1alpha1]\n_render:\n"
+            + DEPLOYMENT
+            + container()
+        },
+    )
+    result = run(root)
+    assert result.returncode == 1, result.stdout
+    assert "failed on the default values" in result.stdout
+    assert "keda.sh/v1alpha1" in result.stdout
+
+
+def test_a_version_the_declaration_leaves_out_is_refused(tmp_path):
+    root = tree(
+        tmp_path,
+        {
+            "chart/values.yaml": "_require_api: [keda.sh/v1alpha1, cert-manager.io/v1]\n"
+            "_render:\n" + DEPLOYMENT + container(),
+            DECLARATION: "cert-manager.io/v1\n",
+        },
+    )
+    result = run(root)
+    assert result.returncode == 1, result.stdout
+    assert "keda.sh/v1alpha1" in result.stdout
+
+
+def test_without_a_declaration_helm_gets_the_argv_it_always_got(tmp_path):
+    """A repository that declares nothing sees no difference at all (ADR-0806)."""
+    log = tmp_path / "helm.log"
+    root = tree(tmp_path, {"chart/values.yaml": "_render:\n" + DEPLOYMENT + container()})
+    result = run(root, log=log)
+    assert result.returncode == 0, result.stdout
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert calls[0] == ["template", "d80-render", "chart"]
+    assert [c[:4] for c in calls[1:]] == [["template", "d80-render", "chart", "-f"]] * 2
+    assert all(len(c) == 5 for c in calls[1:])
+
+
+def test_a_malformed_declaration_is_refused_by_file_and_line(tmp_path):
+    root = tree(
+        tmp_path,
+        {
+            "chart/values.yaml": "_render:\n" + DEPLOYMENT + container(),
+            DECLARATION: "keda.sh/v1alpha1 cert-manager.io/v1\n",
+        },
+    )
+    result = run(root)
+    assert result.returncode == 1, result.stdout
+    assert "chart/ci/api-versions.txt:1" in result.stdout
 
 
 # ----------------------------------------------- the release-shaped render (D65)

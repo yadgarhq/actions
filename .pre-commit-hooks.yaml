@@ -230,10 +230,20 @@
 # same run now exits 1. `[INFO]` findings are NOT promoted, which is why the
 # estate's seven charts stay green — every one of them reports
 # `[INFO] icon is recommended` and nothing above it.
+#
+# A SCRIPT RATHER THAN `bash -c`, since ADR-0806. The render passes each operator
+# API version the chart declares in `chart/ci/api-versions.txt` as
+# `--api-versions`, because the estate's own render checks refuse, offline, a kind
+# the target has not declared. A chart without that file runs exactly the two
+# commands the `bash -c` entry ran; `hooks/helm_lint.py` says why `helm lint`
+# itself needs no flag. `language: script`, not python, for the reason the
+# `observe-coverage` entry below gives: the script is stdlib-only and carries a
+# shebang and the executable bit. It needs `python3` on PATH, as every other
+# script hook here already does.
 - id: helm-lint
   name: helm lint and render
-  language: system
-  entry: bash -c 'helm lint --strict chart && helm template ci-render chart > /dev/null'
+  language: script
+  entry: hooks/helm_lint.py
   pass_filenames: false
   files: ^chart/
 

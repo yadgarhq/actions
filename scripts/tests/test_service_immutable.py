@@ -846,3 +846,122 @@ def test_a_dependency_declared_at_base_is_resolved(repo):
     result = run(root, base)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Compared 2 immutable field(s) across 1 Service(s)" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# ADR-0806: each side renders with the operator API versions IT declares
+# ---------------------------------------------------------------------------
+
+# A render check shaped like the estate's `require-api`: it refuses, at render
+# time, unless the target declares the API. Offline, only `--api-versions` does.
+REQUIRES_KEDA = (
+    '{{- if not (.Capabilities.APIVersions.Has "keda.sh/v1alpha1") }}'
+    '{{ fail "this render needs the API keda.sh/v1alpha1" }}{{- end }}\n'
+)
+DECLARES_KEDA = "# KEDA, for autoscaling.enabled\nkeda.sh/v1alpha1\n"
+
+
+def test_a_chart_that_declares_what_its_render_needs_is_compared(repo):
+    root, _ = repo
+    write(
+        root,
+        {
+            "chart/templates/require.yaml": REQUIRES_KEDA,
+            "chart/ci/api-versions.txt": DECLARES_KEDA,
+        },
+    )
+    base = commit(root, "the render needs KEDA, and says so")
+    write(root, {"chart/templates/service.yaml": service(headless=True, port=50052)})
+    commit(root, "move the port")
+
+    result = run(root, base)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Compared 2 immutable field(s) across 1 Service(s)" in result.stdout
+
+
+def test_the_same_chart_without_the_declaration_is_refused(repo):
+    """THE RED CASE for the test above: identical but for the file."""
+    root, _ = repo
+    write(root, {"chart/templates/require.yaml": REQUIRES_KEDA})
+    base = commit(root, "the render needs KEDA, and does not say so")
+
+    result = run(root, base)
+    assert result.returncode == 1, result.stdout
+    assert "failed on the chart in this working tree" in result.stdout
+    assert "keda.sh/v1alpha1" in result.stdout
+
+
+def test_the_base_renders_with_the_declaration_it_had_then(repo):
+    """The base chart comes out of `git archive` with its own `ci/`, and it is
+    rendered with THAT declaration, not this working tree's. Here the branch
+    drops both the check and the declaration; reading the working tree's file
+    for the base would render the base with no flags and refuse it."""
+    root, _ = repo
+    write(
+        root,
+        {
+            "chart/templates/require.yaml": REQUIRES_KEDA,
+            "chart/ci/api-versions.txt": DECLARES_KEDA,
+        },
+    )
+    base = commit(root, "the render needs KEDA, and says so")
+    write(
+        root, {"chart/templates/require.yaml": None, "chart/ci/api-versions.txt": None}
+    )
+    commit(root, "the render no longer needs KEDA")
+
+    result = run(root, base)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Compared 2 immutable field(s) across 1 Service(s)" in result.stdout
+
+
+def test_a_base_whose_own_declaration_was_missing_is_refused(repo):
+    """The other half of the test above. The base needed KEDA and declared
+    nothing; this branch adds the declaration. The base is still rendered as it
+    was, so it is refused -- which proves the base side does not borrow the
+    working tree's file."""
+    root, _ = repo
+    write(root, {"chart/templates/require.yaml": REQUIRES_KEDA})
+    base = commit(root, "the render needs KEDA, and does not say so")
+    write(root, {"chart/ci/api-versions.txt": DECLARES_KEDA})
+    commit(root, "declare it")
+
+    result = run(root, base)
+    assert result.returncode == 1, result.stdout
+    assert f"failed on the chart as of `{base}`" in result.stdout
+    assert "keda.sh/v1alpha1" in result.stdout
+
+
+def test_a_malformed_declaration_is_refused_by_file_and_line(repo):
+    root, base = repo
+    write(root, {"chart/ci/api-versions.txt": "keda.sh/v1alpha1 cert-manager.io/v1\n"})
+    commit(root, "two on one line")
+
+    result = run(root, base)
+    assert result.returncode == 1, result.stdout
+    assert "chart/ci/api-versions.txt:1" in result.stdout
+
+
+def test_without_a_declaration_the_render_argv_is_unchanged(tmp_path):
+    """A repository that declares nothing sees no difference (ADR-0806)."""
+    sys.path.insert(0, str(GATE.parent))
+    import service_immutable
+
+    chart = tmp_path / "chart"
+    chart.mkdir()
+    assert service_immutable.render_command(chart) == [
+        "helm",
+        "template",
+        "immutability-check",
+        str(chart),
+    ]
+    (chart / "ci").mkdir()
+    (chart / "ci" / "api-versions.txt").write_text("keda.sh/v1alpha1\n")
+    assert service_immutable.render_command(chart) == [
+        "helm",
+        "template",
+        "immutability-check",
+        str(chart),
+        "--api-versions",
+        "keda.sh/v1alpha1",
+    ]

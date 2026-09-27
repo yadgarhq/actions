@@ -15,6 +15,10 @@
 import os, re, subprocess, sys, tempfile, pathlib
 import yaml
 
+# ADR-0806. The shared reader of a chart's declared operator API versions, beside
+# this file both here and on the runner: `ci-pr.yaml` stages the two together.
+from api_versions import DeclarationError, api_version_flags
+
 # D80 is an INVARIANT: nothing shipped may depend on the environment it runs
 # inside. This job checks the part of it a machine can check, and SAYS OUT LOUD
 # which part it cannot. A gate that implies more coverage than it has is the
@@ -95,9 +99,13 @@ LIST_PHRASE = {
 }
 
 
-def helm_render(values_file, label):
-    """Render the chart. Returns (docs, error_text)."""
-    cmd = ["helm", "template", "d80-render", "chart"]
+def helm_render(values_file, label, api_flags=()):
+    """Render the chart. Returns (docs, error_text).
+
+    `api_flags` is the chart's declared `--api-versions` (ADR-0806), empty when
+    it declares none -- so the argv is the one this gate always ran.
+    """
+    cmd = ["helm", "template", "d80-render", "chart", *api_flags]
     if values_file:
         cmd += ["-f", values_file]
     r = subprocess.run(cmd, capture_output=True, text=True)
@@ -122,19 +130,33 @@ def crd_docs(docs):
     return found
 
 
-def flip_enabled(node, path, flipped):
-    """Set every key named `enabled`, at any depth, to false."""
+# THE TWO WORDS THIS ESTATE SWITCHES AN OPTIONAL PART OFF WITH. `enabled` is the
+# module charts' word; `create` is the word `platform` and the `-db` charts use
+# for everything operator-backed (`database.create`, `platform.nats.create`,
+# `platform.bootstrap.iamKeys.create`). Flipping only `enabled` left the whole
+# platform layer on in the all-off render, so the property below was proved for
+# every chart except the ones it mattered most for (ledger 1059, ADR-0806).
+TOGGLES = ("enabled", "create")
+
+
+def flip_toggles(node, path, flipped):
+    """Set every BOOLEAN key named in `TOGGLES`, at any depth, to false.
+
+    A non-boolean value is left alone, as it always was for `enabled`: a
+    `create: "true"` string is a defect for the chart's own `kindIs "bool"`
+    validation (ADR-0797) to refuse, not a value to guess at here.
+    """
     if isinstance(node, dict):
         for k, v in node.items():
             p = f"{path}.{k}" if path else k
-            if k == "enabled" and isinstance(v, bool):
+            if k in TOGGLES and isinstance(v, bool):
                 node[k] = False
                 flipped.append(p)
             else:
-                flip_enabled(v, p, flipped)
+                flip_toggles(v, p, flipped)
     elif isinstance(node, list):
         for i, v in enumerate(node):
-            flip_enabled(v, f"{path}[{i}]", flipped)
+            flip_toggles(v, f"{path}[{i}]", flipped)
 
 
 # ------------------------------------------------------------- chart section
@@ -170,11 +192,34 @@ if not have_chart:
     w("No `chart/` in this repository, so the chart checks do not apply.")
     w()
 
+api_flags = []
 if have_chart:
+    try:
+        api_flags = api_version_flags(pathlib.Path("chart"))
+    except DeclarationError as error:
+        problems.append(
+            f"the chart checks did not run, because the declaration of operator "
+            f"API versions cannot be read: {error}"
+        )
+        have_chart = False
+
+if have_chart:
+    # ADR-0806: named on every run that has a declaration, pass or fail, so a
+    # reader can see what the renders below were told the cluster has.
+    declared = api_flags[1::2]
+    if declared:
+        w(
+            "Every render below passes the operator API versions this chart "
+            "declares in `chart/ci/api-versions.txt`: "
+            + ", ".join(f"`{v}`" for v in declared)
+            + "."
+        )
+        w()
+
     # BOTH RENDERS FIRST, then the report. The note about a product defaulting
     # on is only true of a resource that a value can in fact turn off, so it
     # cannot be written before the second render has been read.
-    default_docs, err_default = helm_render(None, "defaults")
+    default_docs, err_default = helm_render(None, "defaults", api_flags)
     if err_default:
         problems.append(
             f"`helm template chart` failed on the default values: {err_default}"
@@ -193,13 +238,13 @@ if have_chart:
     # adopter actually needs.
     off = yaml.safe_load(pathlib.Path("chart/values.yaml").read_text()) or {}
     flipped = []
-    flip_enabled(off, "", flipped)
+    flip_toggles(off, "", flipped)
 
     with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as fh:
         yaml.safe_dump(off, fh)
         off_path = fh.name
 
-    off_docs, err = helm_render(off_path, "all-off")
+    off_docs, err = helm_render(off_path, "all-off", api_flags)
     survivors = set() if err else {c[0] + "|" + c[3] for c in crd_docs(off_docs)}
 
     # ---- 1. what the DEFAULTS ask an adopter for -------------------------
@@ -233,20 +278,24 @@ if have_chart:
     w("### Can an adopter with a bare cluster turn all of it off?")
     w()
     w(
-        "The gate renders the chart a second time with **every values key named "
-        "`enabled` set to false**, and requires that render to contain no "
+        "The gate renders the chart a second time with **every boolean values key "
+        "named `enabled` or `create` set to false**, and requires that render to contain no "
         "resource outside the built-in Kubernetes API groups."
     )
     w()
     if flipped:
         w("Keys this render set to `false`: " + ", ".join(f"`{k}`" for k in flipped) + ".")
     else:
-        w("This chart declares no `enabled` key, so the second render equals the first.")
+        w(
+            "This chart declares no `enabled` or `create` key, so the second "
+            "render equals the first."
+        )
     w()
 
     if err:
         problems.append(
-            "the chart does not render with every `enabled` key set to false, so "
+            "the chart does not render with every `enabled` and `create` key set "
+            "to false, so "
             f"an adopter cannot switch its optional parts off: {err}"
         )
     else:
@@ -255,9 +304,10 @@ if have_chart:
             for av, group, kind, name in left:
                 problems.append(
                     f"`{kind}/{name}` (`{av}`) still renders with every `enabled` "
-                    f"key false. It needs a CRD from `{group}`, so this chart "
-                    f"cannot install on a cluster that does not have it. Guard it "
-                    f"behind a values key named `enabled`."
+                    f"and `create` key false. It needs a CRD from `{group}`, so "
+                    f"this chart cannot install on a cluster that does not have "
+                    f"it. Guard it behind a boolean values key named `enabled` or "
+                    f"`create`."
                 )
             w("**No.** " + str(len(left)) + " resource(s) survived — listed as errors below.")
         else:
@@ -279,7 +329,7 @@ if have_chart:
         yaml.safe_dump(rel, fh)
         rel_path = fh.name
 
-    rel_docs, err = helm_render(rel_path, "release-shaped")
+    rel_docs, err = helm_render(rel_path, "release-shaped", api_flags)
     w("### The release-shaped render")
     w()
     w(
@@ -474,7 +524,7 @@ w(
 )
 w()
 w(
-    "Also unchecked: whether an `enabled` key an adopter flips leaves the chart "
+    "Also unchecked: whether an `enabled` or `create` key an adopter flips leaves the chart "
     "_useful_, and any dependency on the environment expressed in a way no "
     "pattern above names."
 )

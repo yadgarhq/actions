@@ -143,8 +143,8 @@ rule nobody wrote. What an adopter needs is a chart that **installs on a bare
 cluster**, not a chart stripped of opinion.
 
 So the job renders the chart **twice**: once at its defaults, once with every
-values key named `enabled` set to `false`. The second render must contain nothing
-outside the built-in Kubernetes API groups. That is a real test with a real
+boolean values key named `enabled` or `create` set to `false`. The second render
+must contain nothing outside the built-in Kubernetes API groups. That is a real test with a real
 failure mode, rather than a substring search that passes vacuously the moment
 somebody uses a name it was never told about — this project already has two of
 those on record.
@@ -182,6 +182,26 @@ gate that implies more than it checks is worse than no gate.
 The cloud-provider and ingress-implementation checks are **denylists** and the
 job's output says so. They are tripwires on the first introduction of a known
 name, never a proof of portability.
+
+### A chart declares the operator API versions its default render needs
+
+ADR-0806. The estate's charts refuse, at render time, a kind the target cluster
+does not have, and offline only `--api-versions` says it does. A chart whose
+**defaults** turn on an operator-backed kind lists those API versions in
+`chart/ci/api-versions.txt`, one per line, `#` for comments:
+
+```text
+# the operators the default render turns on
+cert-manager.io/v1
+keda.sh/v1alpha1
+```
+
+Every shared gate that renders the chart offline reads that one file through
+`scripts/api_versions.py` and passes each entry as `--api-versions`: the
+`helm-lint` hook, this `portability` job, and the `service_immutable` job (whose
+base side reads the file as it was at the base). A chart with no file renders
+exactly as before. A line that is not one API version is refused by file and
+line.
 
 ### The gate is a checked-in script, and that costs a second checkout
 
