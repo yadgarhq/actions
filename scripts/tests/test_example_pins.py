@@ -36,6 +36,7 @@ import yaml
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 import example_pins  # noqa: E402
+import example_published  # noqa: E402
 import next_version  # noqa: E402
 import pr_body  # noqa: E402
 
@@ -379,6 +380,7 @@ class Repo:
         self.move = None
         self.patch_error = None
         self.patches = []
+        self.remote_tags = ["v0.3.8"]
 
     @staticmethod
     def body(args):
@@ -389,6 +391,8 @@ class Repo:
         self.calls.append(list(args))
         path = next(a for a in args if a.startswith("repos/"))
         method = args[args.index("-X") + 1] if "-X" in args else "GET"
+        if "git/matching-refs/tags/v" in path:
+            return Done(0, "".join(f"refs/tags/{t}\n" for t in self.remote_tags), "")
         if path.endswith("/commits/main"):
             return Done(0, self.main + "\n", "")
         if "/git/commits/" in path and method == "GET":
@@ -496,7 +500,7 @@ def test_main_without_examples_tags_the_commit_it_was_handed(tmp_path):
     rc, out = run_main(tmp_path, repo, {"src/main.rs": "fn main() {}\n"})
     assert rc == 0
     assert "target=sha-0\n" in out
-    assert repo.calls == [], "a repository without examples must not reach the API"
+    assert repo.made == [] and repo.patches == [], "nothing is written without examples"
 
 
 def test_main_with_examples_already_pinned_makes_no_commit(tmp_path):
@@ -505,7 +509,83 @@ def test_main_with_examples_already_pinned_makes_no_commit(tmp_path):
     rc, out = run_main(tmp_path, repo, {"chart/Chart.yaml": CHART, **stamped})
     assert rc == 0
     assert "target=sha-0\n" in out
-    assert repo.calls == []
+    assert repo.made == [] and repo.patches == []
+
+
+CONFIG = pathlib.Path(__file__).resolve().parent / "fixtures" / "config"
+
+
+def config_files():
+    return {
+        path: (CONFIG / path).read_text(encoding="utf-8")
+        for path in ("chart/Chart.yaml", "example/application.yaml")
+    }
+
+
+def test_config_has_no_dependencies_and_no_platform_example():
+    """The fixture is `yadgarhq/config`'s real files, and this is why they matter."""
+    files = config_files()
+    assert "dependencies:" not in files["chart/Chart.yaml"]
+    assert "chart: config" in files["example/application.yaml"]
+
+
+def test_a_module_example_with_a_dependency_less_chart_is_left_alone(tmp_path):
+    """`yadgarhq/config`: a `chart: config` example and no `dependencies:` at all.
+
+    Resolving the platform pin there refused, and the refusal reddened every
+    `version` run in `config` — no config release could be tagged.
+    """
+    files = config_files()
+    assert example_pins.stamp(
+        {"example/application.yaml": files["example/application.yaml"]},
+        "0.2.1", files["chart/Chart.yaml"],
+    ) == {}
+    repo = Repo()
+    repo.remote_tags = ["v0.1.9", "v0.2.0"]
+    rc, out = run_main(tmp_path, repo, files, version="0.2.1")
+    assert rc == 0
+    assert out == "target=sha-0\n"
+    assert repo.made == [] and repo.patches == []
+
+
+def test_a_real_platform_site_without_a_dependency_still_refuses():
+    chart = "apiVersion: v2\nname: yadgar\nversion: 0.1.0\n"
+    with pytest.raises(example_pins.Refusal):
+        example_pins.stamp(
+            {"example/operators-application.yaml": OPERATORS}, "0.3.9", chart
+        )
+
+
+def test_a_version_below_a_tag_cut_since_checkout_refuses(tmp_path):
+    """The tags on disk are from checkout; a parent tag cut since is not on them.
+
+    A version at or below the greatest remote tag would be a non-monotonic tag,
+    and its range would count Changelog the newer tag already released.
+    """
+    repo = Repo(files={"chart/Chart.yaml": CHART, **FILES})
+    repo.remote_tags = ["v0.3.8", "v0.3.10"]
+    rc, out = run_main(tmp_path, repo, {"chart/Chart.yaml": CHART, **FILES})
+    assert rc == 1
+    assert out == "target=\n"
+    assert repo.made == [] and repo.patches == []
+
+
+def test_a_version_equal_to_a_remote_tag_is_the_lost_race_and_stays_green(tmp_path):
+    """Another run already cut this number; the tag step's own arm says so."""
+    repo = Repo(files={"chart/Chart.yaml": CHART, **FILES})
+    repo.remote_tags = ["v0.3.8", "v0.3.9"]
+    rc, out = run_main(tmp_path, repo, {"chart/Chart.yaml": CHART, **FILES})
+    assert rc == 0
+    assert out == "target=\n"
+    assert repo.made == [] and repo.patches == []
+
+
+def test_the_freshness_check_also_runs_without_examples(tmp_path):
+    repo = Repo()
+    repo.remote_tags = ["v0.3.10"]
+    rc, out = run_main(tmp_path, repo, {"src/main.rs": "fn main() {}\n"})
+    assert rc == 1
+    assert out == "target=\n"
 
 
 def test_main_commits_the_stamp_and_hands_its_sha_to_the_tag(tmp_path):
@@ -647,7 +727,7 @@ def run_published(tmp_path, files, fetch, capsys):
     cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
-        rc = example_pins.published(fetch=fetch, sleep=lambda _s: None)
+        rc = example_published.main(fetch=fetch, sleep=lambda _s: None)
     finally:
         os.chdir(cwd)
         for key, value in old.items():
@@ -692,5 +772,5 @@ def test_the_release_checks_the_example_pins_after_the_chart_is_published():
     assert "always()" in job["if"]
     assert "needs.chart.result == 'success'" in job["if"]
     runs = [s for s in job["steps"] if "run" in s]
-    assert any("example_pins.py\" published" in s["run"] for s in runs)
+    assert any("example_published.py\"" in s["run"] for s in runs)
     assert job["timeout-minutes"] <= 10

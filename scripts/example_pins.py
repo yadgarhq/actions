@@ -40,13 +40,16 @@ names neither chart. Every repository in the estate runs the `version` job, and
 only one of them has these examples.
 
 Usage (the `version` job): example_pins.py, with REPO, SHA and VERSION in the
-environment and the repository checked out at SHA. It writes `target=<sha>` to
+environment and the repository checked out at SHA. It first lists the tags the
+repository carries NOW: a version at or below the greatest of them is not
+stamped or tagged (equal is a lost race and green; below is red, and a re-run
+re-derives). Then it writes `target=<sha>` to
 `GITHUB_OUTPUT`: SHA itself when nothing needed stamping, the stamp commit when
 something did, and EMPTY when GitHub refused the fast-forward because `main`
 moved underneath it. The merge's Changelog is then counted by the next tag cut
 on `main`, whichever cutter cuts it: a later run counts `last..HEAD`, and
 `parent_bump.py` counts the same range through `parent_pending.py`. Every other
-write failure is red. `published` is the post-release half: see its docstring.
+write failure is red. `example_published.py` is the post-release half.
 
 Tests: `python3 -m pytest scripts/tests/ -q`.
 """
@@ -60,7 +63,7 @@ import sys
 import tempfile
 
 from parent_pin import VALUE, Refusal, pins, triple, unquote
-from repin import output, summary
+from repin import greatest, output, summary
 
 CHART_YAML = "chart/Chart.yaml"
 EXAMPLES = (
@@ -234,7 +237,12 @@ def stamp(files, version, chart_text):
             f"{version!r} is not a plain `MAJOR.MINOR.PATCH` version, and an "
             "Argo CD `targetRevision` for an OCI chart must be one."
         )
-    platform = pins(chart_text).get(PLATFORM) if chart_text is not None else None
+    # THE PLATFORM PIN IS READ ONLY WHEN SOMETHING PINS `platform`. A module's own
+    # example beside a chart with no `dependencies:` — `yadgarhq/config` — must
+    # not reach `parent_pin.pins`, which refuses such a chart; a real `platform`
+    # site with no dependency still refuses, in `rewrite`.
+    wanted = any(sites(text.splitlines(keepends=True), (PLATFORM,)) for text in present.values())
+    platform = pins(chart_text).get(PLATFORM) if wanted and chart_text is not None else None
     targets = {PARENT: version, PLATFORM: platform}
     changed = {}
     for path, text in present.items():
@@ -393,6 +401,20 @@ def settle(gh, base, version, attempts):
     )
 
 
+def remote_greatest(gh):
+    """The semver-greatest `v*` tag the repository carries NOW, as `vX.Y.Z`."""
+    done = gh.call(
+        "api", "--paginate", gh.repo("git", "matching-refs", "tags/v"), "--jq", ".[].ref"
+    )
+    if done.returncode != 0:
+        raise Refusal(f"the tags of `{gh.full_name}` could not be listed: {complaint(done)}.")
+    newest = greatest(
+        [line.strip()[len("refs/tags/"):] for line in done.stdout.splitlines()
+         if line.strip().startswith("refs/tags/")]
+    )
+    return newest or "v0.0.0"
+
+
 def on_disk(path):
     try:
         with open(path, encoding="utf-8") as fh:
@@ -409,12 +431,28 @@ def main(run=None):
         print(f"::error::example_pins.py needs REPO, SHA and VERSION; got {repo!r}, {sha!r}, {version!r}.")
         return 2
 
+    gh = Api(repo, run=run)
+    newest = remote_greatest(gh)
+    if triple(newest[1:]) >= triple(version):
+        output(target="")
+        if triple(newest[1:]) == triple(version):
+            # THE LOST RACE, and it stays green: another run cut this number
+            # first, which the `tag it` step's `Reference already exists` arm
+            # has always reported as a notice. Nothing is stamped for it.
+            print(f"::notice::v{version} already exists; another run cut it first.")
+            return 0
+        # A TAG CUT SINCE CHECKOUT. The derivation read the tags `actions/checkout`
+        # fetched; `parent_bump.py` may have cut a newer one since. Tagging below
+        # it would be a non-monotonic tag whose range counts Changelog the newer
+        # tag already released. A re-run fetches the tags again and re-derives.
+        print(f"::error::v{version} was derived from the tags fetched at checkout, but {newest} exists now. Nothing was stamped or tagged. Re-run this job: it re-derives from the current tags.")
+        return 1
+
     changes = stamp({path: on_disk(path) for path in EXAMPLES}, version, on_disk(CHART_YAML))
     if not changes:
         output(target=sha)
         return 0
 
-    gh = Api(repo, run=run)
     made, error = commit(gh, sha, changes, message(version))
     if made is not None:
         output(target=made)
@@ -436,47 +474,8 @@ def main(run=None):
     return 1
 
 
-def published(fetch=None, sleep=None):
-    """After the release publishes: every pin the tagged examples carry is pullable.
-
-    THE ORDERING THIS CLOSES. The commit tagged `vN` pins `vN`, which does not
-    exist until the tag's own `chart` job pushes it, so a check at push time can
-    only skip a pin newer than anything published. This is the check that runs
-    once it CAN pass, asking the registry the way an adopter's Argo CD does —
-    anonymously, through `chart_publicly_pullable`'s own request pair.
-    """
-    import chart_publicly_pullable as registry
-
-    pins = pinned({path: on_disk(path) for path in EXAMPLES})
-    if not pins:
-        print("No example Applications pin a parent or platform chart here.")
-        return 0
-    host, owner = os.environ.get("REGISTRY", "").strip(), os.environ.get("OWNER", "").strip()
-    if not host or not owner:
-        print(f"::error::REGISTRY and OWNER are required; got {host!r} and {owner!r}.")
-        return 1
-    bad = []
-    for path, name, version in pins:
-        ok, detail, _ = registry.with_retries(
-            host, f"{owner}/{registry.NAMESPACE}/{name}", version,
-            fetch or registry.fetch_url, sleep or registry.time.sleep,
-        )
-        print(f"- `{path}` pins {name} {version}: {'pullable' if ok else detail}")
-        if not ok:
-            bad.append(f"{path} pins {name} {version} ({detail})")
-    if bad:
-        print(
-            "::error::a released commit's examples pin a chart an adopter cannot "
-            "pull: " + "; ".join(bad)
-        )
-        return 1
-    return 0
-
-
 if __name__ == "__main__":  # pragma: no cover
     try:
-        if sys.argv[1:] == ["published"]:
-            sys.exit(published())
         sys.exit(main())
     except Refusal as refusal:
         print(f"::error::the examples could not be stamped, so nothing was tagged: {refusal}")

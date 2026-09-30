@@ -1,0 +1,14 @@
+apiVersion: v2
+name: config
+description: The configuration a yadgar installation reads at boot, as one ConfigMap per shared document.
+# NOT `library` and not a subchart. It renders objects, so it is an application
+# chart even though it carries no workload — Argo syncs it exactly as it syncs
+# every other chart in this estate, which is the whole of ADR-0570.
+type: application
+version: 0.1.0
+# NO `appVersion`, deliberately. There is no application here to version: the
+# chart's content is the operator's own settings, and the only version that means
+# anything is the git revision Argo has synced.
+home: https://github.com/yadgarhq/config
+sources:
+  - https://github.com/yadgarhq/config

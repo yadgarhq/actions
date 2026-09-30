@@ -1643,6 +1643,12 @@ jobs:
       # on `main` counts this merge's Changelog, whichever job cuts it: a later
       # run's range is `last..HEAD`, and `parent_bump.py` counts the same range
       # through `parent_pending.py`. Any other write failure is red.
+      #
+      # IT ALSO RE-READS THE TAGS, in every repository. The version above was
+      # derived from the tags `actions/checkout` fetched, and `parent_bump.py`
+      # can cut one since. At or below the greatest tag the repository carries
+      # NOW, nothing is stamped or tagged: equal is the lost race (green, as the
+      # `tag it` arm always reported it), below is red and a re-run re-derives.
       - name: stamp the examples with the version
         id: stamp
         if: steps.cred.outputs.configured == 'true' && steps.g.outputs.tagged == 'false' && steps.v.outputs.next != ''

@@ -811,6 +811,8 @@ jobs:
   # named reason — and this is where the skipped question is answered, once it
   # can pass: after the publish, anonymously, the way an adopter's Argo CD asks.
   #
+  # `scripts/example_published.py` holds the check.
+  #
   # `always()` FOR THE REASON `parent` GIVES: `image` is skipped in a chart-only
   # repository, and a skip two hops up drops a job whose `if:` has no status
   # function. In a repository without `example/*.yaml` the script asks the
@@ -846,7 +848,7 @@ jobs:
           else
             dir=.ci-actions/scripts
           fi
-          python3 "$dir/example_pins.py" published
+          python3 "$dir/example_published.py"
 
   # PUBLISHING AN IMAGE DID NOT ROLL A POD, and this job is the whole fix. Every
   # module Deployment renders `image: <repo>:latest` with `imagePullPolicy:
