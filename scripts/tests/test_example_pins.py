@@ -381,6 +381,9 @@ class Repo:
         self.patch_error = None
         self.patches = []
         self.remote_tags = ["v0.3.8"]
+        self.compare_status = "ahead"
+        self.compared = []
+        self.tag_error = None
 
     @staticmethod
     def body(args):
@@ -392,7 +395,12 @@ class Repo:
         path = next(a for a in args if a.startswith("repos/"))
         method = args[args.index("-X") + 1] if "-X" in args else "GET"
         if "git/matching-refs/tags/v" in path:
+            if self.tag_error:
+                return Done(1, "", self.tag_error)
             return Done(0, "".join(f"refs/tags/{t}\n" for t in self.remote_tags), "")
+        if "/compare/" in path:
+            self.compared.append(path.split("/compare/", 1)[1])
+            return Done(0, self.compare_status + "\n", "")
         if path.endswith("/commits/main"):
             return Done(0, self.main + "\n", "")
         if "/git/commits/" in path and method == "GET":
@@ -556,26 +564,43 @@ def test_a_real_platform_site_without_a_dependency_still_refuses():
         )
 
 
-def test_a_version_below_a_tag_cut_since_checkout_refuses(tmp_path):
-    """The tags on disk are from checkout; a parent tag cut since is not on them.
+def test_a_tag_cut_since_checkout_that_contains_this_merge_is_a_green_no_op(tmp_path):
+    """Concurrent merges A and B, or `parent_bump.py` after A's checkout.
 
-    A version at or below the greatest remote tag would be a non-monotonic tag,
-    and its range would count Changelog the newer tag already released.
+    Every tag is cut on `main` by fast-forward only, so a tag cut after this
+    run's checkout descends from `github.sha` and its range already counts this
+    merge. Tagging again would count it twice; red would report a release that
+    was not lost. Green, with a notice, and nothing written.
     """
     repo = Repo(files={"chart/Chart.yaml": CHART, **FILES})
     repo.remote_tags = ["v0.3.8", "v0.3.10"]
+    repo.compare_status = "ahead"
     rc, out = run_main(tmp_path, repo, {"chart/Chart.yaml": CHART, **FILES})
-    assert rc == 1
+    assert rc == 0
     assert out == "target=\n"
     assert repo.made == [] and repo.patches == []
+    assert repo.compared == ["sha-0...v0.3.10"]
 
 
 def test_a_version_equal_to_a_remote_tag_is_the_lost_race_and_stays_green(tmp_path):
     """Another run already cut this number; the tag step's own arm says so."""
     repo = Repo(files={"chart/Chart.yaml": CHART, **FILES})
     repo.remote_tags = ["v0.3.8", "v0.3.9"]
+    repo.compare_status = "identical"
     rc, out = run_main(tmp_path, repo, {"chart/Chart.yaml": CHART, **FILES})
     assert rc == 0
+    assert out == "target=\n"
+    assert repo.made == [] and repo.patches == []
+
+
+@pytest.mark.parametrize("status", ["diverged", "behind"])
+def test_a_newer_tag_that_does_not_contain_this_merge_is_red(tmp_path, status):
+    """Off `main` (diverged), or older than this merge with a number at or above it."""
+    repo = Repo(files={"chart/Chart.yaml": CHART, **FILES})
+    repo.remote_tags = ["v0.3.8", "v0.3.10"]
+    repo.compare_status = status
+    rc, out = run_main(tmp_path, repo, {"chart/Chart.yaml": CHART, **FILES})
+    assert rc == 1
     assert out == "target=\n"
     assert repo.made == [] and repo.patches == []
 
@@ -583,9 +608,38 @@ def test_a_version_equal_to_a_remote_tag_is_the_lost_race_and_stays_green(tmp_pa
 def test_the_freshness_check_also_runs_without_examples(tmp_path):
     repo = Repo()
     repo.remote_tags = ["v0.3.10"]
+    repo.compare_status = "diverged"
     rc, out = run_main(tmp_path, repo, {"src/main.rs": "fn main() {}\n"})
     assert rc == 1
     assert out == "target=\n"
+
+
+def test_a_tag_listing_that_fails_refuses(tmp_path):
+    repo = Repo(files={"chart/Chart.yaml": CHART, **FILES})
+    repo.tag_error = "gh: Server Error (HTTP 502)"
+    with pytest.raises(example_pins.Refusal) as caught:
+        run_main(tmp_path, repo, {"chart/Chart.yaml": CHART, **FILES})
+    assert "could not be listed" in str(caught.value)
+    assert repo.made == [] and repo.patches == []
+
+
+@pytest.mark.parametrize("tags", [[], ["vendor-drop", "v1a"]])
+def test_no_orderable_remote_tag_is_a_baseline_of_zero(tmp_path, tags):
+    """`v0.0.0` rather than a crash: nothing orderable is below every version."""
+    repo = Repo(files={"chart/Chart.yaml": CHART, **FILES})
+    repo.remote_tags = tags
+    rc, out = run_main(tmp_path, repo, {"chart/Chart.yaml": CHART, **FILES})
+    assert rc == 0
+    assert out == f"target={repo.main}\n"
+    assert repo.compared == []
+
+
+def test_a_version_that_is_not_plain_semver_is_refused_before_any_compare(tmp_path):
+    repo = Repo()
+    with pytest.raises(example_pins.Refusal) as caught:
+        run_main(tmp_path, repo, {"src/main.rs": "fn main() {}\n"}, version="0.3.9-rc1")
+    assert "0.3.9-rc1" in str(caught.value)
+    assert repo.calls == []
 
 
 def test_main_commits_the_stamp_and_hands_its_sha_to_the_tag(tmp_path):

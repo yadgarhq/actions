@@ -1647,8 +1647,9 @@ jobs:
       # IT ALSO RE-READS THE TAGS, in every repository. The version above was
       # derived from the tags `actions/checkout` fetched, and `parent_bump.py`
       # can cut one since. At or below the greatest tag the repository carries
-      # NOW, nothing is stamped or tagged: equal is the lost race (green, as the
-      # `tag it` arm always reported it), below is red and a re-run re-derives.
+      # NOW, nothing is stamped or tagged. Green when that tag contains this
+      # merge (fast-forward only, so a tag cut since checkout does, and its range
+      # counts this merge); red only when it does not — a tag off `main`.
       - name: stamp the examples with the version
         id: stamp
         if: steps.cred.outputs.configured == 'true' && steps.g.outputs.tagged == 'false' && steps.v.outputs.next != ''

@@ -42,8 +42,9 @@ only one of them has these examples.
 Usage (the `version` job): example_pins.py, with REPO, SHA and VERSION in the
 environment and the repository checked out at SHA. It first lists the tags the
 repository carries NOW: a version at or below the greatest of them is not
-stamped or tagged (equal is a lost race and green; below is red, and a re-run
-re-derives). Then it writes `target=<sha>` to
+stamped or tagged. That is green when the greatest tag contains SHA — its range
+already counts this merge — and red when it does not. Then it writes
+`target=<sha>` to
 `GITHUB_OUTPUT`: SHA itself when nothing needed stamping, the stamp commit when
 something did, and EMPTY when GitHub refused the fast-forward because `main`
 moved underneath it. The merge's Changelog is then counted by the next tag cut
@@ -415,6 +416,14 @@ def remote_greatest(gh):
     return newest or "v0.0.0"
 
 
+def contains(gh, sha, tag):
+    """`compare/<sha>...<tag>`'s status: `ahead` or `identical` when `tag` contains `sha`."""
+    done = gh.call("api", gh.repo("compare", f"{sha}...{tag}"), "--jq", ".status")
+    if done.returncode != 0:
+        raise Refusal(f"`{tag}` could not be compared with {sha[:7]}: {complaint(done)}.")
+    return done.stdout.strip()
+
+
 def on_disk(path):
     try:
         with open(path, encoding="utf-8") as fh:
@@ -431,21 +440,27 @@ def main(run=None):
         print(f"::error::example_pins.py needs REPO, SHA and VERSION; got {repo!r}, {sha!r}, {version!r}.")
         return 2
 
+    if triple(version) is None:
+        raise Refusal(
+            f"VERSION {version!r} is not a plain `MAJOR.MINOR.PATCH`, so it cannot "
+            "be ordered against the tags this repository carries. Nothing was tagged."
+        )
     gh = Api(repo, run=run)
     newest = remote_greatest(gh)
     if triple(newest[1:]) >= triple(version):
+        # A TAG AT OR ABOVE THIS VERSION EXISTS NOW, cut after `actions/checkout`
+        # fetched the tags this was derived from: a concurrent merge's run, or
+        # `parent_bump.py`. Every tag is cut on `main` by fast-forward only, so it
+        # normally DESCENDS from this merge, and its range already counts this
+        # merge's Changelog — tagging again would count it twice. That is a green
+        # no-op. Only a tag that does NOT contain this merge is red: off `main`,
+        # or older than it while numbered at or above it.
         output(target="")
-        if triple(newest[1:]) == triple(version):
-            # THE LOST RACE, and it stays green: another run cut this number
-            # first, which the `tag it` step's `Reference already exists` arm
-            # has always reported as a notice. Nothing is stamped for it.
-            print(f"::notice::v{version} already exists; another run cut it first.")
+        status = contains(gh, sha, newest)
+        if status in ("ahead", "identical"):
+            print(f"::notice::v{version} not tagged: {newest} was cut since checkout and already contains {sha[:7]}, so its range counts this merge.")
             return 0
-        # A TAG CUT SINCE CHECKOUT. The derivation read the tags `actions/checkout`
-        # fetched; `parent_bump.py` may have cut a newer one since. Tagging below
-        # it would be a non-monotonic tag whose range counts Changelog the newer
-        # tag already released. A re-run fetches the tags again and re-derives.
-        print(f"::error::v{version} was derived from the tags fetched at checkout, but {newest} exists now. Nothing was stamped or tagged. Re-run this job: it re-derives from the current tags.")
+        print(f"::error::v{version} not tagged: {newest} exists at or above it and does not contain {sha[:7]} (compare is `{status}`). A tag that is off `main`, or older than this merge with a number at or above it, needs a reader; nothing was stamped or tagged.")
         return 1
 
     changes = stamp({path: on_disk(path) for path in EXAMPLES}, version, on_disk(CHART_YAML))
