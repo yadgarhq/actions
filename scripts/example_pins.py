@@ -134,8 +134,11 @@ def rewrite(text, targets):
         if name in targets:
             sites.setdefault(name, []).append(index)
 
+    # COMMENTS ARE PROSE, and an example that documents an alternative form in a
+    # commented-out block — `yadgarhq/config`'s does — is not a missed site.
+    code = "".join(line for line in lines if not line.lstrip().startswith("#"))
     for name in targets:
-        mentioned = sum(1 for m in MENTION.finditer(text) if m.group(1) == name)
+        mentioned = sum(1 for m in MENTION.finditer(code) if m.group(1) == name)
         if mentioned != len(sites.get(name, [])):
             raise Refusal(
                 f"this file names `chart: {name}` {mentioned} time(s) and "

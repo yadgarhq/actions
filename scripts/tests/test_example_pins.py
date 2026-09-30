@@ -274,6 +274,24 @@ def test_a_file_that_names_neither_chart_is_left_alone():
     assert example_pins.stamp({"example/application.yaml": other}, "0.3.9", CHART) == {}
 
 
+def test_a_commented_out_site_is_neither_rewritten_nor_refused():
+    """`yadgarhq/config`'s example carries a commented-out multi-source block.
+
+    A comment is prose. Counting it as a site the rewriter missed would refuse
+    every release of a repository whose example documents an alternative form.
+    """
+    text = APPLICATION.replace(
+        "apiVersion:",
+        "#   sources:\n#     - chart: yadgar\n#       targetRevision: 0.1.0\n"
+        "#     - {chart: yadgar, targetRevision: 0.1.0}\napiVersion:",
+        1,
+    )
+    out = example_pins.stamp({"example/application.yaml": text}, "0.3.9", CHART)
+    new = out["example/application.yaml"]
+    assert "#       targetRevision: 0.1.0\n" in new
+    assert source(new)["targetRevision"] == "0.3.9"
+
+
 def test_a_repository_without_examples_is_untouched():
     """Absent files, and no Chart.yaml either: nothing is read and nothing moves."""
     assert example_pins.stamp({path: None for path in FILES}, "0.3.9", None) == {}
