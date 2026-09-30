@@ -1638,9 +1638,11 @@ jobs:
       #
       # `main` ONLY, NEVER A COMMIT OFF IT: `next_version.py` finds its baseline
       # with `git describe`, which cannot see a tag `main` does not contain. So if
-      # `main` moved past this merge first, the target is EMPTY and the tag below
-      # skips with a warning: the next push's run derives over a range that still
-      # holds this merge's Changelog, and tags it there. Deferred, not dropped.
+      # GitHub refuses the fast-forward because `main` moved past this merge, the
+      # target is EMPTY and the tag below skips with a warning. The next tag cut
+      # on `main` counts this merge's Changelog, whichever job cuts it: a later
+      # run's range is `last..HEAD`, and `parent_bump.py` counts the same range
+      # through `parent_pending.py`. Any other write failure is red.
       - name: stamp the examples with the version
         id: stamp
         if: steps.cred.outputs.configured == 'true' && steps.g.outputs.tagged == 'false' && steps.v.outputs.next != ''

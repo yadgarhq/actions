@@ -244,6 +244,44 @@ def test_a_flow_style_site_is_refused_rather_than_skipped():
     assert "yadgar" in str(caught.value)
 
 
+@pytest.mark.parametrize("key", ['"chart"', "'chart'"])
+def test_a_quoted_chart_key_is_refused_rather_than_skipped(key):
+    text = APPLICATION.replace("    chart: yadgar\n", f"    {key}: yadgar\n")
+    with pytest.raises(example_pins.Refusal):
+        example_pins.stamp({"example/application.yaml": text}, "0.3.9", CHART)
+
+
+@pytest.mark.parametrize(
+    "value", ["", '""', "''", "&pin 0.3.5", "*pin", "!!str 0.3.5"]
+)
+def test_a_pin_that_is_empty_or_an_anchor_alias_or_tag_is_refused(value):
+    """Rewriting the token of an alias or a tag would change what it means."""
+    text = APPLICATION.replace("targetRevision: 0.3.5", f"targetRevision: {value}".rstrip())
+    with pytest.raises(example_pins.Refusal):
+        example_pins.stamp({"example/application.yaml": text}, "0.3.9", CHART)
+
+
+def test_a_mention_in_a_trailing_comment_is_prose():
+    text = APPLICATION.replace(
+        "    repoURL: ghcr.io/yadgarhq/charts\n",
+        "    repoURL: ghcr.io/yadgarhq/charts # the registry chart: yadgar lives in\n",
+    )
+    out = example_pins.stamp({"example/application.yaml": text}, "0.3.9", CHART)
+    assert source(out["example/application.yaml"])["targetRevision"] == "0.3.9"
+    assert "# the registry chart: yadgar lives in\n" in out["example/application.yaml"]
+
+
+def test_a_block_scalar_mention_fails_safe_as_a_refusal():
+    """A `chart: yadgar` line inside a block scalar reads as a key. With no pin
+    beside it, that is a refusal — never a rewrite of text inside a string."""
+    text = APPLICATION.replace(
+        "  project: default\n",
+        "  project: default\n  info: |\n    chart: yadgar\n",
+    )
+    with pytest.raises(example_pins.Refusal):
+        example_pins.stamp({"example/application.yaml": text}, "0.3.9", CHART)
+
+
 def test_a_site_with_no_pin_is_refused():
     text = APPLICATION.replace("    targetRevision: 0.3.5\n", "")
     with pytest.raises(example_pins.Refusal):
@@ -501,7 +539,23 @@ def test_main_reddens_when_the_write_fails_and_main_did_not_move(tmp_path):
     repo.patch_error = "gh: Resource not accessible by integration (HTTP 403)"
     rc, out = run_main(tmp_path, repo, {"chart/Chart.yaml": CHART, **FILES})
     assert rc == 1
-    assert "target=" not in out or "target=\n" in out
+    assert out == "target=\n", "a failed stamp must hand the tag step nothing to tag"
+
+
+def test_main_reddens_on_a_refused_write_even_when_main_also_moved(tmp_path):
+    """Only GitHub's non-fast-forward refusal defers. A 403 is a ruleset, not a race."""
+
+    def other(repo):
+        repo.parents["sha-x"] = repo.main
+        repo.trees["sha-x"] = dict(repo.trees[repo.main])
+        repo.main = "sha-x"
+
+    repo = Repo(files={"chart/Chart.yaml": CHART, **FILES})
+    repo.move = other
+    repo.patch_error = "gh: Resource not accessible by integration (HTTP 403)"
+    rc, out = run_main(tmp_path, repo, {"chart/Chart.yaml": CHART, **FILES})
+    assert rc == 1
+    assert out == "target=\n"
 
 
 # ---------------------------------------------------------------------------
@@ -545,3 +599,98 @@ def test_the_script_needs_nothing_beyond_the_standard_library():
         cwd=ROOT / "scripts", capture_output=True, text=True,
     )
     assert done.returncode == 0, done.stderr
+
+
+# ---------------------------------------------------------------------------
+# After the publish: every pin a released commit's examples carry is pullable.
+# ---------------------------------------------------------------------------
+
+CI_RELEASE = ROOT / ".github" / "workflows" / "ci-release.yaml"
+
+
+def test_pinned_reads_every_example_pin():
+    assert sorted(example_pins.pinned(FILES)) == [
+        ("example/application.yaml", "yadgar", "0.3.5"),
+        ("example/kind/application.yaml", "yadgar", "0.3.5"),
+        ("example/operators-application.yaml", "platform", "0.1.18"),
+    ]
+
+
+def test_pinned_refuses_what_stamp_refuses():
+    text = "kind: Application\nspec:\n  source: {chart: yadgar, targetRevision: 0.3.5}\n"
+    with pytest.raises(example_pins.Refusal):
+        example_pins.pinned({"example/application.yaml": text})
+
+
+def registry(missing=()):
+    seen = []
+
+    def fetch(request):
+        seen.append(request.full_url)
+        if "/token" in request.full_url:
+            return 200, b'{"token": "anonymous"}'
+        if any(f"/{name}/manifests/{tag}" in request.full_url for name, tag in missing):
+            return 404, b"{}"
+        return 200, b'{"layers": [{"digest": "sha256:x"}]}'
+
+    return fetch, seen
+
+
+def run_published(tmp_path, files, fetch, capsys):
+    for path, text in files.items():
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    env = {"REGISTRY": "ghcr.io", "OWNER": "yadgarhq"}
+    old = {k: os.environ.get(k) for k in env}
+    os.environ.update(env)
+    cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        rc = example_pins.published(fetch=fetch, sleep=lambda _s: None)
+    finally:
+        os.chdir(cwd)
+        for key, value in old.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    return rc, capsys.readouterr().out
+
+
+def test_every_published_pin_passes(tmp_path, capsys):
+    fetch, seen = registry()
+    rc, _ = run_published(tmp_path, FILES, fetch, capsys)
+    assert rc == 0
+    assert any("/yadgarhq/charts/yadgar/manifests/0.3.5" in u for u in seen)
+    assert any("/yadgarhq/charts/platform/manifests/0.1.18" in u for u in seen)
+
+
+def test_an_unpublished_pin_reddens_and_names_it(tmp_path, capsys):
+    fetch, _ = registry(missing=[("yadgar", "0.3.5")])
+    rc, out = run_published(tmp_path, FILES, fetch, capsys)
+    assert rc == 1
+    assert "::error::" in out
+    assert "yadgar 0.3.5" in out
+
+
+def test_a_repository_without_examples_asks_the_registry_nothing(tmp_path, capsys):
+    fetch, seen = registry()
+    rc, _ = run_published(tmp_path, {"chart/Chart.yaml": CHART}, fetch, capsys)
+    assert rc == 0
+    assert seen == []
+
+
+def release_jobs():
+    return yaml.safe_load(CI_RELEASE.read_text(encoding="utf-8"))["jobs"]
+
+
+def test_the_release_checks_the_example_pins_after_the_chart_is_published():
+    job = release_jobs()["examples"]
+    assert "chart" in job["needs"]
+    # `always()` because `image` is skipped in a chart-only repository, two hops up.
+    assert "always()" in job["if"]
+    assert "needs.chart.result == 'success'" in job["if"]
+    runs = [s for s in job["steps"] if "run" in s]
+    assert any("example_pins.py\" published" in s["run"] for s in runs)
+    assert job["timeout-minutes"] <= 10

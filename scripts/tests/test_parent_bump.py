@@ -53,6 +53,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import ci_verdict  # noqa: E402
 import next_version  # noqa: E402
 import parent_bump  # noqa: E402
+import parent_pin  # noqa: E402
 import pr_body  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -107,12 +108,21 @@ class Api:
     def __init__(self, main=None, tags=None, published=None, examples=None,
                  interfere=None, interfere_ref=None):
         extra = dict(examples or {})
-        self.trees = {"commit-0": {PATH: main if main is not None else chart(), **extra}}
-        self.parents = {"commit-0": None}
-        self.main = "commit-0"
-        self.tagged = {}
+        # THE TAGS ARE ANCESTORS OF `main`, oldest first, the way every cut tag
+        # in the parent is: `commit-0` is the one commit since the newest of them.
+        self.trees, self.parents, self.meta, self.tagged = {}, {}, {}, {}
+        previous = None
         for tag in tags if tags is not None else ["v0.1.0"]:
-            self.publish(tag, published if published is not None else chart(), extra)
+            sha = f"commit-{tag}"
+            self.trees[sha] = {
+                PATH: published if published is not None else chart(), **extra
+            }
+            self.parents[sha], self.meta[sha] = previous, f"ci: {tag}"
+            self.tagged[tag], previous = sha, sha
+        self.trees["commit-0"] = {PATH: main if main is not None else chart(), **extra}
+        self.parents["commit-0"] = previous
+        self.meta["commit-0"] = "ci: pin a module in the parent chart"
+        self.main = "commit-0"
         self.made = 0
         self.objects = 0
         self.object_commit = {}
@@ -125,6 +135,8 @@ class Api:
         self.put_failures = 0
         self.ref_error = None
         self.unreadable = {}
+        self.compare_cap = 250
+        self.patch_hooks = {}
 
     # -- helpers ---------------------------------------------------------------
 
@@ -133,10 +145,9 @@ class Api:
         return list(self.tagged)
 
     def publish(self, tag, text, extra=None):
-        sha = f"commit-{tag}"
-        self.trees[sha] = {PATH: text, **(extra or {})}
-        self.parents[sha] = None
-        self.tagged[tag] = sha
+        """Another writer lands `text` on `main` and tags it, the way a winner does."""
+        self.land({PATH: text, **(extra or {})})
+        self.tagged[tag] = self.main
 
     def resolve(self, ref):
         if ref == "main":
@@ -146,12 +157,25 @@ class Api:
     def text(self, ref="main", path=PATH):
         return self.trees[self.resolve(ref)][path]
 
-    def land(self, files):
-        """Another writer's commit on `main`, the way a racing module lands one."""
+    def land(self, files, message="ci: pin another module in the parent chart"):
+        """Another commit on `main`: a racing module's pin, or a human merge."""
         sha = f"commit-other-{len(self.parents)}"
         self.trees[sha] = {**self.trees[self.main], **files}
         self.parents[sha] = self.main
+        self.meta[sha] = message
         self.main = sha
+
+    def compare(self, path):
+        base, head = (self.resolve(r) for r in path.split("/compare/", 1)[1].split("..."))
+        chain, sha = [], head
+        while sha is not None and sha != base:
+            chain.append(sha)
+            sha = self.parents[sha]
+        status = "identical" if not chain else "ahead" if sha == base else "diverged"
+        commits = [{"sha": c, "commit": {"message": self.meta[c]}} for c in reversed(chain)]
+        commits = commits[: self.compare_cap]
+        return Done(0, json.dumps(
+            {"status": status, "total_commits": len(chain), "commits": commits}), "")
 
     def field(self, args, key):
         for index, arg in enumerate(args):
@@ -169,6 +193,8 @@ class Api:
         path = next(a for a in args if a.startswith("repos/"))
         method = args[args.index("-X") + 1] if "-X" in args else "GET"
 
+        if "/compare/" in path:
+            return self.compare(path)
         if "git/matching-refs/tags/v" in path:
             return Done(0, "".join(f"refs/tags/{t}\n" for t in self.tags), "")
         if path.endswith("git/tags"):
@@ -198,8 +224,7 @@ class Api:
             sha = f"commit-{self.made}"
             self.trees[sha] = self.trees[data["tree"][len("tree-") :]]
             self.parents[sha] = data["parents"][0]
-            self.message = getattr(self, "message", {})
-            self.message[sha] = data["message"]
+            self.meta[sha] = data["message"]
             return Done(0, sha + "\n", "")
         if "/contents/" in path and "?ref=" in path:
             name, ref = path.split("/contents/", 1)[1].split("?ref=", 1)
@@ -226,6 +251,11 @@ class Api:
         if self.interfere is not None:
             self.interfere(self)
             self.interfere = None
+        hook = self.patch_hooks.pop(len(self.patches), None)
+        if hook is not None:
+            hook(self)
+            self.patches.append({"refused": "moved by a hook"})
+            return Done(1, "", "gh: Update is not a fast forward (HTTP 422)")
         if self.put_failures:
             self.put_failures -= 1
             return Done(1, "", "gh: refused by the stub (HTTP 500)")
@@ -237,7 +267,7 @@ class Api:
         parent = self.trees[self.parents[sha]]
         self.main = sha
         self.puts.append(
-            {"sha": sha, "text": self.trees[sha][PATH], "message": self.message[sha],
+            {"sha": sha, "text": self.trees[sha][PATH], "message": self.meta[sha],
              "branch": "main",
              "files": sorted(p for p, v in self.trees[sha].items() if parent.get(p) != v)}
         )
@@ -444,7 +474,7 @@ def test_a_lost_tag_race_cuts_the_next_version_rather_than_exiting_zero():
     """
 
     def winner(api):
-        api.publish("v0.1.1", chart({**PINS, "task": "0.5.29"}))
+        api.publish("v0.1.1", parent_pin.pin(api.text(), "task", "0.5.29")[0])
 
     api = Api(interfere_ref=winner)
     assert bump(api) == 0
@@ -453,6 +483,7 @@ def test_a_lost_tag_race_cuts_the_next_version_rather_than_exiting_zero():
     # first pass.
     assert api.refs == [{"ref": "refs/tags/v0.1.2", "sha": "object-2"}]
     assert api.objects == 2
+    assert pins_of(api.text("v0.1.2"))["gateway"] == "0.9.49"
 
 
 def test_two_module_releases_cut_two_parent_versions():
@@ -536,7 +567,7 @@ def test_a_lost_tag_race_restamps_before_it_tags_the_next_number():
     """The pushed commit pins the number that was lost. Tagging N+1 there is the bug."""
 
     def winner(api):
-        api.publish("v0.1.1", chart({**WITH_PLATFORM, "task": "0.5.29"}), EXAMPLES)
+        api.publish("v0.1.1", parent_pin.pin(api.text(), "task", "0.5.29")[0])
 
     api = with_examples(interfere_ref=winner)
     assert bump(api) == 0
@@ -603,6 +634,117 @@ def test_the_combined_commit_derives_nothing_in_the_parent():
     assert verdict.rc == 0 and verdict.nxt == "", "\n".join(verdict.lines)
     for line in api.puts[0]["message"].splitlines():
         assert not pr_body.STARTS_ENTRY.match(line), line
+
+
+# ---------------------------------------------------------------------------
+# A human merge the `version` job deferred must not be swallowed by this tag.
+# ---------------------------------------------------------------------------
+
+HUMAN_BREAKING = "\n".join([
+    "feat!: drop the by-name arm of the parent's values (#40)",
+    "",
+    "## What", "", "A change.", "", "## Why", "", "A reason.", "",
+    "## Changelog", "",
+    "- feat!: drop the by-name arm of the parent's values",
+    "",
+    "## Verification", "", "Ran it.", "", "## Risk", "", "None.",
+])
+
+
+def tag_message_of(api, version):
+    obj = next(r["sha"] for r in api.refs if r["ref"] == f"refs/tags/v{version}")
+    number = int(obj.split("-")[1])
+    call = [c for c in api.calls if c[2].endswith("git/tags")][number - 1]
+    return next(a[len("message="):] for a in call if a.startswith("message="))
+
+
+def test_a_deferred_human_merge_is_released_by_the_parent_tag():
+    """The M/P/Y interleaving, and the case where no Y ever comes.
+
+    M (`feat!`) lands; this job's pin commit P fast-forwards before M's own
+    `version` run can stamp, so that run defers. P's tag is the first tag at or
+    after M, so it MUST carry M's Changelog — under `0.x` a `feat!` is a minor
+    bump, not the patch a module release alone would give. Were it cut as a
+    patch, the next merge Y would derive from it and M would never be released.
+    """
+    api = Api(tags=["v0.3.8"])
+    api.land({"chart/values.yaml": "x: 1\n"}, message=HUMAN_BREAKING)
+    assert bump(api) == 0
+    assert [r["ref"] for r in api.refs] == ["refs/tags/v0.4.0"]
+    assert api.tagged["v0.4.0"] == api.main
+    message = tag_message_of(api, "0.4.0")
+    assert "feat!: drop the by-name arm of the parent's values" in message
+    # Y, afterwards, derives from the tag that already released M.
+    verdict = next_version.derive(
+        "v0.4.0", ["v0.3.8", "v0.4.0"],
+        ["fix: y\n\n## Changelog\n\n- fix: a later merge\n"],
+        ["Max <max@example.com>"], ["chart/values.yaml"],
+    )
+    assert verdict.nxt == "0.4.1"
+
+
+def test_a_merge_its_own_run_already_tagged_is_not_counted_twice():
+    api = Api(tags=["v0.3.8"])
+    api.land({"chart/values.yaml": "x: 1\n"}, message=HUMAN_BREAKING)
+    api.tagged["v0.4.0"] = api.main
+    assert bump(api) == 0
+    assert [r["ref"] for r in api.refs] == ["refs/tags/v0.4.1"]
+    assert "feat!" not in tag_message_of(api, "0.4.1")
+
+
+def test_a_lost_tag_race_rederives_over_the_winners_range_too():
+    """A human merge landing during the race is folded into the re-derived number."""
+
+    def winner(api):
+        api.publish("v0.1.1", parent_pin.pin(api.text(), "task", "0.5.29")[0])
+        api.land({"chart/values.yaml": "x: 1\n"}, message=HUMAN_BREAKING)
+
+    api = Api(interfere_ref=winner)
+    assert bump(api) == 0
+    assert [r["ref"] for r in api.refs] == ["refs/tags/v0.2.0"]
+    assert api.tagged["v0.2.0"] == api.main
+
+
+def test_a_merge_landing_during_the_restamp_is_counted_before_the_tag():
+    """The re-stamp lands on a newer head, so the number is derived again over it.
+
+    The lost race moves this job onto the winner's head; while it re-stamps, a
+    human `feat!` merge lands and refuses the fast-forward. The re-stamp must
+    build on THAT head, and the tag it cuts must count the merge — `v0.2.0`,
+    not the patch derived before the merge existed.
+    """
+
+    def winner(api):
+        api.publish("v0.1.1", parent_pin.pin(api.text(), "task", "0.5.29")[0])
+
+    api = with_examples(interfere_ref=winner)
+    api.patch_hooks[1] = lambda a: a.land(
+        {"chart/values.yaml": "x: 1\n"}, message=HUMAN_BREAKING
+    )
+    assert bump(api) == 0
+    assert [r["ref"] for r in api.refs] == ["refs/tags/v0.2.0"]
+    tagged = api.tagged["v0.2.0"]
+    assert tagged == api.main
+    assert revision(api, tagged, "example/application.yaml") == "0.2.0"
+    assert api.text(tagged, "chart/values.yaml") == "x: 1\n"
+    assert "feat!: drop the by-name arm" in tag_message_of(api, "0.2.0")
+
+
+def test_a_truncated_comparison_is_refused_rather_than_read_as_complete():
+    api = Api(tags=["v0.3.8"])
+    api.land({"chart/values.yaml": "x: 1\n"}, message=HUMAN_BREAKING)
+    api.compare_cap = 1
+    text = refused(api)
+    assert "commits" in text
+    assert api.refs == []
+
+
+def test_a_tag_off_main_is_refused_rather_than_derived_from():
+    api = Api(tags=["v0.3.8"])
+    api.parents["commit-0"] = None
+    text = refused(api)
+    assert "diverged" in text
+    assert api.puts == [] and api.refs == []
 
 
 # ---------------------------------------------------------------------------

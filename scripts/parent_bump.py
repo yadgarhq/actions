@@ -105,7 +105,8 @@ import time
 from collections import namedtuple
 
 import example_pins
-from parent_pin import Refusal, parent_version, pin, pins
+import parent_pending
+from parent_pin import Refusal, pin, pins
 from repin import greatest, output, summary
 
 # WHERE THE PARENT IS, and both halves are constants rather than inputs. The
@@ -279,23 +280,6 @@ def message_for(module, previous, offered, repo):
     ])
 
 
-def tag_message(version, note, module, previous, offered, last, repo):
-    """The annotated tag's message — the permanent record of the derivation.
-
-    `ci-pr.yaml` writes one for the same reason: the ruleset makes an annotated
-    tag's message permanent, and this is the only place that knows what the
-    number was derived FROM.
-    """
-    return "\n".join([
-        f"v{version}",
-        "",
-        f"{note.replace('`', '')}, derived from {last} by ADR-0722's rule that a",
-        "module release cuts a new parent version.",
-        "",
-        f"{module} {previous} -> {offered}, released by {repo}.",
-    ])
-
-
 def cut(gh, commit, previous, offered, module, repo):
     """The parent's next version, tagged, re-deriving when it loses a race.
 
@@ -304,16 +288,25 @@ def cut(gh, commit, previous, offered, module, repo):
     creation is refused. Exiting 0 there would leave its pin committed under a
     tag that does not carry it — a published parent claiming a set it does not
     have, which is this file's worst outcome. So the loser re-lists the tags,
-    asks `parent_pin.parent_version` again, and cuts the number after the
-    winner's — on a commit whose examples `example_pins.settle` made pin it.
+    derives again over the range up to `main`'s new head, and cuts the number
+    after the winner's — on a commit whose examples `example_pins.settle` made
+    pin it. Every derivation counts the Changelog pending in its range
+    (`parent_pending`), and a settle that moved the target re-derives over the
+    wider range before anything is tagged.
     """
     error = "no attempt was made"
     for attempt in range(1, ATTEMPTS + 1):
-        nxt, note, last = parent_version(gh.tags(), previous, offered)
+        tags = gh.tags()
+        nxt, note, last, entries = parent_pending.derive(gh, tags, previous, offered, commit)
         target = example_pins.settle(gh, commit, nxt, ATTEMPTS)
-        obj = gh.tag(
-            nxt, tag_message(nxt, note, module, previous, offered, last, repo), target
-        )
+        if target != commit:
+            wider = parent_pending.derive(gh, tags, previous, offered, target)
+            if wider[0] != nxt:
+                commit = target
+                continue
+            nxt, note, last, entries = wider
+        obj = gh.tag(nxt, parent_pending.tag_message(
+            nxt, note, module, previous, offered, last, repo, entries), target)
         done = gh.ref(nxt, obj)
         if done.returncode == 0:
             return nxt, note, last, target
@@ -326,6 +319,7 @@ def cut(gh, commit, previous, offered, module, repo):
             )
         if attempt < ATTEMPTS:
             gh.pause(attempt * 5)
+        commit = gh.head()
     raise Refusal(
         f"{ATTEMPTS} parent versions in a row already existed — the last was "
         f"refused with {error!r} — so this release's pin is committed at "
@@ -403,7 +397,7 @@ def bump(gh, module, offered, repo):
         # versions it cannot order against each other. Deriving only AFTER the
         # commit would leave those refusals behind a pin nothing ever tags.
         # The examples are stamped with it; `cut` re-stamps if it moves.
-        nxt, _, _ = parent_version(gh.tags(), previous, offered)
+        nxt = parent_pending.derive(gh, gh.tags(), previous, offered, head)[0]
         changes = {PATH: rewritten}
         changes.update(
             example_pins.stamp(example_pins.examples_at(gh, head), nxt, rewritten)

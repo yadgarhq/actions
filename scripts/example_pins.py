@@ -42,8 +42,11 @@ only one of them has these examples.
 Usage (the `version` job): example_pins.py, with REPO, SHA and VERSION in the
 environment and the repository checked out at SHA. It writes `target=<sha>` to
 `GITHUB_OUTPUT`: SHA itself when nothing needed stamping, the stamp commit when
-something did, and EMPTY when `main` moved underneath it — the tag is then left
-to the next push, whose range still carries this one's Changelog.
+something did, and EMPTY when GitHub refused the fast-forward because `main`
+moved underneath it. The merge's Changelog is then counted by the next tag cut
+on `main`, whichever cutter cuts it: a later run counts `last..HEAD`, and
+`parent_bump.py` counts the same range through `parent_pending.py`. Every other
+write failure is red. `published` is the post-release half: see its docstring.
 
 Tests: `python3 -m pytest scripts/tests/ -q`.
 """
@@ -73,9 +76,21 @@ BRANCH = "main"
 # `lead` is the indentation, `dash` the `- ` when there is one; the key's column
 # is their combined width.
 KEY = re.compile(r"^(?P<lead>[ ]*)(?P<dash>-[ ]+)?(?P<key>[A-Za-z_][\w.-]*):(?P<rest>.*)$")
-# ANY MENTION OF A CHART NAME AS A `chart:` VALUE, whatever the shape around it.
-# More mentions than block-style sites means a shape this does not rewrite.
-MENTION = re.compile(r"""(?:^|[\s,{])chart:[ \t]*["']?([\w.-]+)["']?[ \t]*(?=$|[,}#\s])""", re.M)
+# ANY MENTION OF A CHART NAME AS A `chart:` VALUE, whatever the shape around it,
+# the key quoted or not. More mentions than block-style sites means a shape this
+# does not rewrite — a flow mapping, a quoted key — and that is a refusal.
+#
+# A BLOCK SCALAR FAILS SAFE, said rather than handled. A `chart: yadgar` line
+# inside `key: |` is indistinguishable here from a key, so it counts as a site;
+# with no `targetRevision:` beside it the file is refused, and nothing inside
+# the string is ever rewritten on the strength of it.
+MENTION = re.compile(
+    r"""(?:^|[\s,{])["']?chart["']?:[ \t]*["']?([\w.-]+)["']?[ \t]*(?=$|[,}#\s])""", re.M
+)
+# A COMMENT OPENS AT `#` AFTER WHITESPACE, which is YAML's rule. A `#` inside a
+# quoted scalar is misread as one; the direction is a missed mention, which a
+# block-style site elsewhere cannot hide because it is still counted as a site.
+COMMENT = re.compile(r"(^|\s)#.*$")
 
 
 def shape(line):
@@ -121,40 +136,34 @@ def mapping(lines, at):
     return siblings
 
 
-def rewrite(text, targets):
-    """`text` with the pin of every Application for a chart in `targets` moved."""
-    lines = text.splitlines(keepends=True)
-    sites = {}
+def sites(lines, names):
+    """`[(name, index of its one targetRevision line)]` for every named chart."""
+    found = {}
     for index, line in enumerate(lines):
-        found = shape(line)
-        if found is None or found[3] != "chart":
+        shaped = shape(line)
+        if shaped is None or shaped[3] != "chart":
             continue
         raw = re.match(r"[ \t]*" + VALUE, KEY.match(line.rstrip("\n")).group("rest"))
         name, _ = unquote(raw.group(1))
-        if name in targets:
-            sites.setdefault(name, []).append(index)
+        if name in names:
+            found.setdefault(name, []).append(index)
 
     # COMMENTS ARE PROSE, and an example that documents an alternative form in a
     # commented-out block — `yadgarhq/config`'s does — is not a missed site.
-    code = "".join(line for line in lines if not line.lstrip().startswith("#"))
-    for name in targets:
+    code = "".join(COMMENT.sub("", line.rstrip("\n")) + "\n" for line in lines)
+    for name in names:
         mentioned = sum(1 for m in MENTION.finditer(code) if m.group(1) == name)
-        if mentioned != len(sites.get(name, [])):
+        if mentioned != len(found.get(name, [])):
             raise Refusal(
                 f"this file names `chart: {name}` {mentioned} time(s) and "
-                f"{len(sites.get(name, []))} of them are block-style keys this "
+                f"{len(found.get(name, []))} of them are block-style keys this "
                 "can rewrite. The rest are in a shape it does not understand — a "
-                "flow mapping, say — and skipping them would ship a stale pin."
+                "flow mapping or a quoted key, say — and skipping them would "
+                "ship a stale pin."
             )
 
-    for name, indices in sites.items():
-        version = targets[name]
-        if version is None:
-            raise Refusal(
-                f"an Application pins `chart: {name}`, and `{CHART_YAML}` in the "
-                f"same commit declares no `{name}` dependency, so there is no "
-                "version to pin it at."
-            )
+    pairs = []
+    for name, indices in found.items():
         for at in indices:
             pins_here = [
                 i for i in mapping(lines, at) if shape(lines[i])[3] == "targetRevision"
@@ -165,17 +174,54 @@ def rewrite(text, targets):
                     f"{len(pins_here)} `targetRevision:` keys beside it. There must "
                     "be exactly one to rewrite."
                 )
-            lines[pins_here[0]] = moved(lines[pins_here[0]], version)
+            pairs.append((name, pins_here[0]))
+    return pairs
+
+
+def rewrite(text, targets):
+    """`text` with the pin of every Application for a chart in `targets` moved."""
+    lines = text.splitlines(keepends=True)
+    for name, at in sites(lines, targets):
+        if targets[name] is None:
+            raise Refusal(
+                f"an Application pins `chart: {name}`, and `{CHART_YAML}` in the "
+                f"same commit declares no `{name}` dependency, so there is no "
+                "version to pin it at."
+            )
+        lines[at] = moved(lines[at], targets[name])
     return "".join(lines)
+
+
+def token(line):
+    """The value token of one `targetRevision:` line, and where it sits."""
+    match = re.match(r"^([ ]*(?:-[ ]+)?targetRevision:[ \t]*)" + VALUE, line)
+    value = match.group(2).rstrip()
+    if unquote(value)[0] == "" or value[:1] in ("&", "*", "!"):
+        raise Refusal(
+            f"`targetRevision: {value}` is empty, or an anchor, an alias or a tag. "
+            "Rewriting its token would change what it means rather than which "
+            "version it names, so it is refused rather than guessed at."
+        )
+    return value, match.start(2)
 
 
 def moved(line, version):
     """One `targetRevision:` line with its value token replaced, quotes kept."""
-    match = re.match(r"^([ ]*(?:-[ ]+)?targetRevision:[ \t]*)" + VALUE, line)
-    token = match.group(2).rstrip()
-    _, quote = unquote(token)
-    end = match.start(2) + len(token)
-    return line[: match.start(2)] + quote + version + quote + line[end:]
+    value, start = token(line)
+    _, quote = unquote(value)
+    return line[:start] + quote + version + quote + line[start + len(value) :]
+
+
+def pinned(files):
+    """`[(path, chart, version)]` for every pin the examples carry. Absent is None."""
+    found = []
+    for path, text in files.items():
+        if text is None:
+            continue
+        lines = text.splitlines(keepends=True)
+        for name, at in sites(lines, (PARENT, PLATFORM)):
+            found.append((path, name, unquote(token(lines[at])[0])[0]))
+    return found
 
 
 def stamp(files, version, chart_text):
@@ -375,22 +421,62 @@ def main(run=None):
         summary(f"Stamped the examples at `v{version}` in `{made[:7]}`; the tag goes there.")
         return 0
 
-    now = head(gh)
-    if now is not None and now != sha:
-        # DEFERRED, NOT DROPPED. `main` moved past this merge, so the next push's
-        # `version` run derives over a range that still holds this merge's
-        # Changelog and stamps and tags on its own HEAD.
+    if "not a fast forward" in error.lower():
+        # DEFERRED TO THE NEXT TAG, and ONLY on GitHub's non-fast-forward refusal
+        # of the ref update; a 403 or a 5xx is not a race and reddens below.
+        # `main` moved past this merge. Whatever moved it is followed by a tag
+        # whose range holds this merge: a later merge's run counts `last..HEAD`,
+        # and `parent_bump.py` counts the same range through `parent_pending`.
         output(target="")
-        print(f"::warning::v{version} not tagged here: {BRANCH} moved from {sha[:7]} to {now[:7]} before the examples could be stamped. The run for {now[:7]} derives over this merge's Changelog and tags it.")
-        summary(f"_`v{version}` deferred: `{BRANCH}` moved before the examples were stamped. The next run tags it._")
+        print(f"::warning::v{version} not tagged here: {BRANCH} moved past {sha[:7]} before the examples could be stamped ({error}). The next tag cut on {BRANCH}, by either cutter, counts this merge's Changelog.")
+        summary(f"_`v{version}` deferred: `{BRANCH}` moved before the examples were stamped. The next tag on `{BRANCH}` counts this merge._")
         return 0
     output(target="")
     print(f"::error::v{version} was derived and not tagged: the examples could not be stamped at {sha[:7]}: {error}. The release App must be a bypass actor on the {BRANCH} ruleset.")
     return 1
 
 
+def published(fetch=None, sleep=None):
+    """After the release publishes: every pin the tagged examples carry is pullable.
+
+    THE ORDERING THIS CLOSES. The commit tagged `vN` pins `vN`, which does not
+    exist until the tag's own `chart` job pushes it, so a check at push time can
+    only skip a pin newer than anything published. This is the check that runs
+    once it CAN pass, asking the registry the way an adopter's Argo CD does —
+    anonymously, through `chart_publicly_pullable`'s own request pair.
+    """
+    import chart_publicly_pullable as registry
+
+    pins = pinned({path: on_disk(path) for path in EXAMPLES})
+    if not pins:
+        print("No example Applications pin a parent or platform chart here.")
+        return 0
+    host, owner = os.environ.get("REGISTRY", "").strip(), os.environ.get("OWNER", "").strip()
+    if not host or not owner:
+        print(f"::error::REGISTRY and OWNER are required; got {host!r} and {owner!r}.")
+        return 1
+    bad = []
+    for path, name, version in pins:
+        ok, detail, _ = registry.with_retries(
+            host, f"{owner}/{registry.NAMESPACE}/{name}", version,
+            fetch or registry.fetch_url, sleep or registry.time.sleep,
+        )
+        print(f"- `{path}` pins {name} {version}: {'pullable' if ok else detail}")
+        if not ok:
+            bad.append(f"{path} pins {name} {version} ({detail})")
+    if bad:
+        print(
+            "::error::a released commit's examples pin a chart an adopter cannot "
+            "pull: " + "; ".join(bad)
+        )
+        return 1
+    return 0
+
+
 if __name__ == "__main__":  # pragma: no cover
     try:
+        if sys.argv[1:] == ["published"]:
+            sys.exit(published())
         sys.exit(main())
     except Refusal as refusal:
         print(f"::error::the examples could not be stamped, so nothing was tagged: {refusal}")
