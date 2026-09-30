@@ -17,11 +17,16 @@ is the ORDER of the API calls, the concurrency behaviour and the reporting —
 none of which `parent_pin` can have an opinion about, because it never touches a
 network.
 
-WHAT THE RELEASE PATH ACTUALLY DOES, and why it is four calls rather than a git
-clone. The parent lives in another repository, so this reads
-`chart/Chart.yaml` through the Contents API, rewrites it in memory, PUTs it back
-against the blob sha it read, then creates an annotated tag object and the ref
-that points at it. Nothing is cloned and no working tree exists, so there is no
+WHAT THE RELEASE PATH ACTUALLY DOES, and why it is API calls rather than a git
+clone. The parent lives in another repository, so this reads `main`'s head
+commit and `chart/Chart.yaml` and the examples AT THAT COMMIT through the
+Contents API, rewrites them in memory, writes ONE commit on top of it through the
+git data API (tree, commit, then a `force: false` fast-forward of `main`), then
+creates an annotated tag object and the ref that points at it.
+
+ADR-0820: THE EXAMPLES MOVE IN THE SAME COMMIT, stamped by `example_pins` with
+the version about to be tagged. A parent without examples gets the one-file
+commit it always got. Nothing is cloned and no working tree exists, so there is no
 branch to leave behind and no credential written to disk. The two-call tag is
 `ci-pr.yaml`'s own idiom, for the reason stated there: `POST /git/refs` alone
 makes a LIGHTWEIGHT tag with no message, and the message is the permanent record
@@ -48,18 +53,18 @@ a pin — and a lost pin is the worst outcome available here, because the parent
 then PUBLISHES a set it does not carry and nothing downstream reports it. Two
 separate mechanisms answer it, and they answer different halves:
 
-  THE CONTENT. Every attempt re-reads `chart/Chart.yaml` and re-applies the pin
-  to whatever it finds. The Contents API refuses a PUT carrying a stale blob sha,
-  so the loser of a race gets an error rather than an overwrite, re-reads the
-  winner's file — which carries the winner's pin — and writes a file carrying
-  BOTH. The rewrite is textual and touches one token, so two pins never conflict
+  THE CONTENT. Every attempt re-reads `main` and re-applies the pin to whatever
+  it finds. The ref update is a fast-forward with `force: false`, so the loser of
+  a race gets an error rather than an overwrite, re-reads the winner's commit —
+  which carries the winner's pin — and writes one carrying BOTH. The rewrite is textual and touches one token, so two pins never conflict
   as text either.
 
   THE VERSION. Every attempt re-lists the parent's tags, so the loser derives
   from the winner's new tag and gets the NEXT number rather than the same one.
   The remaining window is between the tag list and the ref creation, and it
   closes on `Reference already exists`: the tags are re-listed, the version
-  re-derived from `parent_pin.parent_version` and the tag cut again. ADR-0722
+  re-derived from `parent_pin.parent_version`, the examples re-stamped with the
+  new number in a follow-up commit on `main`, and the tag cut again. ADR-0722
   says a module release cuts a whole new parent version, so two module releases
   must produce TWO parent versions — never one merged one — and re-deriving is
   what keeps that true instead of letting the loser exit 0 on a tag that does not
@@ -77,7 +82,7 @@ pin first with `pins()`" — so that is what this does: it reads the pin in `mai
 AND the pin at the newest published tag, and the two together say which of the
 three states the parent is in.
 
-WHAT THIS DOES NOT CLASSIFY, said rather than asserted. A failed PUT is retried
+WHAT THIS DOES NOT CLASSIFY, said rather than asserted. A failed write is retried
 whatever its cause, because every attempt re-reads the file first and is
 therefore safe to repeat; naming the HTTP status a stale sha produces would be a
 claim this repository cannot measure without writing to the parent chart, and a
@@ -99,6 +104,7 @@ import sys
 import time
 from collections import namedtuple
 
+import example_pins
 from parent_pin import Refusal, parent_version, pin, pins
 from repin import greatest, output, summary
 
@@ -210,16 +216,6 @@ class Gh:
             if line.strip().startswith("refs/tags/")
         ]
 
-    def put(self, text, sha, message):
-        """One commit rewriting `Chart.yaml`, or the error that refused it."""
-        return self.call(
-            "api", "-X", "PUT", self.repo("contents", PATH),
-            "-f", f"message={message}",
-            "-f", f"content={base64.b64encode(text.encode('utf-8')).decode('ascii')}",
-            "-f", f"sha={sha}",
-            "-f", f"branch={BRANCH}",
-        )
-
     def tag(self, version, message, commit):
         """The annotated tag OBJECT, whose message is the record of the derivation."""
         done = self.call(
@@ -267,6 +263,8 @@ def message_for(module, previous, offered, repo):
     newest commits of `yadgarhq/argocd`, which `pr_body.BOT` matches. The
     synthesis that would ADD a bullet is gated on `ships(files)` and therefore
     does not fire either.
+
+    The write is now a `POST git/commits`; see `example_pins.commit` on its author.
     """
     return "\n".join([
         f"ci: pin {module} {offered} in the parent chart",
@@ -307,23 +305,24 @@ def cut(gh, commit, previous, offered, module, repo):
     tag that does not carry it — a published parent claiming a set it does not
     have, which is this file's worst outcome. So the loser re-lists the tags,
     asks `parent_pin.parent_version` again, and cuts the number after the
-    winner's.
+    winner's — on a commit whose examples `example_pins.settle` made pin it.
     """
     error = "no attempt was made"
     for attempt in range(1, ATTEMPTS + 1):
         nxt, note, last = parent_version(gh.tags(), previous, offered)
+        target = example_pins.settle(gh, commit, nxt, ATTEMPTS)
         obj = gh.tag(
-            nxt, tag_message(nxt, note, module, previous, offered, last, repo), commit
+            nxt, tag_message(nxt, note, module, previous, offered, last, repo), target
         )
         done = gh.ref(nxt, obj)
         if done.returncode == 0:
-            return nxt, note, last
+            return nxt, note, last, target
         error = stderr(done)
         if EXISTS not in error:
             raise Refusal(
                 f"`refs/tags/v{nxt}` could not be created in "
                 f"`{gh.owner}/{PARENT}`: {error}. The pin IS committed at "
-                f"{commit[:7]}; re-run this job rather than releasing again."
+                f"{target[:7]}; re-run this job rather than releasing again."
             )
         if attempt < ATTEMPTS:
             gh.pause(attempt * 5)
@@ -374,13 +373,13 @@ def recover(gh, module, offered, repo):
         )
 
     commit = gh.head()
-    nxt, note, base = cut(gh, commit, published, offered, module, repo)
+    nxt, note, base, target = cut(gh, commit, published, offered, module, repo)
     return nxt, (
         f"`{module}` was ALREADY pinned at **{offered}** in `{BRANCH}`, and "
         f"`{last}` still published {published} — so a previous run committed the "
         "pin and never cut the version. The pin is untouched and the missing "
         f"version is cut: the parent moves `{base}` → **`v{nxt}`** ({note}) at "
-        f"`{commit[:7]}`."
+        f"`{target[:7]}`."
     )
 
 
@@ -388,7 +387,9 @@ def bump(gh, module, offered, repo):
     """Pin the module and cut the parent version, re-reading on every attempt."""
     error = "no attempt was made"
     for attempt in range(1, ATTEMPTS + 1):
-        current = gh.contents(BRANCH)
+        # ONE SNAPSHOT PER ATTEMPT: every file is read at this one head sha.
+        head = gh.head()
+        current = gh.contents(head)
         # THE READ BEFORE THE REWRITE, which is what `parent_pin.pin`'s docstring
         # asks a caller that wants idempotence to do. It refuses an equal version
         # rather than no-op'ing, on purpose, so this asks first.
@@ -397,38 +398,36 @@ def bump(gh, module, offered, repo):
 
         rewritten, previous = pin(current.text, module, offered)
         # BOTH DERIVATIONS BEFORE EITHER WRITE, which is `parent_pin.main`'s own
-        # rule and the whole reason the parent's version is computed twice here.
-        # `parent_version` refuses a parent that carries no orderable `v*` tag —
-        # the first tag of a repository is cut by hand — and refuses two versions
-        # it cannot order against each other. Deriving only AFTER the commit would
-        # leave those refusals behind a pin nothing ever tags, which is the
-        # half-finished state `recover` exists to clean up rather than to create.
-        # The answer is thrown away: `cut` re-derives from a freshly listed set,
-        # because between here and the tag another module may have moved the
-        # parent, and the number that gets tagged has to be the later one.
-        parent_version(gh.tags(), previous, offered)
-        done = gh.put(
-            rewritten, current.sha, message_for(module, previous, offered, repo)
+        # rule. `parent_version` refuses a parent that carries no orderable `v*`
+        # tag — the first tag of a repository is cut by hand — and refuses two
+        # versions it cannot order against each other. Deriving only AFTER the
+        # commit would leave those refusals behind a pin nothing ever tags.
+        # The examples are stamped with it; `cut` re-stamps if it moves.
+        nxt, _, _ = parent_version(gh.tags(), previous, offered)
+        changes = {PATH: rewritten}
+        changes.update(
+            example_pins.stamp(example_pins.examples_at(gh, head), nxt, rewritten)
         )
-        if done.returncode == 0:
-            commit = json.loads(done.stdout)["commit"]["sha"]
-            nxt, note, last = cut(gh, commit, previous, offered, module, repo)
+        commit, error = example_pins.commit(
+            gh, head, changes, message_for(module, previous, offered, repo)
+        )
+        if commit is not None:
+            nxt, note, last, target = cut(gh, commit, previous, offered, module, repo)
             return nxt, (
                 f"`{module}` {previous} → **{offered}** in "
                 f"`{gh.owner}/{PARENT}`'s `{PATH}`, compared as integers. Every "
                 "other dependency is byte-identical.\n\n"
                 f"The parent moves `{last}` → **`v{nxt}`** ({note}), derived "
                 "from the estate's own ladder in `next_version.compute`, and "
-                f"tagged at `{commit[:7]}`. That tag is what publishes the "
+                f"tagged at `{target[:7]}`. That tag is what publishes the "
                 "parent."
             )
-        error = stderr(done)
         if attempt < ATTEMPTS:
             gh.pause(attempt * 5)
     raise Refusal(
         f"`{PATH}` in `{gh.owner}/{PARENT}` could not be written in {ATTEMPTS} "
         f"attempts; the last was refused with {error!r}. Every attempt re-read "
-        "the file first, so a stale blob sha is not what is left — the usual "
+        "`main` first, so a lost race is not what is left — the usual "
         f"cause is the `{BRANCH}` ruleset on `{gh.owner}/{PARENT}`, where the "
         "release App has to be a bypass actor, exactly as it is on "
         f"`{gh.owner}/argocd`."

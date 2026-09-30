@@ -81,6 +81,7 @@ PINS = {
 }
 
 HEAD = "apiVersion: v2\nname: yadgar\nversion: 0.1.0\n\n"
+PATH = "chart/Chart.yaml"
 
 Done = namedtuple("Done", "returncode stdout stderr")
 
@@ -95,26 +96,62 @@ def chart(pins=None):
 
 
 class Api:
-    """An argv-dispatching `gh` stub that models the blob sha and the tag refs."""
+    """An argv-dispatching `gh` stub holding commits, trees, one `main` and the tags.
 
-    def __init__(self, main=None, tags=None, published=None, interfere=None,
-                 interfere_ref=None):
-        self.text = {"main": main if main is not None else chart()}
-        self.tags = list(tags if tags is not None else ["v0.1.0"])
-        for tag in self.tags:
-            self.text[tag] = published if published is not None else chart()
-        self.blob = "blob-0"
-        self.commits = 0
+    `main` MOVES ONLY BY FAST-FORWARD unless the caller forces it, which is how
+    GitHub answers `PATCH git/refs/heads/main` with `force: false`. That is what
+    makes the concurrency cases a real read-modify-write race: a writer who read
+    `main` before somebody else landed is refused, re-reads, and writes again.
+    """
+
+    def __init__(self, main=None, tags=None, published=None, examples=None,
+                 interfere=None, interfere_ref=None):
+        extra = dict(examples or {})
+        self.trees = {"commit-0": {PATH: main if main is not None else chart(), **extra}}
+        self.parents = {"commit-0": None}
+        self.main = "commit-0"
+        self.tagged = {}
+        for tag in tags if tags is not None else ["v0.1.0"]:
+            self.publish(tag, published if published is not None else chart(), extra)
+        self.made = 0
         self.objects = 0
+        self.object_commit = {}
         self.calls = []
         self.puts = []
         self.refs = []
+        self.patches = []
         self.interfere = interfere
         self.interfere_ref = interfere_ref
         self.put_failures = 0
         self.ref_error = None
+        self.unreadable = {}
 
     # -- helpers ---------------------------------------------------------------
+
+    @property
+    def tags(self):
+        return list(self.tagged)
+
+    def publish(self, tag, text, extra=None):
+        sha = f"commit-{tag}"
+        self.trees[sha] = {PATH: text, **(extra or {})}
+        self.parents[sha] = None
+        self.tagged[tag] = sha
+
+    def resolve(self, ref):
+        if ref == "main":
+            return self.main
+        return self.tagged.get(ref, ref)
+
+    def text(self, ref="main", path=PATH):
+        return self.trees[self.resolve(ref)][path]
+
+    def land(self, files):
+        """Another writer's commit on `main`, the way a racing module lands one."""
+        sha = f"commit-other-{len(self.parents)}"
+        self.trees[sha] = {**self.trees[self.main], **files}
+        self.parents[sha] = self.main
+        self.main = sha
 
     def field(self, args, key):
         for index, arg in enumerate(args):
@@ -122,32 +159,62 @@ class Api:
                 return arg[len(key) + 1 :]
         return None
 
+    @staticmethod
+    def body(args):
+        with open(args[args.index("--input") + 1], encoding="utf-8") as fh:
+            return json.load(fh)
+
     def __call__(self, args):
         self.calls.append(list(args))
-        path = next(a for a in args[2:] if not a.startswith("-"))
+        path = next(a for a in args if a.startswith("repos/"))
+        method = args[args.index("-X") + 1] if "-X" in args else "GET"
 
-        if "-X" in args and "PUT" in args:
-            return self.put(args)
         if "git/matching-refs/tags/v" in path:
             return Done(0, "".join(f"refs/tags/{t}\n" for t in self.tags), "")
         if path.endswith("git/tags"):
             self.objects += 1
+            self.object_commit[f"object-{self.objects}"] = self.field(args, "object")
             return Done(0, f"object-{self.objects}\n", "")
         if path.endswith("git/refs"):
             return self.ref(args)
-        if "commits/main" in path:
-            return Done(0, f"commit-{self.commits}\n", "")
-        if "contents/chart/Chart.yaml?ref=" in path:
-            ref = path.split("?ref=", 1)[1]
-            if ref not in self.text:
+        if path.endswith("git/refs/heads/main"):
+            return self.patch(args)
+        if path.endswith("commits/main"):
+            return Done(0, f"{self.main}\n", "")
+        if "/git/commits/" in path:
+            return Done(0, "tree-" + path.rsplit("/", 1)[1] + "\n", "")
+        if path.endswith("git/trees"):
+            data = self.body(args)
+            files = dict(self.trees[data["base_tree"][len("tree-") :]])
+            for entry in data["tree"]:
+                assert (entry["mode"], entry["type"]) == ("100644", "blob")
+                files[entry["path"]] = entry["content"]
+            key = f"tree-new-{len(self.trees)}"
+            self.trees[key[len("tree-") :]] = files
+            return Done(0, key + "\n", "")
+        if path.endswith("git/commits") and method == "POST":
+            data = self.body(args)
+            self.made += 1
+            sha = f"commit-{self.made}"
+            self.trees[sha] = self.trees[data["tree"][len("tree-") :]]
+            self.parents[sha] = data["parents"][0]
+            self.message = getattr(self, "message", {})
+            self.message[sha] = data["message"]
+            return Done(0, sha + "\n", "")
+        if "/contents/" in path and "?ref=" in path:
+            name, ref = path.split("/contents/", 1)[1].split("?ref=", 1)
+            if name in self.unreadable:
+                return Done(1, "", self.unreadable[name])
+            files = self.trees.get(self.resolve(ref))
+            if files is None or name not in files:
                 return Done(1, "", "gh: Not Found (HTTP 404)")
             return Done(
                 0,
                 json.dumps(
                     {
-                        "sha": self.blob if ref == "main" else f"blob-{ref}",
+                        "sha": f"blob-{ref}",
                         "content": base64.b64encode(
-                            self.text[ref].encode("utf-8")
+                            files[name].encode("utf-8")
                         ).decode("ascii"),
                     }
                 ),
@@ -155,29 +222,26 @@ class Api:
             )
         raise AssertionError(f"the stub was asked something it does not model: {args}")
 
-    def put(self, args):
+    def patch(self, args):
         if self.interfere is not None:
             self.interfere(self)
             self.interfere = None
         if self.put_failures:
             self.put_failures -= 1
             return Done(1, "", "gh: refused by the stub (HTTP 500)")
-        if self.field(args, "sha") != self.blob:
-            return Done(
-                1,
-                "",
-                "gh: chart/Chart.yaml does not match "
-                f"{self.field(args, 'sha')} (HTTP 409)",
-            )
-        text = base64.b64decode(self.field(args, "content")).decode("utf-8")
-        self.text["main"] = text
-        self.commits += 1
-        self.blob = f"blob-{self.commits}"
+        data = self.body(args)
+        self.patches.append(data)
+        sha = data["sha"]
+        if not data.get("force") and self.parents[sha] != self.main:
+            return Done(1, "", "gh: Update is not a fast forward (HTTP 422)")
+        parent = self.trees[self.parents[sha]]
+        self.main = sha
         self.puts.append(
-            {"text": text, "message": self.field(args, "message"),
-             "branch": self.field(args, "branch")}
+            {"sha": sha, "text": self.trees[sha][PATH], "message": self.message[sha],
+             "branch": "main",
+             "files": sorted(p for p, v in self.trees[sha].items() if parent.get(p) != v)}
         )
-        return Done(0, json.dumps({"commit": {"sha": f"commit-{self.commits}"}}), "")
+        return Done(0, "{}", "")
 
     def ref(self, args):
         if self.interfere_ref is not None:
@@ -187,11 +251,11 @@ class Api:
         if self.ref_error is not None:
             return Done(1, "", self.ref_error)
         tag = name[len("refs/tags/") :]
-        if tag in self.tags:
+        if tag in self.tagged:
             return Done(1, "", "gh: Reference already exists (HTTP 422)")
-        self.tags.append(tag)
-        self.text[tag] = self.text["main"]
-        self.refs.append({"ref": name, "sha": self.field(args, "sha")})
+        obj = self.field(args, "sha")
+        self.tagged[tag] = self.object_commit[obj]
+        self.refs.append({"ref": name, "sha": obj})
         return Done(0, "{}", "")
 
 
@@ -350,12 +414,11 @@ def test_a_lost_content_race_keeps_both_pins():
     """The loser re-reads the winner's file and writes one carrying BOTH pins."""
 
     def winner(api):
-        api.text["main"] = chart({**PINS, "task": "0.5.29"})
-        api.blob = "blob-winner"
+        api.land({PATH: chart({**PINS, "task": "0.5.29"})})
 
     api = Api(interfere=winner)
     assert bump(api) == 0
-    landed = pins_of(api.text["main"])
+    landed = pins_of(api.text())
     assert landed["task"] == "0.5.29", "the winner's pin was overwritten"
     assert landed["gateway"] == "0.9.49", "this release's pin was not written"
 
@@ -364,12 +427,12 @@ def test_a_lost_content_race_is_refused_before_it_is_retried():
     """The first PUT must FAIL rather than land, or the race proves nothing."""
 
     def winner(api):
-        api.blob = "blob-winner"
+        api.land({})
 
     api = Api(interfere=winner)
     assert bump(api) == 0
     assert len(api.puts) == 1
-    assert sum(1 for c in api.calls if "-X" in c and "PUT" in c) == 2
+    assert len(api.patches) == 2
 
 
 def test_a_lost_tag_race_cuts_the_next_version_rather_than_exiting_zero():
@@ -381,8 +444,7 @@ def test_a_lost_tag_race_cuts_the_next_version_rather_than_exiting_zero():
     """
 
     def winner(api):
-        api.tags.append("v0.1.1")
-        api.text["v0.1.1"] = chart({**PINS, "task": "0.5.29"})
+        api.publish("v0.1.1", chart({**PINS, "task": "0.5.29"}))
 
     api = Api(interfere_ref=winner)
     assert bump(api) == 0
@@ -402,8 +464,145 @@ def test_two_module_releases_cut_two_parent_versions():
         "refs/tags/v0.1.1",
         "refs/tags/v0.1.2",
     ]
-    landed = pins_of(api.text["main"])
+    landed = pins_of(api.text())
     assert (landed["gateway"], landed["task"]) == ("0.9.49", "0.5.29")
+
+
+# ---------------------------------------------------------------------------
+# ADR-0820: the commit a parent tag points at pins that tag in its examples.
+# ---------------------------------------------------------------------------
+
+
+def application(chart_name, version):
+    return (
+        "# An example an adopter copies.\n"
+        "apiVersion: argoproj.io/v1alpha1\n"
+        "kind: Application\n"
+        "spec:\n"
+        "  source:\n"
+        "    repoURL: ghcr.io/yadgarhq/charts\n"
+        f"    chart: {chart_name}\n"
+        "    # the pin\n"
+        f"    targetRevision: {version}\n"
+    )
+
+
+WITH_PLATFORM = {**PINS, "platform": "0.1.19"}
+
+EXAMPLES = {
+    "example/application.yaml": application("yadgar", "0.0.9"),
+    "example/kind/application.yaml": application("yadgar", "0.0.9"),
+    "example/operators-application.yaml": application("platform", "0.1.18"),
+}
+
+
+def revision(api, ref, path):
+    import re
+
+    return re.search(r"targetRevision: (\S+)", api.text(ref, path)).group(1)
+
+
+def with_examples(**kwargs):
+    return Api(main=chart(WITH_PLATFORM), published=chart(WITH_PLATFORM),
+               examples=EXAMPLES, **kwargs)
+
+
+def test_the_pin_and_the_examples_land_in_one_commit():
+    api = with_examples()
+    assert bump(api) == 0
+    assert len(api.puts) == 1
+    assert api.puts[0]["files"] == sorted([PATH, *EXAMPLES])
+
+
+def test_the_tagged_commit_pins_the_tag_in_its_examples():
+    api = with_examples()
+    assert bump(api) == 0
+    assert api.tagged["v0.1.1"] == api.puts[0]["sha"]
+    assert revision(api, "v0.1.1", "example/application.yaml") == "0.1.1"
+    assert revision(api, "v0.1.1", "example/kind/application.yaml") == "0.1.1"
+    assert revision(api, "v0.1.1", "example/operators-application.yaml") == "0.1.19"
+
+
+def test_a_platform_release_moves_the_operators_example_to_the_new_pin():
+    """The platform pin is read from the tree being committed, not from `main`."""
+    api = with_examples()
+    assert bump(api, module="platform", version="0.1.20") == 0
+    assert len(api.puts) == 1, "the first commit must already carry the new pin"
+    assert revision(api, "v0.1.1", "example/operators-application.yaml") == "0.1.20"
+    assert pins_of(api.text("v0.1.1"))["platform"] == "0.1.20"
+
+
+def test_a_lost_tag_race_restamps_before_it_tags_the_next_number():
+    """The pushed commit pins the number that was lost. Tagging N+1 there is the bug."""
+
+    def winner(api):
+        api.publish("v0.1.1", chart({**WITH_PLATFORM, "task": "0.5.29"}), EXAMPLES)
+
+    api = with_examples(interfere_ref=winner)
+    assert bump(api) == 0
+    assert [r["ref"] for r in api.refs] == ["refs/tags/v0.1.2"]
+    tagged = api.tagged["v0.1.2"]
+    assert revision(api, tagged, "example/application.yaml") == "0.1.2"
+    assert pins_of(api.text(tagged))["gateway"] == "0.9.49"
+    assert tagged == api.main, "the restamp is a fast-forward of main, not a side commit"
+    assert len(api.puts) == 2
+    assert api.puts[1]["files"] == sorted(["example/application.yaml",
+                                           "example/kind/application.yaml"])
+    verdict = next_version.derive(
+        "v0.1.0", ["v0.1.0"], [api.puts[1]["message"]], [BOT], api.puts[1]["files"]
+    )
+    assert verdict.rc == 0 and verdict.nxt == "", "\n".join(verdict.lines)
+
+
+def test_a_restamp_after_main_moved_builds_on_the_new_head():
+    """The winner's pin commit landed after ours: the restamp must keep it."""
+
+    def winner(api):
+        api.land({PATH: chart({**WITH_PLATFORM, "gateway": "0.9.49", "task": "0.5.29"})})
+        api.publish("v0.1.1", api.text(), EXAMPLES)
+
+    api = with_examples(interfere_ref=winner)
+    assert bump(api) == 0
+    tagged = api.tagged["v0.1.2"]
+    assert tagged == api.main
+    assert pins_of(api.text(tagged))["task"] == "0.5.29"
+    assert revision(api, tagged, "example/application.yaml") == "0.1.2"
+
+
+def test_a_recovered_tag_restamps_stale_examples_first():
+    """Pin committed, never tagged, examples behind: the repair finishes all three."""
+    api = Api(main=chart({**WITH_PLATFORM, "gateway": "0.9.49"}),
+              published=chart(WITH_PLATFORM), examples=EXAMPLES)
+    assert bump(api) == 0
+    assert revision(api, "v0.1.1", "example/application.yaml") == "0.1.1"
+    assert api.tagged["v0.1.1"] == api.main
+
+
+def test_an_example_that_cannot_be_read_is_refused_rather_than_skipped():
+    """Only a 404 is "absent". A 5xx read as absent ships a stale pin under a tag."""
+    api = with_examples()
+    api.unreadable["example/kind/application.yaml"] = "gh: Server Error (HTTP 502)"
+    text = refused(api)
+    assert "example/kind/application.yaml" in text
+    assert api.puts == [] and api.refs == []
+
+
+def test_a_parent_without_examples_gets_one_commit_touching_only_chart_yaml():
+    """The parent before chart#17 merges, and any parent that never has examples."""
+    api = Api()
+    assert bump(api) == 0
+    assert [p["files"] for p in api.puts] == [[PATH]]
+
+
+def test_the_combined_commit_derives_nothing_in_the_parent():
+    api = with_examples()
+    assert bump(api) == 0
+    verdict = next_version.derive(
+        "v0.1.0", ["v0.1.0"], [api.puts[0]["message"]], [BOT], api.puts[0]["files"]
+    )
+    assert verdict.rc == 0 and verdict.nxt == "", "\n".join(verdict.lines)
+    for line in api.puts[0]["message"].splitlines():
+        assert not pr_body.STARTS_ENTRY.match(line), line
 
 
 # ---------------------------------------------------------------------------
@@ -516,7 +715,7 @@ def test_three_lost_tag_races_report_rather_than_loop_forever():
 
 def test_an_unreadable_parent_is_refused_before_anything_is_written():
     api = Api()
-    api.text.pop("main")
+    api.unreadable[PATH] = "gh: Server Error (HTTP 502)"
     text = refused(api)
     assert "could not be read" in text
     assert api.puts == []
@@ -535,7 +734,7 @@ def test_a_leading_v_on_the_version_is_stripped_rather_than_refused():
     """Callers pass `github.ref_name`. `detect` already strips it; belt and braces."""
     api = Api()
     assert bump(api, version="v0.9.49") == 0
-    assert pins_of(api.text["main"])["gateway"] == "0.9.49"
+    assert pins_of(api.text())["gateway"] == "0.9.49"
 
 
 # ---------------------------------------------------------------------------
