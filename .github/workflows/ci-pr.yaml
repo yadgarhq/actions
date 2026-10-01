@@ -1628,21 +1628,57 @@ jobs:
           # that up silently. Scoped to THIS repository by the action's default.
           permission-contents: write
 
+      # ADR-0820: THE COMMIT THIS TAGS CARRIES EXAMPLES THAT PIN THIS VERSION.
+      # `yadgarhq/chart`'s `example/*.yaml` pin the parent chart, and tag
+      # `v0.3.8` shipped them pinning `0.3.5`. `scripts/example_pins.py` rewrites
+      # the `targetRevision:` of every `yadgar` / `platform` Application to the
+      # version derived above, commits that on top of this merge as ONE
+      # fast-forward of `main`, and names the commit to tag. With no examples —
+      # every repository but one — it names `GITHUB_SHA` and calls nothing.
+      #
+      # `main` ONLY, NEVER A COMMIT OFF IT: `next_version.py` finds its baseline
+      # with `git describe`, which cannot see a tag `main` does not contain. So if
+      # GitHub refuses the fast-forward because `main` moved past this merge, the
+      # target is EMPTY and the tag below skips with a warning. The next tag cut
+      # on `main` counts this merge's Changelog, whichever job cuts it: a later
+      # run's range is `last..HEAD`, and `parent_bump.py` counts the same range
+      # through `parent_pending.py`. Any other write failure is red.
+      #
+      # IT ALSO RE-READS THE TAGS, in every repository. The version above was
+      # derived from the tags `actions/checkout` fetched, and `parent_bump.py`
+      # can cut one since. At or below the greatest tag the repository carries
+      # NOW, nothing is stamped or tagged. Green when that tag contains this
+      # merge (fast-forward only, so a tag cut since checkout does, and its range
+      # counts this merge); red only when it does not — a tag off `main`.
+      - name: stamp the examples with the version
+        id: stamp
+        if: steps.cred.outputs.configured == 'true' && steps.g.outputs.tagged == 'false' && steps.v.outputs.next != ''
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          VERSION: ${{ steps.v.outputs.next }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          GATE_DIR: ${{ steps.gate.outputs.dir }}
+        run: |
+          set -euo pipefail
+          python3 "$GATE_DIR/example_pins.py"
+
       # TWO CALLS, NOT ONE. `POST /git/refs` on its own makes a LIGHTWEIGHT tag:
       # a name pointing at a commit, with no message, no tagger and no date of
       # its own. The tag object is created first so the permanent record of what
       # this version contains travels with the tag itself.
       - name: tag it
-        if: steps.cred.outputs.configured == 'true' && steps.g.outputs.tagged == 'false' && steps.v.outputs.next != ''
+        if: steps.cred.outputs.configured == 'true' && steps.g.outputs.tagged == 'false' && steps.v.outputs.next != '' && steps.stamp.outputs.target != ''
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           VERSION: ${{ steps.v.outputs.next }}
+          TARGET: ${{ steps.stamp.outputs.target }}
         run: |
           set -euo pipefail
           msg=$(cat "$RUNNER_TEMP/tag_message.txt")
           obj=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags" \
                   -f tag="v${VERSION}" -f message="$msg" \
-                  -f object="${GITHUB_SHA}" -f type=commit --jq .sha)
+                  -f object="${TARGET}" -f type=commit --jq .sha)
           # A LOST RACE IS NOT A FAILURE. Two merges landing together both reach
           # here; the second gets 422 `Reference already exists` ON STDERR —
           # confirmed against the live API rather than assumed — and the tag it

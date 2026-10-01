@@ -803,6 +803,53 @@ jobs:
           set -euo pipefail
           python3 scripts/parent_bump.py
 
+  # ADR-0820'S OTHER HALF: THE EXAMPLES THIS TAG SHIPS PIN SOMETHING PULLABLE.
+  # The commit tagged `vN` has examples pinning `vN` (`scripts/example_pins.py`,
+  # stamped by whichever job cut the tag), and `vN` does not exist until the
+  # `chart` job above pushes it. So a check on the push to `main` can only SKIP
+  # a pin newer than anything published — `yadgarhq/chart`'s suite does, with a
+  # named reason — and this is where the skipped question is answered, once it
+  # can pass: after the publish, anonymously, the way an adopter's Argo CD asks.
+  #
+  # `scripts/example_published.py` holds the check.
+  #
+  # `always()` FOR THE REASON `parent` GIVES: `image` is skipped in a chart-only
+  # repository, and a skip two hops up drops a job whose `if:` has no status
+  # function. In a repository without `example/*.yaml` the script asks the
+  # registry nothing and passes.
+  examples:
+    needs: [detect, chart]
+    if: >-
+      always() && needs.chart.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - if: github.repository != 'yadgarhq/actions'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: yadgarhq/actions
+          ref: main
+          path: .ci-actions
+      - name: every pin the tagged examples carry is anonymously pullable
+        env:
+          UNDER_RELEASE: ${{ github.repository }}
+          REGISTRY: ${{ env.REGISTRY }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          if [ "$UNDER_RELEASE" = "yadgarhq/actions" ]; then
+            dir=scripts
+          else
+            dir=.ci-actions/scripts
+          fi
+          python3 "$dir/example_published.py"
+
   # PUBLISHING AN IMAGE DID NOT ROLL A POD, and this job is the whole fix. Every
   # module Deployment renders `image: <repo>:latest` with `imagePullPolicy:
   # Always`, because a chart in git points at a moving tag (D65). `Always` is
