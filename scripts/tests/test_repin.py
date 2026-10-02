@@ -776,6 +776,18 @@ def test_a_long_subject_no_longer_defeats_the_derivation_end_to_end():
     which_is_why_the_budget_exists` and `test_an_unfittable_crate_list_falls_
     back_and_still_fits`, both of which pinned behaviour this function no
     longer has), and then proves the real derivation call survives it anyway.
+
+    AN ADVERSARIAL RE-REVIEW FOUND AN EARLIER REVISION OF THIS TEST DOES NOT
+    TEST WHAT IT CLAIMS. `commit_entries`'s own docstring says `matches` and
+    `lenient` are IDENTICAL whether or not the wrap is reassembled -- only
+    entry TEXT changes, never the parsed match count or the bump each match
+    implies. A mutant `body_lines` that returns the message UNCHANGED (never
+    dropping the subject) still passes `len(matches) == 6` and
+    `bump_for(...) == "patch"`, while every entry is silently truncated at
+    "... from v0.1.0 to" -- the exact corruption `body_lines` exists to
+    prevent, invisible to a count-only assertion. The entry-TEXT assertion
+    below is what actually exercises the property, and `looks_wrapped` on
+    the body-only lines confirms reassembly ran at all.
     """
     deps = [
         repin.Dep(f"yadgar-an-extremely-long-crate-name-{i}", f"prod{i}", "v0.1.0")
@@ -798,9 +810,12 @@ def test_a_long_subject_no_longer_defeats_the_derivation_end_to_end():
     # THE REAL PATH. `next_version.read()`'s derivation and `pr_body.review()`'s
     # `WRAPPED=true` arm both call `body_lines()` before `commit_entries` --
     # see `pr_body.body_lines()` (`actions#97`, 1cd493f, ledger 941).
-    _, matches, lenient = pr_body.commit_entries(pr_body.body_lines(message))
+    body_only = pr_body.body_lines(message)
+    assert pr_body.looks_wrapped(body_only), "the subject, not the body, was what poisoned it"
+    entries, matches, lenient = pr_body.commit_entries(body_only)
     assert len(matches) == 6
     assert pr_body.bump_for(matches) == pr_body.bump_for(lenient) == "patch"
+    assert all(e.endswith("v0.2.0") for e in entries), entries
 
 
 def test_the_subject_is_a_conventional_commits_line_so_the_bump_is_derivable():
