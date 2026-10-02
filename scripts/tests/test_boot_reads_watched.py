@@ -719,6 +719,84 @@ def test_a_material_impl_inside_cfg_not_test_is_not_hidden_from_side_b(tmp_path)
     assert run_result.returncode == 0, run_result.stderr
 
 
+def test_test_not_first_inside_all_is_still_test_code(tmp_path):
+    """LEDGER 1240, SECOND PASS. `cfg(all(feature = "x", test))` puts `test`
+    SECOND rather than first, which the first pass's regex
+    (`(?:all\\(\\s*)?test\\b`, requiring `test` immediately after `all(`) did
+    not match -- a false NEGATIVE the other direction: this read should have
+    been excluded as test code and was not, which also means Side B
+    (`watch_set_names()`) would wrongly blank a real `impl Material` behind
+    the identical predicate.
+    """
+    run_result = run(
+        tree_with(
+            tmp_path,
+            "fn load(p: &Path) {\n"
+            "    // ADR-0523-WATCHED: ServerTls\n"
+            "    let _ = std::fs::read(p);\n"
+            "}\n"
+            "\n"
+            '#[cfg(all(feature = "x", test))]\n'
+            "mod fixture_only {\n"
+            "    fn load_fixture(q: &Path) {\n"
+            "        let _ = std::fs::read(q);\n"
+            "    }\n"
+            "}\n",
+        )
+    )
+    assert run_result.returncode == 0, run_result.stderr
+    assert "1 filesystem read(s) judged" in run_result.stdout
+
+
+def test_cfg_any_containing_test_is_test_code(tmp_path):
+    """`cfg(any(test, foo))` is test code under EITHER condition being true,
+    `test` included -- it must be excluded from Side A the same as
+    `cfg(test)` itself.
+    """
+    run_result = run(
+        tree_with(
+            tmp_path,
+            "fn load(p: &Path) {\n"
+            "    // ADR-0523-WATCHED: ServerTls\n"
+            "    let _ = std::fs::read(p);\n"
+            "}\n"
+            "\n"
+            "#[cfg(any(test, foo))]\n"
+            "mod fixture_only {\n"
+            "    fn load_fixture(q: &Path) {\n"
+            "        let _ = std::fs::read(q);\n"
+            "    }\n"
+            "}\n",
+        )
+    )
+    assert run_result.returncode == 0, run_result.stderr
+    assert "1 filesystem read(s) judged" in run_result.stdout
+
+
+def test_test_inside_all_not_is_still_production_code(tmp_path):
+    """`cfg(all(not(test), x))` negates `test` -- the whole predicate is TRUE
+    only when NOT testing (and `x` holds), so this stays production code and
+    an unmarked read inside it must still be refused, not swallowed.
+    """
+    run_result = run(
+        tree_with(
+            tmp_path,
+            "fn load(p: &Path) {\n"
+            "    // ADR-0523-WATCHED: ServerTls\n"
+            "    let _ = std::fs::read(p);\n"
+            "}\n"
+            "\n"
+            '#[cfg(all(not(test), x))]\n'
+            "fn load_prod(q: &Path) {\n"
+            "    let _ = std::fs::read(q);\n"
+            "}\n",
+        )
+    )
+    assert run_result.returncode == 1, run_result.stdout
+    assert "src/serve.rs:8" in run_result.stderr
+    assert "no ADR-0523 marker" in run_result.stderr
+
+
 def test_File_open_is_still_a_read(tmp_path):
     run_result = run(
         tree_with(tmp_path, "fn f(p: &Path) { let _ = std::fs::File::open(p); }\n")
