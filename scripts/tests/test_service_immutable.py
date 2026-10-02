@@ -792,6 +792,63 @@ def test_the_count_is_reported_on_a_clean_run(repo):
 
 
 # ---------------------------------------------------------------------------
+# LEDGER 1032 — a base chart git FAILS to read must refuse the run, not floor
+# the derived document count to 0 the way a LEGITIMATE absence does.
+# ---------------------------------------------------------------------------
+
+
+def _delete_blob(root: Path, revision: str, path: str) -> None:
+    """Remove a tracked blob's loose object, so its CONTENT is unreadable while
+    the TREE that names it is untouched.
+
+    The real shape of a partial clone's blob filter or a corrupt pack, and the
+    only way `git ls-tree` (reads the tree alone) and `git archive` (reads
+    blob content) can disagree about the very same path.
+    """
+    blob = git(root, "rev-parse", f"{revision}:{path}").stdout.strip()
+    objpath = root / ".git" / "objects" / blob[:2] / blob[2:]
+    assert objpath.is_file(), f"expected a loose object at {objpath}"
+    objpath.unlink()
+
+
+def test_an_unreadable_base_chart_refuses_rather_than_floors_to_zero(repo):
+    """THE WHOLE POINT OF 1032.
+
+    Before this fix, `chart_at` returning `False` meant one of two things —
+    "the chart is absent at the base" or "git failed to read it" — and `main`
+    could not tell them apart: both floored the document count to 0. That is
+    correct for the first and a silent pass-through-emptiness for the second,
+    on the one gate whose job is to notice a chart that stopped rendering.
+    """
+    root, base = repo
+    _delete_blob(root, base, "chart/Chart.yaml")
+    # `chart/Chart.yaml` ALSO EDITED, not just the Service: git's object store
+    # is content-addressed, so if the working tree still held the BASE commit's
+    # exact bytes, `git add -A` below would re-hash and silently rewrite the
+    # very blob just deleted back into existence (measured) -- editing it
+    # means the new commit's tree points at a different, freshly-written
+    # object, and the deleted one stays gone from the BASE commit only.
+    write(
+        root,
+        {
+            "chart/Chart.yaml": CHART_YAML + "# bump, so the base blob is not resurrected\n",
+            "chart/templates/service.yaml": service(headless=True, port=50052),
+        },
+    )
+    commit(root, "move the port")
+
+    result = run(root, base)
+    assert result.returncode == 1, result.stdout
+    assert "::error::" in result.stdout
+    assert "could not read" in result.stdout
+    assert f"as of `{base}`" in result.stdout
+    # NOT the legitimate-absence wording — conflating the two is the defect
+    # this pins, and `test_a_chart_new_on_this_branch_is_accepted` is the
+    # control that a GENUINE absence still passes, unaffected.
+    assert "new on this branch" not in result.stdout
+
+
+# ---------------------------------------------------------------------------
 # ADR-0725: a chart's dependencies are resolved before either side renders
 # ---------------------------------------------------------------------------
 
