@@ -257,51 +257,96 @@ MIN_REASON = 24
 IMPL_MATERIAL = re.compile(r"\bimpl(?:\s*<[^>]*>)?\s+Material\s+for\s+([A-Za-z_][A-Za-z0-9_]*)")
 WATCH_SET_FN = re.compile(r"\bfn\s+watch_set\b")
 
-# LEDGER 1240, SECOND PASS. The rule is: a `test` ATOM anywhere inside
-# `cfg(...)` that is NOT inside a `not(...)` call, at ANY depth --
-# `cfg(test)`, `cfg(all(test, ...))` and `cfg(any(test, foo))` all mark TEST
-# code; `cfg(not(test))` and `cfg(all(not(test), x))` do not, because `test`
-# there sits under a `not(`. A single regex cannot express "not nested inside
-# a `not(` that can itself be arbitrarily deep inside `all(`/`any(`" without
-# either a recursive pattern (`regex` module, not stdlib `re`) or a quantifier
-# that nests inside another to track depth -- the exact shape ledger 1240's
-# FIRST pass warned against. `_cfg_predicate_has_test_atom` below is a
-# hand-rolled tokenizer instead: ONE pass over the characters, a stack of
-# booleans recording whether each currently-open paren followed the
-# identifier `not`, so `test` counts only while nothing on the stack is True.
-# `CFG_OPEN` finds where a predicate starts; it is a fixed literal with no
-# quantifier of its own, so there is nothing in either part for a
-# pathological input to backtrack through -- both are linear in line length.
+# LEDGER 1240, THIRD PASS. "A `test` atom anywhere not under `not(`" is the
+# WRONG predicate -- a REVIEW FINDING. `cfg(any(not(x), test))` is PRODUCTION
+# whenever `x` is unset (the disjunction is satisfied by `not(x)` alone, with
+# `test` false), and the second pass's stack-of-booleans tokenizer excluded
+# it as test code anyway: a newly-introduced false ACCEPTANCE, the exact
+# class ledger 1240 exists to close, and ADR-0645-blocking on its own terms
+# (a gate change may not accept an input the shipped gate correctly refused).
+#
+# THE RIGHT PREDICATE asks a different question: does this `cfg(...)` item
+# compile ONLY when `test` is true -- i.e. is the predicate FALSE whenever
+# `test` is false, for every possible value of every OTHER atom? That is a
+# tree evaluation, not a flat nesting check:
+#   * `test`                -> implies test (trivially)
+#   * any other bare atom,
+#     `key = "value"`       -> does NOT imply test (it can be true with test
+#                              false -- nothing here knows its real value)
+#   * `all(c1, c2, ...)`    -> implies test if ANY child does (that one
+#                              conjunct alone forces `all(...)` false
+#                              whenever `test` is false)
+#   * `any(c1, c2, ...)`    -> implies test only if EVERY child does (one
+#                              child that can be true without `test` makes
+#                              the whole disjunction satisfiable without it)
+#   * `not(...)`            -> NEVER implies test, regardless of what is
+#                              inside -- conservative on purpose, the same
+#                              direction `not(not(test))` already took: this
+#                              gate would rather over-judge a genuinely
+#                              test-only predicate as production (a loud
+#                              false refusal) than ever again silently
+#                              exclude one that is not (ADR-0645's whole
+#                              point).
+#
+# `_cfg_predicate_tokens` turns the predicate into a flat token list and
+# returns where it ends; `_tokens_imply_test` evaluates that list with an
+# EXPLICIT stack rather than Python call recursion, so a `not(not(not(...)))`
+# nested tens of thousands deep -- a real adversarial shape, not a
+# hypothetical one -- cannot exhaust the interpreter's own call stack the way
+# a straightforward recursive-descent function would.
+#
+# THE SAME TOKEN-LIST DESIGN ALSO CLOSES A SEPARATE FALSE ACCEPTANCE, A
+# REVIEW FINDING: `cfg(not (test))`, `cfg(not\t(test))` and
+# `cfg(not /*c*/ (test))` (the comment already blanked to spaces by
+# `blank_noncode`) were all wrongly read as test code, because the second
+# pass recomputed "was the identifier before this `(` the word `not`" by
+# re-slicing raw text at the `(` itself -- and whitespace or a blanked
+# comment in between had already cleared that slice to empty. Tokens are
+# emitted independently of what separates them, so `ident("not")` followed
+# by `"("` is the same token pair whether `not` and `(` sit side by side or
+# a comment's worth of blanked spaces apart.
+#
+# LINEARITY, A THIRD REVIEW FINDING: the SECOND pass's `test_spans` called
+# the tokenizer once per `CFG_OPEN` match with no bound on how far past that
+# match it could scan, so a single line built from `"#[cfg(" * 8333` (every
+# copy unclosed) made EVERY one of 8333 calls re-scan toward the end of the
+# 50 KB line -- quadratic, timed at 28.3s against main's 1.6s for the
+# equivalent non-pathological shape. `_cfg_predicate_tokens` now returns the
+# offset where it stopped scanning, and the caller in `test_spans` skips any
+# further `CFG_OPEN` match that starts before that offset -- each character
+# of the line is then tokenized by at most one call, total work linear in
+# line length regardless of how many unclosed `#[cfg(` substrings it holds.
+# The stack-based evaluator was already immune to the SEPARATE quadratic the
+# second pass's `any(depth_is_not)` had (checking the WHOLE stack once per
+# `test` identifier, cost proportional to nesting depth): evaluation here
+# visits each parsed node once and combines only its OWN children, so total
+# work is linear in token count no matter how deep the nesting runs.
 CFG_OPEN = re.compile(r"#\[cfg\(")
 
 
-def _cfg_predicate_has_test_atom(text: str, start: int) -> bool:
-    """Whether the `cfg(...)` predicate beginning at `text[start]` -- the
+def _cfg_predicate_tokens(text: str, start: int) -> tuple[list[tuple[str, str | None]], int]:
+    """Tokenize the `cfg(...)` predicate beginning at `text[start]` -- the
     first character after `cfg`'s own opening `(`, which `CFG_OPEN` already
-    matched -- contains a bare `test` IDENTIFIER that is not nested inside
-    any `not(...)` call, at any depth.
+    matched -- into `(kind, value)` pairs, `kind` one of `"ident"`, `"("`,
+    `")"`, `","`. Returns `(tokens, end)`, `end` the index just past the
+    predicate's own matching `)` (or `len(text)` if it never closes).
 
-    `depth_is_not` is a stack, one entry per currently-open paren INSIDE the
-    predicate, each recording whether that paren immediately followed the
-    identifier `not`. An identifier reading `test` counts only while every
-    entry on the stack is `False` -- so `cfg(all(not(test), test))` counts
-    its SECOND `test` (sibling of the `not(` branch, not inside it) but not
-    its first, which is exactly the per-occurrence rule the class asks for,
-    not a blanket "any `not(` anywhere disqualifies the whole predicate."
+    Every other character -- whitespace, `=`, a blanked-out comment, a
+    quoted string's content and its own quotes -- contributes no token at
+    all, which is what lets an identifier and the `(` that follows it stay
+    adjacent in the TOKEN stream even when a comment or whitespace sits
+    between them in the SOURCE text.
 
-    Returns as soon as the predicate's own closing paren is reached (depth
-    returns to empty on a `)`), so a malformed or very long tail past the
-    actual `cfg(...)` never lengthens the scan.
-
-    Quoted string content is skipped outright (`cfg(feature = "test")` must
-    never match) -- defensive even though `blank_noncode()` already blanks
-    every string before this runs on real source, so the function stays
-    correct if ever handed raw, unblanked text directly.
+    Stops the instant the predicate's own closing paren is reached (an
+    UNMATCHED `)` at stack depth zero), so a malformed or very long tail
+    past the real `cfg(...)` never lengthens the scan -- the property
+    `test_spans` relies on to skip a `CFG_OPEN` match already covered by a
+    previous call.
     """
-    depth_is_not: list[bool] = []
+    tokens: list[tuple[str, str | None]] = []
     i, n = start, len(text)
+    depth = 0
     ident_start = None
-    found = False
     while i < n:
         c = text[i]
         if ident_start is None and c in "\"'":
@@ -316,22 +361,78 @@ def _cfg_predicate_has_test_atom(text: str, start: int) -> bool:
                 ident_start = i
             i += 1
             continue
-        ident = text[ident_start:i] if ident_start is not None else ""
-        if ident == "test" and not any(depth_is_not):
-            found = True
-        ident_start = None
+        if ident_start is not None:
+            tokens.append(("ident", text[ident_start:i]))
+            ident_start = None
         if c == "(":
-            depth_is_not.append(ident == "not")
+            tokens.append(("(", None))
+            depth += 1
         elif c == ")":
-            if not depth_is_not:
-                return found
-            depth_is_not.pop()
+            if depth == 0:
+                return tokens, i + 1
+            tokens.append((")", None))
+            depth -= 1
+        elif c == ",":
+            tokens.append((",", None))
         i += 1
     if ident_start is not None:
-        ident = text[ident_start:n]
-        if ident == "test" and not any(depth_is_not):
-            found = True
-    return found
+        tokens.append(("ident", text[ident_start:n]))
+    return tokens, n
+
+
+def _tokens_imply_test(tokens: list[tuple[str, str | None]]) -> bool:
+    """Whether the predicate `tokens` describes is false whenever `test` is
+    false -- see the module comment above `CFG_OPEN` for the rule per node.
+
+    AN EXPLICIT STACK, NOT PYTHON CALL RECURSION: each entry is
+    `[name, children]` for one open `all(`/`any(`/`not(`/unknown call;
+    closing a `)` pops it, folds `children` into that call's own boolean by
+    the rule for `name`, and pushes the result onto the PARENT frame (or
+    settles `result` if the stack is now empty). A `not(not(not(...)))`
+    tens of thousands deep grows this list, never the interpreter's call
+    stack, so it cannot raise `RecursionError` the way a recursive-descent
+    function evaluating the same tree would.
+
+    A malformed token stream (an unknown call, a bare `)`  with nothing
+    open, a predicate that never closes) answers `False` -- production,
+    the conservative direction -- rather than raising.
+    """
+    stack: list[list] = []
+    result = False
+    i, n = 0, len(tokens)
+    while i < n:
+        kind, value = tokens[i]
+        if kind == "ident":
+            name = value
+            i += 1
+            if i < n and tokens[i][0] == "(":
+                stack.append([name, []])
+                i += 1
+            else:
+                leaf = name == "test"
+                if stack:
+                    stack[-1][1].append(leaf)
+                else:
+                    result = leaf
+        elif kind == ")":
+            if stack:
+                name, children = stack.pop()
+                if name == "not":
+                    value_ = False
+                elif name == "all":
+                    value_ = any(children) if children else False
+                elif name == "any":
+                    value_ = bool(children) and all(children)
+                else:
+                    value_ = False  # an unknown call: conservative, not test
+                if stack:
+                    stack[-1][1].append(value_)
+                else:
+                    result = value_
+            i += 1
+        else:
+            i += 1  # "(" already consumed above when following an ident; "," is a separator
+    return result
 
 # MATCHED AT A POSITION, NEVER AGAINST A SLICE. `re.match(p, text[i:])` copies
 # the tail of the file on every character it inspects, which is quadratic and
@@ -408,13 +509,38 @@ def blank_noncode(text: str) -> str:
     return "".join(out)
 
 
+def _line_implies_test(line: str) -> bool:
+    """Whether `line` carries a `#[cfg(...)]` item whose predicate implies
+    `test` -- see the module comment above `CFG_OPEN` and `_tokens_imply_test`.
+
+    LINEAR IN LINE LENGTH, A REVIEW FINDING: an earlier revision called the
+    tokenizer once per `CFG_OPEN` match with no bound on how far past that
+    match it could scan, so a line built from many UNCLOSED `#[cfg(`
+    substrings made every match re-scan toward the end of the line --
+    quadratic. `pos` tracks how far the most recent call actually scanned
+    (`_cfg_predicate_tokens` returns it); a later match that starts before
+    `pos` is already covered and is skipped without a second call, so every
+    character of the line is tokenized by at most one call regardless of how
+    many `#[cfg(` substrings it holds.
+    """
+    pos = 0
+    for m in CFG_OPEN.finditer(line):
+        if m.start() < pos:
+            continue
+        tokens, end = _cfg_predicate_tokens(line, m.end())
+        pos = end
+        if _tokens_imply_test(tokens):
+            return True
+    return False
+
+
 def test_spans(code: str) -> list[tuple[int, int]]:
     """Line ranges (1-based, inclusive) of every `#[cfg(...)]` item whose
-    predicate contains a `test` atom not nested inside `not(...)` -- see
-    `_cfg_predicate_has_test_atom`. `#[cfg(test)]`, `#[cfg(all(test, ...))]`
-    and `#[cfg(any(test, ...))]` all qualify; `#[cfg(not(test))]` and
-    `#[cfg(all(not(test), x))]` never do, because PRODUCTION code (LEDGER
-    1240) must never be treated as a test span.
+    predicate IMPLIES `test` -- see the module comment above `CFG_OPEN`.
+    `#[cfg(test)]`, `#[cfg(all(test, ...))]` and `#[cfg(all(not(foo), test))]`
+    all qualify (the conjunction can only be true when `test` is); `#[cfg(
+    not(test))]`, `#[cfg(any(test, foo))]` and `#[cfg(any(not(x), test))]`
+    never do, because each can be true in a PRODUCTION build (LEDGER 1240).
 
     The attribute's item is found by taking the first `{` after it and following
     the depth back to zero, over BLANKED code so a format string cannot move it.
@@ -422,11 +548,7 @@ def test_spans(code: str) -> list[tuple[int, int]]:
     """
     spans = []
     lines = code.splitlines()
-    starts = [
-        i
-        for i, line in enumerate(lines)
-        if any(_cfg_predicate_has_test_atom(line, m.end()) for m in CFG_OPEN.finditer(line))
-    ]
+    starts = [i for i, line in enumerate(lines) if _line_implies_test(line)]
     for start in starts:
         depth, j, opened = 0, start, False
         while j < len(lines):
