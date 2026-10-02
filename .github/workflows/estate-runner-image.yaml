@@ -361,7 +361,7 @@ jobs:
           {
             echo "### estate-runner published"
             echo
-            echo 'Pin this in yadgarhq/deploy, infra/estate-front-runner.yaml:'
+            echo 'Pin this in yadgarhq/argocd, applications/estate-front-runner.yaml:'
             echo
             echo '```yaml'
             echo "image: ghcr.io/${OWNER}/estate-runner@${DIGEST}"
