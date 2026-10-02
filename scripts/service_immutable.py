@@ -329,20 +329,60 @@ def base_ref() -> tuple[str | None, str | None]:
     )
 
 
+class ChartArchiveError(Exception):
+    """git could not answer whether `CHART` exists at a revision at all.
+
+    LEDGER 1032. This is a DIFFERENT fact from the chart legitimately not
+    existing at that revision yet -- `chart_at` returning `False` -- and the
+    two must not be floored to the same number. See `chart_at`.
+    """
+
+
 def chart_at(revision: str, destination: Path) -> bool:
     """Write `chart/` as of `revision` under `destination`. False when absent.
 
-    `git archive` rather than a second worktree: it needs no clean index, no
-    lock and no cleanup beyond the temporary directory, and it reads the same
-    object store a worktree would.
+    Raises `ChartArchiveError` when git cannot answer the question at all --
+    a bad revision, a missing object (a partial clone's blob filter, a
+    corrupt pack) or any other git failure. BEFORE LEDGER 1032 that case was
+    indistinguishable from `False`: `git archive`'s own exit code was the
+    only signal read, and "pathspec did not match" (the chart is absent) and
+    "cannot read object" (git failed) both leave it nonzero. `main` floors
+    `False` to a document floor of 0 -- correct for genuine absence, and a
+    silent pass-through-emptiness for a git failure, on the one gate whose
+    whole job is to notice a chart that renders nothing.
+
+    `git ls-tree` DECIDES EXISTENCE FIRST, because it answers from the tree
+    object alone and never touches blob CONTENT -- so it still succeeds when
+    a blob a later `git archive` needs is missing (measured: deleting a
+    chart file's loose object leaves `ls-tree` reporting the tree unchanged
+    and `git archive` exiting nonzero with "cannot read <sha>"). Its own
+    nonzero exit (a revision git cannot resolve, despite `base_ref` having
+    verified it as a commit moments earlier -- shallow or partial history)
+    is the other shape of the same failure.
+
+    `git archive` rather than a second worktree for extraction: it needs no
+    clean index, no lock and no cleanup beyond the temporary directory, and
+    it reads the same object store a worktree would.
     """
+    probe = git("ls-tree", revision, "--", str(CHART))
+    if probe.returncode != 0:
+        raise ChartArchiveError(
+            f"`git ls-tree {revision} -- {CHART}` failed ({probe.returncode}): "
+            f"{one_line(probe.stderr)}"
+        )
+    if not probe.stdout.strip():
+        return False
     archive = subprocess.run(
         ["git", "archive", "--format=tar", revision, str(CHART)],
         capture_output=True,
         check=False,
     )
     if archive.returncode != 0:
-        return False
+        raise ChartArchiveError(
+            f"`git archive {revision} -- {CHART}` failed even though `git "
+            f"ls-tree` found it there ({archive.returncode}): "
+            f"{one_line(archive.stderr.decode(errors='replace'))}"
+        )
     with tempfile.NamedTemporaryFile(suffix=".tar") as handle:
         handle.write(archive.stdout)
         handle.flush()
@@ -644,7 +684,20 @@ def main() -> int:
     base_failure: str | None = None
     with tempfile.TemporaryDirectory() as scratch:
         root = Path(scratch)
-        base_exists = chart_at(revision, root)
+        try:
+            base_exists = chart_at(revision, root)
+        except ChartArchiveError as error:
+            # LEDGER 1032. `chart_at` raising means git could not say whether
+            # the chart exists at `revision` AT ALL -- not that it is absent.
+            # Floor the document count to 0 here and this gate would pass any
+            # render, however empty, on a question it never got to ask.
+            print(
+                f"::error::could not read `{CHART}` as of `{revision}`, so "
+                f"the derived document floor has nothing to derive from: "
+                f"{error}. Re-fetch the base (`fetch-depth: 0`, no `filter:`) "
+                f"or re-run."
+            )
+            return 1
         if base_exists:
             # ADR-0725. This archive just came from `git archive` -- history, so
             # a `dependencies:` key in `Chart.yaml` as of `revision` is exactly
