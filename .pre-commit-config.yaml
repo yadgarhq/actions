@@ -277,3 +277,17 @@ repos:
         pass_filenames: false
         # LEDGER 934, kept identical to `.pre-commit-hooks.yaml`.
         verbose: true
+      # LEDGER 1131. Declared here as well as in `.pre-commit-hooks.yaml`, kept
+      # BYTE-IDENTICAL to the published twin for the reason the actionlint and
+      # no-test-skips entries above record. UNLIKE `chart-baseline` and
+      # `boot-reads-watched`, this is not merely RUNNING IT HERE TO PROVE IT:
+      # `scripts/tests/` is exactly the tree this gate exists to examine, and
+      # `test_next_version.py` / `test_service_immutable.py` are the two files
+      # whose own fixed defect it checks for by name.
+      - id: hermetic-git
+        name: ledger 1131 — a test's own git calls isolate this process's GIT_* env
+        language: script
+        entry: hooks/hermetic_git.py
+        always_run: true
+        pass_filenames: false
+        verbose: true
