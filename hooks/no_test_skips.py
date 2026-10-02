@@ -251,15 +251,18 @@ def audit_pytest_tally(text: str):
 # constructed fixtures in `scripts/tests/test_no_test_skips.py` are each `git
 # init`-ed by the `tree()` helper for exactly this reason.
 #
-# A REVIEW FOUND A SECOND SHAPE THE SAME CLASS COVERS: `--root` can sit INSIDE
-# a real work tree and still have NOTHING tracked under it -- a scratch
-# directory, the wrong subpath. `report_layer_one` refuses that too, on
-# `tracked(root)` being empty, because it reads exactly like a repository
-# that IS tracked and genuinely holds no test suite, and the two are
-# different facts a reader must be able to tell apart. TWO DISTINCT
-# REFUSALS, not one: `walk()` raises `NotAGitRepository` when `root` is not
-# inside a work tree at all; `report_layer_one` refuses separately when it is
-# inside one but tracks zero files.
+# A REVIEW FOUND TWO MORE SHAPES THE SAME CLASS COVERS, both refused where
+# `examined` totals zero: `--root` can sit INSIDE a real work tree and still
+# have NOTHING tracked under it -- a scratch directory, the wrong subpath --
+# or it can be tracked and hold files, none of which this scan reads at all
+# (no Rust, no Python, no command file, no workflow, no config file). Both
+# read exactly like a repository that IS tracked and genuinely holds no test
+# suite, and are different facts a reader must be able to tell apart.
+# THREE DISTINCT REFUSALS exist now, not one: `walk()` raises
+# `NotAGitRepository` when `root` is not inside a work tree at all;
+# `report_layer_one` refuses separately when it is inside one but tracks zero
+# files; and refuses again when it tracks files but `examined` is still all
+# zero.
 PRUNE = {
     ".git",
     ".ci-actions",
@@ -910,17 +913,19 @@ def report_layer_one(root: Path) -> int:
     # at the wrong subpath -- and a real skip sitting there, untracked, is
     # invisible. Or `root` can be tracked and hold files, none of which this
     # scan reads at all (no Rust, no Python, no command file, no workflow).
-    # MEASURED ACROSS EVERY REPOSITORY IN THIS ESTATE (`argocd`, `chart`,
-    # `config`, `deploy`, `dial`, `docs`, `estate`, `gateway`, `iam`, `iam-db`,
-    # `lifecycle`, `platform`, `project`, `project-db`, `proto`, `store`,
-    # `task`, `task-db`, `telemetry`): every one of them has at least one
-    # workflow or command file tracked, so `examined` is never all-zero for a
-    # REAL repository today, even the three the docstring names as having no
-    # Rust or Python test suite at all (`argocd`, `proto`, `deploy`) -- their
-    # `.github/workflows/` alone keeps at least one count above zero. The
-    # README-only fixture this refusal used to let through does not occur in
-    # the actual estate; it is rebuilt below to match what a genuinely
-    # test-free repository's tree really looks like.
+    # MEASURED ACROSS 19 OF THE 22 UNARCHIVED REPOSITORIES IN THIS ESTATE
+    # (`argocd`, `chart`, `config`, `deploy`, `dial`, `docs`, `estate`,
+    # `gateway`, `iam`, `iam-db`, `lifecycle`, `platform`, `project`,
+    # `project-db`, `proto`, `store`, `task`, `task-db`, `telemetry` --
+    # `argocd-verify` refused the fetch and `yadgar` had no local clone):
+    # every one of them has at least one workflow or command file tracked, so
+    # `examined` is never all-zero for a REAL repository today. `proto` is
+    # the one actually at zero Rust and zero Python test content -- `argocd`
+    # and `deploy` each carry a real Python test suite today, despite an
+    # older docstring naming all three as test-free -- and even `proto`'s
+    # `.github/workflows/` alone keeps `examined["workflows"]` above zero.
+    # The README-only fixture this refusal used to let through does not occur
+    # in the actual estate; it is rebuilt below to match `proto`'s shape.
     if not any(examined.values()):
         if not tracked(root):
             print(

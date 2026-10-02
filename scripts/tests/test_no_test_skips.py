@@ -688,14 +688,21 @@ def test_an_empty_tree_reports_what_it_examined(tmp_path):
     an execution audit, so it passes. The counts are what makes that verdict
     readable rather than indistinguishable from a green one (ADR-0645).
 
+    THE ABOVE LIST IS NOW STALE, RE-MEASURED rather than trusted: `argocd`
+    (13 Python files, 254 test items) and `deploy` (4 Python files, 42 test
+    items) each carry a real Python test suite today. `proto` is the one
+    repository in this estate actually at zero Rust AND zero Python test
+    content (0/0, 4 command files, 1 workflow).
+
     THE FIXTURE CARRIES A WORKFLOW, NOT JUST A README — a review found that
     `examined` ALL ZERO is now its own refusal (see
     `test_a_tree_with_nothing_this_gate_reads_is_refused`), and a README-only
-    tree is exactly that: every real no-test-suite repository in this estate
-    (measured: `argocd`, `proto`, `deploy` included) still has at least one
-    `.github/workflows/` file tracked, keeping `examined["workflows"]` at
-    least 1. A fixture with nothing tracked but a README does not occur in
-    the real estate; this one is rebuilt to match what does.
+    tree is exactly that: `proto`, the measured no-test-suite instance, still
+    has at least one `.github/workflows/` file tracked, keeping
+    `examined["workflows"]` at least 1 the same way every one of the 19
+    repositories reachable in this sweep does. A fixture with nothing tracked
+    but a README does not occur in the real estate; this one is rebuilt to
+    match what does.
     """
     root = tree(
         tmp_path,
