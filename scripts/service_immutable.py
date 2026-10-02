@@ -129,6 +129,10 @@ from pathlib import Path
 
 import yaml
 
+# ADR-0806. The shared reader of a chart's declared operator API versions, beside
+# this file both here and on the runner: `ci-pr.yaml` stages the two together.
+from api_versions import DeclarationError, api_version_flags
+
 CHART = Path("chart")
 
 # helm precedes every rendered document with `# Source: <chart>/templates/x.yaml`.
@@ -422,12 +426,37 @@ def sources(output: str) -> dict[str, str]:
     return found
 
 
+def render_command(chart_directory: Path) -> list[str]:
+    """The `helm template` argv for `chart_directory` (ADR-0806).
+
+    EACH SIDE READS ITS OWN DECLARATION. The declaration lives inside the chart
+    (`ci/api-versions.txt`), so the base chart `chart_at` unpacks carries the one
+    it had at `revision`, and this working tree's chart carries its own. A
+    branch that adds a render check and its declaration together, or drops both,
+    is then compared against a base rendered the way the base itself asked to
+    be. With no declaration the argv is the one this gate always ran.
+
+    Raises `DeclarationError` for a declaration that cannot be read.
+    """
+    return [
+        "helm",
+        "template",
+        "immutability-check",
+        str(chart_directory),
+        *api_version_flags(chart_directory),
+    ]
+
+
 def services(
     chart_directory: Path,
 ) -> tuple[dict[str, tuple[dict, str | None]], int, str | None]:
     """Services by name -> (spec, source file), and how many documents rendered."""
+    try:
+        command = render_command(chart_directory)
+    except DeclarationError as error:
+        return {}, 0, str(error)
     render = subprocess.run(
-        ["helm", "template", "immutability-check", str(chart_directory)],
+        command,
         capture_output=True,
         text=True,
         check=False,

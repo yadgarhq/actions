@@ -1,0 +1,132 @@
+# WHAT AN ORGANISATION COMMITS TO ITS OWN GitOps REPOSITORY. Copy this file into
+# your repository, pin the version you want, and you have this installation's
+# configuration. You clone nothing and you never fork the chart (ADR-0705).
+#
+# This file is a REFERENCE, not a live manifest. Nothing in this repository syncs
+# it — `yadgarhq/deploy`'s own `infra/config-app.yaml` is what deploys config into
+# the reference installation. The two differ on purpose: that one tracks `main` by
+# a git path under D55, so a merge here reaches the reference cluster immediately.
+# That is right for the repository that OWNS the chart and wrong for an
+# installation that merely consumes it. An installation pins a version.
+#
+# WHAT YOU MAY OVERRIDE: every knob this chart defines, stated in your own values
+# file with the config file's stem outermost — `shared.tlsRotation.pollSeconds`,
+# `shared.tlsRotation.splayMaxSeconds` and `audit.audit.retentionDays`. A knob read
+# by exactly one service, such as `gateway`'s tools-poll interval, is this chart's
+# knob no longer — since ADR-0740 it lives in that service's own chart instead.
+# The ConfigMap is rendered from a DEEP MERGE of the
+# chart's own document under what you state (ADR-0721), so one line changes one number
+# and you inherit the rest of that document from the version you pinned.
+# `example/values.yaml` beside this file is the shape, and as it stands it is `{}` —
+# copying it changes nothing, which is measured rather than claimed.
+#
+# EVERY OTHER KEY IS REFUSED BY NAME, a typo in a real knob included, because
+# `values.schema.json` is closed at EVERY level. `helm template` and `helm lint
+# --strict` both exit 1 and so does your sync. Two earlier versions got this wrong in
+# opposite directions: up to 0.1.1 a values file you passed was silently DROPPED —
+# byte-identical output, exit 0, no warning — and from 0.1.2 to 0.1.4 it was refused
+# in FULL, so you could change nothing at all without forking the chart. A value whose
+# effect depends on which layer you inspect is the failure ADR-0569 exists to delete;
+# a knob you cannot change without a fork is the one ADR-0721 exists to delete.
+#
+# WHAT AN OVERRIDE COSTS YOU: the comments in the document you override, and only that
+# one. A document you do not touch arrives byte for byte with the reasoning beside each
+# number; a document you DO override is re-emitted from the merged data, so it carries
+# the values without the argument for them. Render the pinned chart to read that.
+#
+# A KNOB WITH NO DEFAULT AT ALL is the one case where you MUST state a value:
+# `chart/consequential.yaml` upstream names those, and it is empty today. HOW YOU WILL
+# LEARN THAT CHANGED: you bump `targetRevision` below and the sync FAILS, naming the
+# knob and the file. ADR-0705 moves the refusal from boot to sync deliberately, and
+# that is why the version is a line you edit rather than a range you track.
+#
+# TO PASS A VALUES FILE you need Argo's MULTI-SOURCE form, because the chart comes
+# from a registry and the values file from your git repository. THE BLOCK BELOW IS
+# COMMENTED OUT ON PURPOSE and `spec.source` further down is live instead — a WRONG
+# `$values` PATH FAILS THE SYNC HARD, so it stays inert until you have a file to point
+# it at. Uncomment it, delete `spec.source`, and fill in your own repository the day
+# you set your first knob.
+#
+#   spec:
+#     sources:
+#       - repoURL: ghcr.io/yadgarhq/charts
+#         chart: config
+#         targetRevision: 0.1.5
+#         helm:
+#           valueFiles:
+#             # $<ref> BELOW, NOT `$self`. The name is yours to choose and it has to
+#             # match the `ref:` on the second source; `self` is not a reserved word
+#             # and nothing supplies one. The path is relative to that repository's
+#             # ROOT, so it is the path you committed the file at.
+#             - $values/config/values.yaml
+#       # A REF-ONLY SOURCE: no `chart:` and no `path:`, because it contributes no
+#       # manifests. Exactly one source in a multi-source Application may render;
+#       # this one only lends its checkout to the interpolation above.
+#       - repoURL: https://github.com/YOUR-ORG/YOUR-GITOPS-REPO.git
+#         targetRevision: main
+#         ref: values
+#
+# NOT VERIFIED AGAINST A LIVE ARGO. The shape above is Argo's documented
+# multi-source form and the `yadgarhq` reference installation does not use it — its
+# `infra/config-app.yaml` passes no values at all and is single-source. Render it
+# yourself before you rely on it.
+#
+# THE SCHEME-LESS `repoURL` IS DELIBERATE. Argo auto-enables OCI for a Helm source
+# whose `repoURL` carries no scheme, which is why `chart:` sits beside it. The
+# explicit `oci://` form also works but takes `path: .` instead of `chart:`, and
+# the two must not be mixed — `yadgarhq/deploy`'s `infra/envoy-gateway.yaml` says
+# so at the site where it chose the other one.
+#
+# NO REPOSITORY SECRET, because the package is public and an anonymous pull is
+# what every installation does. Measured: an anonymous token request for
+# `yadgarhq/charts/config` succeeds and the manifest answers 200. Three
+# Applications in the reference deployment already pull public OCI charts with no
+# credential at all. If Argo ever reports `DENIED` or a 403 here, the package is
+# private rather than absent — GHCR answers the same way for both — and the fix is
+# one visibility flip by whoever owns the registry, not a Secret.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: config
+  # ARGO'S namespace, not the workload's. `destination.namespace` below is where
+  # the ConfigMaps land.
+  namespace: argocd
+  annotations:
+    # BEFORE THE SERVICES THAT MOUNT THESE. A ConfigMap volume is
+    # `optional: false` by default, so a pod whose ConfigMap has not synced yet
+    # does not fail — it sits in `ContainerCreating` indefinitely. That is the
+    # intended outcome when a ConfigMap is genuinely absent and a stuck
+    # installation when it is merely late, so this is ordering rather than
+    # preference. The modules are at wave 10.
+    argocd.argoproj.io/sync-wave: "-12"
+spec:
+  # CHANGE THIS if your Argo uses a project other than `default`.
+  project: default
+  source:
+    repoURL: ghcr.io/yadgarhq/charts
+    chart: config
+    # EDIT THIS, and bump it deliberately. This is the line an upgrade moves, and it
+    # is the only thing that changes what you get — the chart improves upstream and
+    # reaches you when you change this number, which is what a reference buys you
+    # over a clone.
+    #
+    # BARE SEMVER, no leading `v`. The git tag is `v0.1.5`; the chart version is
+    # `0.1.5`, because the release pipeline strips the `v` once and every published
+    # artifact carries the bare form. `chart/Chart.yaml` in this repository still
+    # reads `0.1.0` and that is not the version you get — nothing consumes it,
+    # because the release packages with `--version` taken from the tag.
+    #
+    # 0.1.5 IS THE FIRST VERSION THAT READS A VALUES FILE AT ALL. Pin 0.1.2 to 0.1.4
+    # and every key you set is refused by the schema; pin 0.1.1 or earlier and every
+    # key you set is silently dropped.
+    targetRevision: 0.1.5
+  destination:
+    server: https://kubernetes.default.svc
+    # THE SERVICES' OWN NAMESPACE, and it has to be. A pod can only mount a
+    # ConfigMap from the namespace it runs in, so the configuration for `yadgar`
+    # cannot live anywhere else. EDIT THIS if your services do not run in a
+    # namespace called `yadgar`.
+    namespace: yadgar
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true]
