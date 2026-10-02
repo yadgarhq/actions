@@ -40,6 +40,7 @@ own source text cannot satisfy them.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -86,13 +87,43 @@ PYTEST_FILTERED = (
 PYTEST_PLAIN = "pytest scripts/tests/ -q"
 
 
+def _git_env() -> dict[str, str]:
+    """The environment a fixture repository is built in, with the caller's
+    `GIT_*` stripped.
+
+    HERMETIC BECAUSE IT HAD TO BE (ledger 1131, the gate that stops a fourth
+    file from missing this). This file is run by the `pytest-scripts`
+    pre-commit hook DURING a `git commit`, and `git commit` exports `GIT_DIR`
+    and `GIT_INDEX_FILE` to everything it spawns. A nested `git init` in a
+    temporary directory then obeys the OUTER repository instead of its own.
+    `test_next_version.py` and `test_service_immutable.py` each hit this first
+    and carry the same helper; this is that fix, applied to the file ledger 845
+    gave a reason to call real `git`.
+    """
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(
+        # `core.hooksPath=/dev/null`: a developer with pre-commit installed
+        # through `init.templateDir` gets its hook copied into every `git
+        # init`, which `test_next_version.py`'s helper neutralises the same way.
+        ["git", "-c", "core.hooksPath=/dev/null", *args],
+        cwd=cwd, check=True, capture_output=True, text=True, env=_git_env(),
+    )
+
+
 def run(root: Path):
     """Layer 1 over a tree, the way pre-commit runs it."""
+    # `_git_env` rather than the ambient environment: the gate under test runs
+    # `git` itself (ledger 845), so an inherited `GIT_DIR` would point it at the
+    # outer repository just as it would the fixture builder above.
     return subprocess.run(
         [sys.executable, str(GATE), "--root", str(root)],
         capture_output=True,
         text=True,
         check=False,
+        env=_git_env(),
     )
 
 
@@ -109,14 +140,21 @@ def audit(tmp_path: Path, text: str, name: str = "out.txt"):
 
 
 def tree(tmp_path: Path, files: dict[str, str]) -> Path:
-    """A throwaway repository. Every fixture is a whole tree, because the gate's
-    verdict on an `#[ignore]` depends on the workflows beside it."""
+    """A throwaway GIT REPOSITORY. Every fixture is a whole tree, because the
+    gate's verdict on an `#[ignore]` depends on the workflows beside it.
+
+    LEDGER 845 made this a git repository rather than a plain directory: Layer
+    1 now reads `git ls-files`, which needs an index to read. `git add` alone
+    is enough — `ls-files` reads the index, not a commit.
+    """
     root = tmp_path / "repo"
+    root.mkdir(parents=True, exist_ok=True)
     for rel, text in files.items():
         path = root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
-    root.mkdir(parents=True, exist_ok=True)
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "add", "-A")
     return root
 
 
@@ -648,13 +686,52 @@ def test_an_empty_tree_reports_what_it_examined(tmp_path):
     """A repository with no test suite of any kind — `argocd`, `proto` and
     `deploy` are three — is not a skip, and Layer 1 is a STATIC scan rather than
     an execution audit, so it passes. The counts are what makes that verdict
-    readable rather than indistinguishable from a green one (ADR-0645)."""
-    root = tree(tmp_path, {"README.md": "nothing here\n"})
+    readable rather than indistinguishable from a green one (ADR-0645).
+
+    THE ABOVE LIST IS NOW STALE, RE-MEASURED rather than trusted: `argocd`
+    (13 Python files, 254 test items) and `deploy` (4 Python files, 42 test
+    items) each carry a real Python test suite today. `proto` is the one
+    repository in this estate actually at zero Rust AND zero Python test
+    content (0/0, 4 command files, 1 workflow).
+
+    THE FIXTURE CARRIES A WORKFLOW, NOT JUST A README — a review found that
+    `examined` ALL ZERO is now its own refusal (see
+    `test_a_tree_with_nothing_this_gate_reads_is_refused`), and a README-only
+    tree is exactly that: `proto`, the measured no-test-suite instance, still
+    has at least one `.github/workflows/` file tracked, keeping
+    `examined["workflows"]` at least 1 the same way every one of the 19
+    repositories reachable in this sweep does. A fixture with nothing tracked
+    but a README does not occur in the real estate; this one is rebuilt to
+    match what does.
+    """
+    root = tree(
+        tmp_path,
+        {"README.md": "nothing here\n", ".github/workflows/ci.yaml": WORKFLOW_PLAIN},
+    )
     result = run(root)
-    assert result.returncode == 0
+    assert result.returncode == 0, result.stdout + result.stderr
     assert "0 rust files" in result.stdout
     assert "0 rust test items" in result.stdout
     assert "0 python test items" in result.stdout
+    assert "1 workflows" in result.stdout
+
+
+def test_a_tree_with_nothing_this_gate_reads_is_refused(tmp_path):
+    """A REVIEW FINDING. git tracks something here — a README — but NONE of
+    it is a Rust file, a Python file, a command file or a workflow: nothing
+    this scan reads at all. That is EXAMINED NOTHING, the ADR-0645 floor,
+    even though `tracked(root)` itself is non-empty (unlike
+    `test_an_untracked_root_inside_a_real_repository_is_refused`'s shape,
+    where nothing is tracked under root at all). Measured: no repository in
+    this estate is actually in this state today — every one carries at least
+    one workflow or command file — so this is a constructed floor case, not a
+    reproduction.
+    """
+    root = tree(tmp_path, {"README.md": "nothing here\n"})
+    result = run(root)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "EXAMINED NOTHING" in result.stderr
+    assert "examined nothing proves nothing" in result.stderr
 
 
 def test_a_python_only_repository_is_not_reported_as_zero_test_items(tmp_path):
@@ -992,6 +1069,93 @@ def test_the_same_ignored_test_in_the_repository_is_still_refused(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# LEDGER 845 — THE RESIDUAL LEDGER 860 NAMED: `PRUNE` is a NAME, so a worktree
+# at any name OTHER than `.claude` was still walked. Reading `git ls-files`
+# instead closes the whole class, by what a path IS rather than what it is
+# called.
+# --------------------------------------------------------------------------
+
+
+def test_an_untracked_worktree_at_any_name_is_not_walked(tmp_path):
+    """THE WHOLE POINT OF 845. `wt-other-name` is not in `PRUNE`, and never could
+    be — an operator can put a worktree anywhere. The file below is written to
+    disk but never `git add`-ed, the same fact a REAL second `git worktree`
+    checked out elsewhere has: it belongs to a different repository's index, not
+    this one's.
+    """
+    root = tree(
+        tmp_path,
+        {
+            "Cargo.toml": MANIFEST,
+            "tests/suite.rs": "#[test]\nfn the_real_one() {\n    assert!(true);\n}\n",
+            ".github/workflows/ci.yaml": WORKFLOW_PLAIN,
+        },
+    )
+    stray = root / "wt-other-name" / "tests" / "suite.rs"
+    stray.parent.mkdir(parents=True)
+    stray.write_text(IGNORED_TEST)  # deliberately not `git add`-ed
+    result = run(root)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "wt-other-name" not in result.stdout + result.stderr
+    assert "1 rust files" in result.stdout
+
+
+def test_a_tree_with_no_git_index_is_refused(tmp_path):
+    """A tree Layer 1 cannot read an index for is a failure, not a silent walk
+    of everything under it — the fallback that would reopen this ledger by a
+    different door."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "Cargo.toml").write_text(MANIFEST)
+    result = run(root)
+    assert result.returncode == 1
+    assert "NOT A GIT REPOSITORY" in result.stderr
+
+
+def test_an_untracked_root_inside_a_real_repository_is_refused(tmp_path):
+    """A REVIEW FINDING. `--root` pointed at a directory that is itself inside
+    a real git work tree but has NOTHING tracked under it -- a stray scratch
+    directory, the wrong subpath -- passes with every count at zero exactly
+    the way a genuinely test-free repository does (`tracked()` returning
+    `frozenset()` either way), and a real skip sitting right there, untracked,
+    is invisible. That is a DIFFERENT fact from "this repository is tracked
+    and genuinely holds no test suite" (`test_an_empty_tree_reports_what_it_
+    examined`, which stays green), and the two must not collapse to the same
+    green verdict.
+    """
+    root = tree(
+        tmp_path,
+        {"Cargo.toml": MANIFEST, ".github/workflows/ci.yaml": WORKFLOW_PLAIN},
+    )
+    stray = root / "outer" / "sub" / "tests" / "skip.rs"
+    stray.parent.mkdir(parents=True)
+    stray.write_text(IGNORED_TEST)  # deliberately not `git add`-ed
+    result = run(root / "outer" / "sub")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "nothing" in result.stderr.lower()
+
+
+def test_a_tracked_file_missing_from_disk_is_not_counted_as_examined(tmp_path):
+    """A REVIEW FINDING. A file `git` still tracks but that was deleted from
+    the working tree without staging the deletion reads as `""` and was still
+    counted as an examined file -- inflating the count ADR-0645 relies on to
+    tell "scanned and clean" from "scanned nothing" without having scanned
+    anything real.
+    """
+    # A WORKFLOW BESIDE IT, so the fixture does not ALSO trip the separate
+    # "examined nothing" floor once the deleted file correctly stops counting
+    # -- this test is about the count not being inflated, not about the floor.
+    root = tree(
+        tmp_path,
+        {"src/lib.rs": "fn main() {}\n", ".github/workflows/ci.yaml": WORKFLOW_PLAIN},
+    )
+    (root / "src" / "lib.rs").unlink()
+    result = run(root)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "0 rust files" in result.stdout
+
+
+# --------------------------------------------------------------------------
 # LEDGER 842 — what FEEDS the audit, read out of the workflow rather than
 # asserted about a constructed log.
 # --------------------------------------------------------------------------
@@ -1121,6 +1285,7 @@ def test_the_default_root_is_the_working_directory(tmp_path):
         text=True,
         check=False,
         cwd=root,
+        env=_git_env(),
     )
     # The repository's own `#[ignore]` is refused; the worktree's is not reported.
     assert result.returncode == 1, result.stdout + result.stderr

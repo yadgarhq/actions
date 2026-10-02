@@ -468,11 +468,14 @@
 # nothing and which every service's `src/rotate.rs` calls.
 #
 # ADOPTION IS PER REPOSITORY AND IS NOT AUTOMATIC. A consumer switching this on
-# marks every read in its `src/` first; the gate refuses a repository with no
-# `src/rotate.rs`, because there would be nothing for a marker to name. It sees
-# only the CONSUMER's tree, so a read inside `yadgar-dial`, `yadgar-store` or
-# `yadgar-lifecycle` is judged when that repository adopts the hook, not by the
-# service that calls into it.
+# marks every read in its `src/` first; the gate refuses a repository with
+# neither a `src/rotate.rs` nor a `src/rotate/` (LEDGER 813: `yadgar-lifecycle`
+# split its own 1536-line `src/rotate.rs` into `src/rotate/{mod,inputs,
+# schedule,schedule_error}.rs` under this estate's 500-line ceiling, and a
+# consumer's `src/rotate.rs` crosses it the same way eventually), because there
+# would be nothing for a marker to name. It sees only the CONSUMER's tree, so a
+# read inside `yadgar-dial`, `yadgar-store` or `yadgar-lifecycle` is judged when
+# that repository adopts the hook, not by the service that calls into it.
 - id: boot-reads-watched
   name: ADR-0523 — a boot read is watched, or declared unwatched
   language: script
