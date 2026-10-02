@@ -331,25 +331,49 @@ def test_a_split_rotate_directory_still_refuses_an_unmarked_read(tmp_path):
 
 
 def test_a_flat_rotate_file_and_a_sibling_directory_are_both_read(tmp_path):
-    """REAL RUST 2018, NOT AN ODD TREE. `src/rotate.rs` declaring `mod
-    schedule;` with no `src/rotate/mod.rs` at all is valid, idiomatic Rust --
-    `schedule` then lives at `src/rotate/schedule.rs`, a PARTIAL split that
-    leaves the flat file in place. A marker naming a material declared only in
-    that sibling must be accepted, not refused as unknown: an earlier revision
-    treated the flat file and the directory as mutually exclusive and picked
-    the flat file alone, which refuses exactly this tree.
+    """REAL RUST 2018, NOT AN ODD TREE, AND NOT `tree_with_split_rotate`'s OWN
+    FIXTURE. That helper writes `src/rotate/mod.rs`, and a `src/rotate.rs`
+    ALONGSIDE a `src/rotate/mod.rs` is two files claiming the same module --
+    E0761, a compile error -- so this builds its own tree instead.
+
+    `src/rotate.rs` declaring `mod schedule;` with no `src/rotate/mod.rs` at
+    all is valid, idiomatic Rust -- `schedule` then lives at
+    `src/rotate/schedule.rs`, a PARTIAL split that leaves the flat file in
+    place holding only the `mod` declaration. A marker naming a material
+    declared only in that sibling must be accepted, not refused as unknown:
+    an earlier revision treated the flat file and the directory as mutually
+    exclusive and picked the flat file alone, which refuses exactly this
+    tree. THE FLAT FILE MUST NOT ALSO CONTAIN `fn watch_set` OR `impl
+    Material` of its own -- if it did, the either-or revision would read
+    Side B from the flat file alone and pass by accident, proving nothing
+    about the sibling ever being read.
     """
-    tmp = tree_with_split_rotate(
-        tmp_path,
+    tmp = tmp_path / "repo"
+    write(tmp, "src/rotate.rs", "mod schedule;\n")
+    write(
+        tmp,
+        "src/rotate/schedule.rs",
+        "use crate::serve::ServerTls;\n\n"
+        "impl Material for ServerTls {\n"
+        "    fn files(&self) -> Vec<File<'_>> {\n"
+        "        vec![\n"
+        "            File::certificate(Presented::Serving, self.cert_file()),\n"
+        "            File::read(self.key_file()),\n"
+        "        ]\n"
+        "    }\n"
+        "}\n\n"
+        "pub fn watch_set(listener: Option<&ServerTls>, config: &Configuration) -> Inputs {\n"
+        "    Inputs::of(SERVICE, &[&listener, config])\n"
+        "}\n",
+    )
+    write(
+        tmp,
+        "src/serve.rs",
         "fn load(p: &Path) {\n"
         "    // ADR-0523-WATCHED: ServerTls\n"
         "    let _ = std::fs::read(p);\n"
         "}\n",
     )
-    # The flat file declares nothing of its own -- real if this split only
-    # ever moved material OUT of it -- so a marker naming ServerTls (declared
-    # only in `src/rotate/mod.rs` by this fixture) must still resolve.
-    write(tmp, "src/rotate.rs", "mod schedule;\n")
     run_result = run(tmp)
     assert run_result.returncode == 0, run_result.stderr
     assert "1 filesystem read(s) judged" in run_result.stdout
