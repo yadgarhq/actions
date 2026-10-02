@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LEDGER 1131. A test file shells a throwaway git repository into existence
+r"""LEDGER 1131. A test file shells a throwaway git repository into existence
 under `tmp_path`, and that `git` call must not obey this process's OWN git
 repository instead of the one it just built.
 
@@ -31,9 +31,12 @@ A LOCAL function merely named `run`/`call`/`Popen`, never imported from
 `subprocess`, is not in scope, however it is called -- see
 `subprocess_bindings()`. Within `run`/`check_call`/`check_output`/`call`/
 `Popen`, the argv is a list or tuple literal opening with the string `"git"`,
-whether POSITIONAL (`subprocess.run(["git", ...])`) or the `args=` KEYWORD
-form (`subprocess.run(args=["git", ...])`) -- both real shapes in this
-estate's own test helpers. That call must then carry an `env=` keyword.
+whether POSITIONAL (`subprocess.run(["git", ...])`, the only shape any
+git-shelling test in this estate actually uses today -- `grep -rn 'args=\['
+scripts/tests` finds none) or the `args=` KEYWORD form
+(`subprocess.run(args=["git", ...])`), accepted defensively since nothing
+stops a future test from writing it. That call must then carry an `env=`
+keyword.
 `env=None` (to `subprocess` itself, identical to omitting `env=`),
 `env=os.environ`, `env=os.environ.copy()`, `env=dict(os.environ)`,
 `env={**os.environ, ...}` and `env=os.environ | {...}` (PEP 584) -- the leak
@@ -150,9 +153,11 @@ def is_git_argv(node: ast.AST | None) -> bool:
 
 
 def argv_node(call: ast.Call) -> ast.AST | None:
-    """The call's argv -- positional (`subprocess.run(["git", ...])`) or the
-    `args=` keyword form (`subprocess.run(args=["git", ...])`), both valid
-    and both real in this estate's own test helpers.
+    """The call's argv -- positional (`subprocess.run(["git", ...])`, the only
+    form any git-shelling test in this estate uses today) or the `args=`
+    keyword form (`subprocess.run(args=["git", ...])`), accepted defensively:
+    both are valid `subprocess` calls, even though only the first is measured
+    in use.
     """
     if call.args:
         return call.args[0]
