@@ -80,7 +80,7 @@ import subprocess
 import sys
 from collections import namedtuple
 
-from pr_body import BULLET, bump_for, commit_entries, is_bot
+from pr_body import BULLET, body_lines, bump_for, commit_entries, is_bot
 
 # A BASELINE THIS REFUSES TO COUNT FROM, rather than one it mangles. `int("0a6")`
 # raised, which merely reddened a report once and would now stand between a merge
@@ -139,7 +139,7 @@ def read(messages):
     """
     entries, matches, lenient = [], [], []
     for message in messages:
-        found, strict, loose = commit_entries(message.splitlines())
+        found, strict, loose = commit_entries(body_lines(message))
         entries += found
         matches += strict
         lenient += loose
