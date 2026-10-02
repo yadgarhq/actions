@@ -37,6 +37,7 @@ import yaml
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 import next_version  # noqa: E402
+import pr_body  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "next_version.py"
@@ -325,6 +326,33 @@ def test_an_ambiguous_wrap_reddens():
     assert v.rc == 1
     assert v.nxt == ""
     assert "ambiguous" in "\n".join(v.lines).lower()
+
+
+def test_a_long_squash_subject_does_not_defeat_wrap_reassembly():
+    """LEDGER 941. `%B` is the squash SUBJECT plus the body, and GitHub hard-wraps
+    the pull request BODY at `pr_body.WRAP` columns on its way into history but
+    does NOT wrap the subject — the pull request title plus ` (#NNN)`.
+    `pr_body.looks_wrapped` judges a message AS A WHOLE, so reading the subject
+    as part of it means one over-long title (measured against `origin/main`,
+    2026-10-02: 23 of the last 40 subjects in `yadgarhq/actions` itself are over
+    `pr_body.WRAP`, the widest 157) disables
+    continuation reassembly for the ENTIRE message — truncating every wrapped
+    Changelog bullet at the annotated tag this derives, which never moves once
+    published. `read` must judge wrappedness over the commit's BODY alone.
+    """
+    subject = (
+        "fix: a title on its own long enough to blow the seventy two column "
+        "wrap (#941)"
+    )
+    assert len(subject) > pr_body.WRAP
+    assert len(subject.split()) > 1
+    bullet = "- fix: " + "x" * 55
+    tail = "y" * 20
+    assert len(bullet) + 1 + len(tail) > pr_body.WRAP  # a real greedy-wrap break
+    full = f"{subject}\n\n## Changelog\n\n{bullet}\n{tail}\n"
+    v = call(messages=[full])
+    assert v.rc == 0, "\n".join(v.lines)
+    assert any(tail in e for e in v.entries), v.entries
 
 
 @pytest.mark.parametrize(
