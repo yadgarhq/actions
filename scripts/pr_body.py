@@ -135,6 +135,31 @@ def is_wrap_continuation(previous, line, width=WRAP):
     return len(previous) + 1 + len(words[0]) > width
 
 
+def body_lines(message):
+    """A commit message's lines, the squash SUBJECT dropped.
+
+    LEDGER 941. `%B` is the subject plus the body, and GitHub hard-wraps the
+    pull request BODY at `WRAP` columns on its way into a squash commit but
+    does NOT wrap the subject — the pull request title plus ` (#NNN)`.
+    `looks_wrapped` judges a message AS A WHOLE, so feeding it the subject too
+    means one over-long title makes it read the WHOLE message as author-typed
+    and reassemble nothing, truncating every wrapped Changelog bullet. Two
+    readers need this: `commit_entries` below, for the `version` job's
+    derivation, and `review`'s WRAPPED=true call, for the merge-time template
+    gate reading the same `%B` on a push — ledger 687's own rule is that two
+    readers of one message must not disagree, so both call this rather than
+    each stripping the subject their own way.
+
+    THE SUBJECT NEVER CONTRIBUTES A BULLET OF ITS OWN — it does not open with
+    `-`/`*` — so dropping it costs nothing a caller would otherwise have read,
+    one-line commits (no body at all) included. NEVER called on an unwrapped
+    PULL REQUEST body: that text carries no subject line to drop, and `review`
+    only reaches for this when `wrapped` is true.
+    """
+    lines = message.splitlines()
+    return lines[1:] if lines else lines
+
+
 def commit_entries(lines):
     """Every Changelog bullet in one commit message: its text, and both readings.
 
@@ -338,7 +363,12 @@ def review(text, wrapped):
         # differ and only one of them can be released. A pull request body is
         # kept verbatim — what the author typed is what it says — and so is a
         # commit message the wrap plainly never touched.
-        absorb = wrapped and looks_wrapped((text or "").splitlines())
+        #
+        # LEDGER 941: wrappedness is judged over the BODY alone when `wrapped`
+        # is true, the squash SUBJECT dropped by `body_lines` — see its
+        # docstring. `text` carries no subject at all in the unwrapped case
+        # (a pull request body), so `body_lines` is never reached there.
+        absorb = wrapped and looks_wrapped(body_lines(text or ""))
         bad, lenient = changelog_entries(lines, wrapped, absorb=absorb)
         _, strict = changelog_entries(lines, wrapped)
         if bad:

@@ -135,6 +135,43 @@ def test_a_real_wrapped_commit_message_passes_in_wrapped_mode():
     assert (bump, count) == ("major", 4)
 
 
+def test_a_long_squash_subject_does_not_defeat_the_template_gates_wrap_reading():
+    """LEDGER 941. The `version` job's WRAPPED=true call reads `git log -1
+    --format=%B` -- subject included -- into `review`. Before `body_lines`,
+    one over-long pull request title here disabled absorption for the whole
+    message the identical way it did in `next_version.read`, and ledger 687's
+    own rule is that two readers of the same message must not disagree.
+
+    THE SAME CHANGELOG `test_an_ambiguous_wrap_reddens`-style fixture
+    `next_version`'s own suite uses, because it is the one shape that makes
+    the defect OBSERVABLE through `review`'s return value: a single-bullet
+    fixture loses only its continuation TEXT when absorption is disabled,
+    which `review` does not return at all. Here, losing absorption instead
+    makes a WRAPPED `- feat!:` continuation read as a second entry -- turning
+    a correctly-REFUSED ambiguity (short subject, below) into a silent
+    `major` bump the gate reports no problem with at all.
+    """
+    short_subject = "fix: short (#1)"
+    long_subject = (
+        "fix: a title on its own long enough to blow the seventy two column "
+        "wrap (#941)"
+    )
+    assert len(long_subject) > pr_body.WRAP
+    assert len(long_subject.split()) > 1
+    filler = "x" * 71
+    changelog = f"- fix: a thing\n{filler}\n- feat!: absorbed\n"
+
+    short = pr_body.review(short_subject + "\n\n" + body(changelog=changelog), wrapped=True)
+    long_ = pr_body.review(long_subject + "\n\n" + body(changelog=changelog), wrapped=True)
+
+    # THE CORRECT ANSWER, pinned first so the defect's own answer is visibly
+    # wrong beside it: the wrap makes this Changelog ambiguous, so neither
+    # subject length may derive a version from it.
+    assert short[1:] == (None, 0)
+    assert any("ambiguous" in p for p in short[0])
+    assert long_ == short
+
+
 def test_the_same_wrapped_message_is_refused_in_unwrapped_mode():
     """The two modes must actually differ, or one of them is decoration."""
     problems, _, _ = pr_body.review(body(changelog=WRAPPED_CHANGELOG), wrapped=False)

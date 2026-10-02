@@ -80,7 +80,7 @@ import subprocess
 import sys
 from collections import namedtuple
 
-from pr_body import BULLET, bump_for, commit_entries, is_bot
+from pr_body import BULLET, body_lines, bump_for, commit_entries, is_bot
 
 # A BASELINE THIS REFUSES TO COUNT FROM, rather than one it mangles. `int("0a6")`
 # raised, which merely reddened a report once and would now stand between a merge
@@ -119,30 +119,6 @@ Verdict = namedtuple("Verdict", "rc nxt note entries lines")
 
 def sh(*args):
     return subprocess.run(args, capture_output=True, text=True).stdout.strip()
-
-
-def body_lines(message):
-    """A commit message's lines, the squash SUBJECT dropped.
-
-    LEDGER 941. `%B` is the subject plus the body, and GitHub hard-wraps the
-    pull request BODY at `pr_body.WRAP` columns on its way into a squash commit
-    but does NOT wrap the subject — the pull request title plus ` (#NNN)`.
-    `looks_wrapped` judges a message AS A WHOLE, so feeding it the subject too
-    means one over-long title (measured against `origin/main`, 2026-10-02: 23 of
-    `yadgarhq/actions`'s own last 40 subjects are over `pr_body.WRAP`, the
-    widest 157) makes it read the WHOLE
-    message as author-typed and reassemble nothing — truncating every wrapped
-    Changelog bullet at the annotated tag this derives, which never moves once
-    published. `scripts/repin.py`'s `SUBJECT_BUDGET` keeps that repository's own
-    generated titles under the column instead; this is the fix for every OTHER
-    title in the estate.
-
-    THE SUBJECT NEVER CONTRIBUTES A BULLET OF ITS OWN — it does not open with
-    `-`/`*` — so dropping it costs nothing `commit_entries` would otherwise have
-    read, one-line commits (no body at all) included.
-    """
-    lines = message.splitlines()
-    return lines[1:] if lines else lines
 
 
 def read(messages):
