@@ -628,6 +628,273 @@ def test_the_estates_own_File_type_is_not_a_filesystem_read(tmp_path):
     assert "UNCLASSIFIED" not in run_result.stderr
 
 
+def test_an_unmarked_read_inside_cfg_not_test_is_refused_not_swallowed(tmp_path):
+    r"""LEDGER 1240. `#[cfg(not(test))]` is PRODUCTION code -- it compiles into
+    the binary in every build EXCEPT a test build. The old `test_spans()`
+    regex `#\[cfg\((?:[^)]*\b)?test\b` matches the literal substring `test`
+    inside `not(test)` too, because `[^)]*` happily consumes `not(` (it has no
+    `)`), so a `#[cfg(not(test))] fn` was blanked out of Side A the same way a
+    real `#[cfg(test)]` module is. An unmarked boot read inside it was never
+    judged -- a detector whose forgetting-case is green is the defect.
+    """
+    run_result = run(
+        tree_with(
+            tmp_path,
+            "fn load(p: &Path) {\n"
+            "    // ADR-0523-WATCHED: ServerTls\n"
+            "    let _ = std::fs::read(p);\n"
+            "}\n"
+            "\n"
+            "#[cfg(not(test))]\n"
+            "fn load_prod(q: &Path) {\n"
+            "    let _ = std::fs::read(q);\n"
+            "}\n",
+        )
+    )
+    assert run_result.returncode == 1, run_result.stdout
+    assert "src/serve.rs:8" in run_result.stderr
+    assert "no ADR-0523 marker" in run_result.stderr
+
+
+def test_a_real_test_module_beside_cfg_not_test_is_still_excluded(tmp_path):
+    """The fix must not overcorrect: a GENUINE `#[cfg(test)]` module is still
+    test code and is still not judged, even sitting right next to a
+    `#[cfg(not(test))]` one.
+    """
+    run_result = run(
+        tree_with(
+            tmp_path,
+            "#[cfg(not(test))]\n"
+            "fn load_prod(q: &Path) {\n"
+            "    // ADR-0523-WATCHED: ServerTls\n"
+            "    let _ = std::fs::read(q);\n"
+            "}\n"
+            "\n"
+            "#[cfg(test)]\n"
+            "mod tests {\n"
+            "    #[test]\n"
+            "    fn fixture() {\n"
+            '        let _ = std::fs::read("fixture.pem");\n'
+            "    }\n"
+            "}\n",
+        )
+    )
+    assert run_result.returncode == 0, run_result.stderr
+    assert "1 filesystem read(s) judged" in run_result.stdout
+
+
+def test_a_material_impl_inside_cfg_not_test_is_not_hidden_from_side_b(tmp_path):
+    """LEDGER 1240, THE OTHER DIRECTION: the same false match inside
+    `watch_set_names()` blanks a REAL `impl Material` sitting under
+    `#[cfg(not(test))]` in `src/rotate.rs`, which falsely refuses a correct
+    WATCHED marker naming it -- Side B false refusal on legitimate code.
+
+    `UpstreamTls` names a material found ONLY inside the blanked impl block,
+    never in the `watch_set` signature itself -- `ServerTls` would pass even
+    under the bug, because `watch_set`'s own parameter list already mentions
+    it, which would make this a false green for a reason unrelated to the fix.
+    """
+    rotate = (
+        "#[cfg(not(test))]\n"
+        "impl Material for UpstreamTls {\n"
+        "    fn files(&self) -> Vec<File<'_>> {\n"
+        "        vec![File::read(self.key_file())]\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "pub fn watch_set(config: &Configuration) -> Inputs {\n"
+        "    Inputs::of(SERVICE, &[config])\n"
+        "}\n"
+    )
+    run_result = run(
+        tree_with(
+            tmp_path,
+            "fn load(p: &Path) {\n"
+            "    // ADR-0523-WATCHED: UpstreamTls\n"
+            "    let _ = std::fs::read(p);\n"
+            "}\n",
+            rotate=rotate,
+        )
+    )
+    assert run_result.returncode == 0, run_result.stderr
+
+
+def test_test_not_first_inside_all_is_still_test_code(tmp_path):
+    """LEDGER 1240, SECOND PASS. `cfg(all(feature = "x", test))` puts `test`
+    SECOND rather than first, which the first pass's regex
+    (`(?:all\\(\\s*)?test\\b`, requiring `test` immediately after `all(`) did
+    not match -- a false NEGATIVE the other direction: this read should have
+    been excluded as test code and was not, which also means Side B
+    (`watch_set_names()`) would wrongly blank a real `impl Material` behind
+    the identical predicate.
+    """
+    run_result = run(
+        tree_with(
+            tmp_path,
+            "fn load(p: &Path) {\n"
+            "    // ADR-0523-WATCHED: ServerTls\n"
+            "    let _ = std::fs::read(p);\n"
+            "}\n"
+            "\n"
+            '#[cfg(all(feature = "x", test))]\n'
+            "mod fixture_only {\n"
+            "    fn load_fixture(q: &Path) {\n"
+            "        let _ = std::fs::read(q);\n"
+            "    }\n"
+            "}\n",
+        )
+    )
+    assert run_result.returncode == 0, run_result.stderr
+    assert "1 filesystem read(s) judged" in run_result.stdout
+
+
+def test_cfg_any_containing_test_is_production_code(tmp_path):
+    """LEDGER 1240, THIRD PASS -- INVERTED FROM AN EARLIER REVISION OF THIS
+    TEST, which asserted the opposite and was wrong. `cfg(any(test, foo))`
+    compiles whenever `test` OR `foo` holds -- so it compiles into a
+    PRODUCTION build whenever `foo` is set, regardless of `test`. Treating it
+    as test code (excluding it from Side A, as the second pass's
+    not-nested-under-`not(` rule did) is a false acceptance: an unmarked read
+    behind it would never be judged. `any(...)` implies `test` only when
+    EVERY alternative does, and `foo` does not.
+    """
+    run_result = run(
+        tree_with(
+            tmp_path,
+            "fn load(p: &Path) {\n"
+            "    // ADR-0523-WATCHED: ServerTls\n"
+            "    let _ = std::fs::read(p);\n"
+            "}\n"
+            "\n"
+            "#[cfg(any(test, foo))]\n"
+            "mod fixture_only {\n"
+            "    fn load_fixture(q: &Path) {\n"
+            "        let _ = std::fs::read(q);\n"
+            "    }\n"
+            "}\n",
+        )
+    )
+    assert run_result.returncode == 1, run_result.stdout
+    assert "src/serve.rs:9" in run_result.stderr
+    assert "no ADR-0523 marker" in run_result.stderr
+
+
+def test_test_inside_all_not_is_still_production_code(tmp_path):
+    """`cfg(all(not(test), x))` negates `test` -- the whole predicate is TRUE
+    only when NOT testing (and `x` holds), so this stays production code and
+    an unmarked read inside it must still be refused, not swallowed.
+    """
+    run_result = run(
+        tree_with(
+            tmp_path,
+            "fn load(p: &Path) {\n"
+            "    // ADR-0523-WATCHED: ServerTls\n"
+            "    let _ = std::fs::read(p);\n"
+            "}\n"
+            "\n"
+            '#[cfg(all(not(test), x))]\n'
+            "fn load_prod(q: &Path) {\n"
+            "    let _ = std::fs::read(q);\n"
+            "}\n",
+        )
+    )
+    assert run_result.returncode == 1, run_result.stdout
+    assert "src/serve.rs:8" in run_result.stderr
+    assert "no ADR-0523 marker" in run_result.stderr
+
+
+def test_cfg_any_with_a_negated_child_and_test_is_still_production_code(tmp_path):
+    """B1, THE BLOCKER FROM ADVERSARIAL RE-REVIEW. `cfg(any(not(x), test))`
+    compiles whenever `not(x)` holds -- i.e. whenever `x` is UNSET -- entirely
+    independent of `test`. ADR-0645: the shipped gate on `origin/main`
+    correctly refuses an unmarked read behind this predicate; a candidate
+    that accepts it is a newly-introduced false acceptance, blocking under
+    ADR-0645 regardless of any other improvement in the same change. The
+    earlier `not`-nesting-only rule excluded this as test code because its
+    literal `test` atom sits outside every `not(` frame; the implies-test
+    rule does not, because `any(...)` only implies `test` when EVERY
+    alternative does, and `not(x)` never does.
+    """
+    run_result = run(
+        tree_with(
+            tmp_path,
+            "fn load(p: &Path) {\n"
+            "    // ADR-0523-WATCHED: ServerTls\n"
+            "    let _ = std::fs::read(p);\n"
+            "}\n"
+            "\n"
+            "#[cfg(any(not(x), test))]\n"
+            "fn load_prod(q: &Path) {\n"
+            "    let _ = std::fs::read(q);\n"
+            "}\n",
+        )
+    )
+    assert run_result.returncode == 1, run_result.stdout
+    assert "src/serve.rs:8" in run_result.stderr
+    assert "no ADR-0523 marker" in run_result.stderr
+
+
+def test_all_conjuncts_that_force_test_are_accepted_as_test_only(tmp_path):
+    """ADR-0839 (amends ADR-0645): `all(not(foo), test)` and
+    `all(any(a, b), test)` each carry `test` as a DIRECT conjunct of an
+    `all(...)`, so the whole predicate can only be true when `test` is --
+    under every possible assignment of `foo`/`a`/`b`. The shipped gate on
+    `origin/main` refused both (a false refusal: neither can ever compile
+    outside a test build), and ADR-0839 rules that correcting a PROVEN false
+    refusal is not the newly-accepted-input ADR-0645 forbids. Both read as
+    test code here and their reads are excluded from Side A.
+    """
+    for predicate in ('#[cfg(all(not(foo), test))]', "#[cfg(all(any(a, b), test))]"):
+        run_result = run(
+            tree_with(
+                tmp_path,
+                "fn load(p: &Path) {\n"
+                "    // ADR-0523-WATCHED: ServerTls\n"
+                "    let _ = std::fs::read(p);\n"
+                "}\n"
+                "\n"
+                f"{predicate}\n"
+                "mod fixture_only {\n"
+                "    fn load_fixture(q: &Path) {\n"
+                "        let _ = std::fs::read(q);\n"
+                "    }\n"
+                "}\n",
+            )
+        )
+        assert run_result.returncode == 0, (predicate, run_result.stderr)
+        assert "1 filesystem read(s) judged" in run_result.stdout, predicate
+
+
+def test_not_followed_by_a_comment_then_the_paren_is_still_not(tmp_path):
+    """B2, A REVIEW FINDING. `cfg(not /*c*/ (test))` -- `blank_noncode`
+    already turns the comment into spaces by the time this gate sees it, so
+    the predicate reads as `not          (test)`. An earlier revision
+    recomputed "was the identifier right before this `(` the word `not`" by
+    re-slicing raw text at the `(` itself, and the blanked comment had
+    already cleared that slice to empty -- so this predicate was wrongly read
+    as test code (false acceptance). Tokens are emitted independently of
+    what separates them, so `ident("not")` followed by `"("` is the same
+    token pair whether they are adjacent in the source or a comment apart.
+    """
+    run_result = run(
+        tree_with(
+            tmp_path,
+            "fn load(p: &Path) {\n"
+            "    // ADR-0523-WATCHED: ServerTls\n"
+            "    let _ = std::fs::read(p);\n"
+            "}\n"
+            "\n"
+            "#[cfg(not /*c*/ (test))]\n"
+            "fn load_prod(q: &Path) {\n"
+            "    let _ = std::fs::read(q);\n"
+            "}\n",
+        )
+    )
+    assert run_result.returncode == 1, run_result.stdout
+    assert "src/serve.rs:8" in run_result.stderr
+    assert "no ADR-0523 marker" in run_result.stderr
+
+
 def test_File_open_is_still_a_read(tmp_path):
     run_result = run(
         tree_with(tmp_path, "fn f(p: &Path) { let _ = std::fs::File::open(p); }\n")

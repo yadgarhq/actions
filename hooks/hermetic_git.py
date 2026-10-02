@@ -224,29 +224,48 @@ def is_ambient_environ(node: ast.AST) -> bool:
             if key is None and _is_os_environ(value):
                 return True
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
-        if _is_os_environ(node.left) or _is_os_environ(node.right):
+        # LEDGER 1241. A CHAIN, not just one `|`: `os.environ | {"A": "1"} |
+        # {"B": "2"}` parses LEFT-ASSOCIATIVELY as
+        # `BinOp(BinOp(os.environ, |, {"A": "1"}), |, {"B": "2"})`, so
+        # `os.environ` sits on the LEFT of the INNER BinOp, never as a direct
+        # operand of the outer one. Recursing (rather than calling
+        # `_is_os_environ` on each side) walks back through any number of `|`
+        # merges to find it, the same way a `Dict` literal with no filtering
+        # key still carries the leak however many keys it adds.
+        if is_ambient_environ(node.left) or is_ambient_environ(node.right):
             return True
     return False
 
 
-def subprocess_bindings(tree: ast.AST) -> tuple[set[str], set[str]]:
+def subprocess_bindings(tree: ast.AST) -> tuple[set[str], dict[str, str]]:
     """Which names this file's OWN imports actually bind to `subprocess`.
 
     Returns `(module_names, imported_call_names)`: `module_names` is every
     local name bound to the `subprocess` MODULE (`import subprocess` ->
     `{"subprocess"}`, `import subprocess as sp` -> `{"sp"}`);
-    `imported_call_names` is every name bound `from subprocess import NAME`
-    (aliased or not), so a BARE call to it is still recognised.
+    `imported_call_names` maps every LOCAL name bound `from subprocess import
+    NAME` back to the REAL name it was imported as (`{"check_output":
+    "check_output"}`, or, aliased, `{"co": "check_output"}`), so a BARE call
+    to the local name is still recognised AS WHAT IT REALLY IS.
 
-    A REVIEW FINDING: without this, ANY callable merely named `run`/`call`/
-    `Popen`/... was treated as a subprocess call -- a local test helper or
-    fixture function sharing one of those names, with a `["git", ...]`
-    argument for reasons that have nothing to do with `subprocess`, was a
-    false positive. Only `subprocess.<name>(...)` through a name this file
+    LEDGER 1241: an EARLIER REVISION recorded only the local alias (a `set`),
+    which made `subprocess_call_name` return `"co"` for `from subprocess
+    import check_output as co; co(...)` -- a name `violations()` then checked
+    against `SUBPROCESS_CALLS`, which only ever held the REAL names
+    (`"check_output"`, never an alias nobody can predict). The alias is the
+    map's KEY so a bare call is still recognised; the ORIGINAL name is the
+    VALUE so the caller judging it against `SUBPROCESS_CALLS` sees the name
+    that set was actually written to contain.
+
+    A REVIEW FINDING BEFORE THAT: without this, ANY callable merely named
+    `run`/`call`/`Popen`/... was treated as a subprocess call -- a local test
+    helper or fixture function sharing one of those names, with a `["git",
+    ...]` argument for reasons that have nothing to do with `subprocess`, was
+    a false positive. Only `subprocess.<name>(...)` through a name this file
     actually imported, or a name actually imported FROM `subprocess`, counts.
     """
     module_names: set[str] = set()
-    imported_call_names: set[str] = set()
+    imported_call_names: dict[str, str] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -255,12 +274,12 @@ def subprocess_bindings(tree: ast.AST) -> tuple[set[str], set[str]]:
         elif isinstance(node, ast.ImportFrom):
             if node.module == "subprocess":
                 for alias in node.names:
-                    imported_call_names.add(alias.asname or alias.name)
+                    imported_call_names[alias.asname or alias.name] = alias.name
     return module_names, imported_call_names
 
 
 def subprocess_call_name(
-    node: ast.Call, module_names: set[str], imported_call_names: set[str]
+    node: ast.Call, module_names: set[str], imported_call_names: dict[str, str]
 ) -> str | None:
     func = node.func
     if (
@@ -270,7 +289,7 @@ def subprocess_call_name(
     ):
         return func.attr
     if isinstance(func, ast.Name) and func.id in imported_call_names:
-        return func.id
+        return imported_call_names[func.id]
     return None
 
 
