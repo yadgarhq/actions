@@ -1305,8 +1305,9 @@ jobs:
                 echo "measures pin-to-serving at 285-290s, pin-to-pod-start up to"
                 echo "303s, after the \`${OWNER}/argocd\` write above), then send it"
                 echo "with both left EMPTY — sent earlier it measures the PREVIOUS"
-                echo "pods. Re-running this job buys nothing: it replays"
-                echo "\`${module}\`'s own dispatch, which smoke refuses the same way."
+                echo "pods. Only **Re-run all jobs** could retry, by rebuilding and"
+                echo "re-pushing the image (moving \`:latest\`) to send a dispatch"
+                echo "smoke refuses again."
               fi
               echo "RELEASING AGAIN IS NOT THE REPAIR."
             } >> "$GITHUB_STEP_SUMMARY"
@@ -1337,17 +1338,17 @@ jobs:
               echo ""
               echo "SO OPEN THE ACTIONS TAB OF \`${OWNER}/estate\` FIRST. A smoke"
               echo "run for **${module} v${VERSION}** there means this check was"
-              echo "wrong and there is nothing to repair. Only if none is there,"
+              echo "wrong about whether a run exists. Then"
               echo "send one by hand: smoke takes \`module\` and \`tag\` on"
               echo "\`workflow_dispatch\`, but only \`gateway\` is confirmed by name —"
               if [ "$module" = gateway ]; then
-                echo "send \`module=gateway\` and \`tag=v${VERSION}\`."
+                echo "send \`module=gateway\` and \`tag=v${VERSION}\`, only if none is there."
               else
                 echo "for \`${module}\`, wait until the pods serve the roll (estate"
                 echo "measures pin-to-serving at 285-290s, pin-to-pod-start up to"
                 echo "303s, after the \`${OWNER}/argocd\` write above), then send it"
-                echo "with both left EMPTY — sent earlier it measures the PREVIOUS"
-                echo "pods."
+                echo "with both left EMPTY even if a run is there: that run was"
+                echo "refused; sent earlier, yours measures the PREVIOUS pods."
               fi
               echo "Either way it joins smoke's \`estate-smoke\` group, which queues"
               echo "rather than running alongside, so a blind send while a real run"
