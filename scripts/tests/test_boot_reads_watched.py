@@ -330,9 +330,15 @@ def test_a_split_rotate_directory_still_refuses_an_unmarked_read(tmp_path):
     assert "no ADR-0523 marker" in run_result.stderr
 
 
-def test_a_flat_rotate_file_wins_when_both_shapes_exist(tmp_path):
-    """`src/rotate.rs` plus a stray `src/rotate/` directory is an odd tree, but
-    the gate must pick one deterministically rather than merging silently."""
+def test_a_flat_rotate_file_and_a_sibling_directory_are_both_read(tmp_path):
+    """REAL RUST 2018, NOT AN ODD TREE. `src/rotate.rs` declaring `mod
+    schedule;` with no `src/rotate/mod.rs` at all is valid, idiomatic Rust --
+    `schedule` then lives at `src/rotate/schedule.rs`, a PARTIAL split that
+    leaves the flat file in place. A marker naming a material declared only in
+    that sibling must be accepted, not refused as unknown: an earlier revision
+    treated the flat file and the directory as mutually exclusive and picked
+    the flat file alone, which refuses exactly this tree.
+    """
     tmp = tree_with_split_rotate(
         tmp_path,
         "fn load(p: &Path) {\n"
@@ -340,12 +346,13 @@ def test_a_flat_rotate_file_wins_when_both_shapes_exist(tmp_path):
         "    let _ = std::fs::read(p);\n"
         "}\n",
     )
-    write(tmp, "src/rotate.rs", "// nothing here yet\n")
+    # The flat file declares nothing of its own -- real if this split only
+    # ever moved material OUT of it -- so a marker naming ServerTls (declared
+    # only in `src/rotate/mod.rs` by this fixture) must still resolve.
+    write(tmp, "src/rotate.rs", "mod schedule;\n")
     run_result = run(tmp)
-    # The flat file is empty of material, so if it wins (as it must) Side B is
-    # empty -- the directory's ServerTls impl must NOT be picked up instead.
-    assert run_result.returncode == 1
-    assert "DECLARES NO MATERIAL" in run_result.stderr
+    assert run_result.returncode == 0, run_result.stderr
+    assert "1 filesystem read(s) judged" in run_result.stdout
 
 
 def test_a_rotate_file_declaring_no_material_is_refused(tmp_path):

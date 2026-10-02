@@ -132,19 +132,39 @@ ROTATE_DESC = f"{ROTATE} (or {ROTATE_DIR}/)"
 
 
 def rotate_files() -> list[Path]:
-    """Every file declaring the watch set, in either shape this gate accepts.
+    """Every file declaring the watch set, THE UNION of both shapes this gate
+    accepts, since Rust 2018 makes them coexist by design rather than by
+    accident.
 
     Flat: `src/rotate.rs`. Split: `src/rotate/*.rs` (ledger 813) -- `mod.rs`
     plus whatever siblings the file holds, since `impl Material for T` and
     `fn watch_set` may land in any of them (lifecycle's own split puts them in
-    different files). Neither existing returns an empty list, which the call
-    sites below treat as "no watch set declared".
+    different files).
+
+    `src/rotate.rs` DECLARING `mod schedule;` WITH NO `src/rotate/mod.rs` AT
+    ALL is valid, idiomatic Rust 2018+ -- `schedule` then lives at
+    `src/rotate/schedule.rs`, a sibling directory of the very file that
+    declares it. An earlier revision of this function treated the flat file
+    and the directory as mutually exclusive, picking the flat file whenever
+    both existed. That refuses exactly the tree a PARTIAL split produces: a
+    repository that pulled one `impl Material` out of a growing `rotate.rs`
+    into `rotate/schedule.rs`, without renaming `rotate.rs` to `rotate/mod.rs`,
+    has its watch set declared across BOTH, and the old either-or logic would
+    judge a marker naming the extracted material against the flat file alone
+    and refuse it as unknown. Reading the union costs nothing when only one
+    shape exists and is the only correct answer when both do: growing the
+    accepted name set can only let a WATCHED marker validate more Side B
+    names, never let an unmarked read through unjudged.
+
+    Neither existing returns an empty list, which the call sites below treat
+    as "no watch set declared".
     """
+    found: list[Path] = []
     if ROTATE.is_file():
-        return [ROTATE]
+        found.append(ROTATE)
     if ROTATE_DIR.is_dir():
-        return sorted(p for p in ROTATE_DIR.rglob("*.rs") if p.is_file())
-    return []
+        found.extend(sorted(p for p in ROTATE_DIR.rglob("*.rs") if p.is_file()))
+    return found
 
 # `fs::NAME` calls that read file CONTENT. Each needs a marker.
 READ_FS = {"read", "read_to_string", "read_dir"}
