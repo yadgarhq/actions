@@ -810,3 +810,58 @@
   always_run: true
   pass_filenames: false
   verbose: true
+
+# LEDGER 1131. A test file shells a throwaway git repository into existence under
+# `tmp_path`, and that nested `git` call must not obey this process's OWN git
+# repository instead of the one it just built.
+#
+# THE CLASS HAS BITTEN TWICE ALREADY, by the SAME MECHANISM BOTH TIMES.
+# `pytest-scripts` runs DURING a `git commit`, and `git commit` exports `GIT_DIR`
+# and `GIT_INDEX_FILE` to every process it spawns — a nested `git init`/`git
+# commit` in a fixture directory then addresses the OUTER repository being
+# committed to instead of its own. `test_next_version.py` and
+# `test_service_immutable.py` each hit this and carry the identical fix, a
+# `_git_env()` helper that strips every `GIT_*` variable before the nested call.
+# Nothing stopped a THIRD file from missing it.
+#
+# INVISIBLE ON THE COMMON PATH, which is why a gate is the only thing that
+# closes it. `pre-commit run --all-files` — how this suite is normally
+# exercised, and how CI runs it — sets neither variable, so a file missing the
+# isolation is GREEN on every ordinary run and red only on the one path that
+# matters: a real `git commit` invoking `pytest-scripts`. ADR-0645's class,
+# restated for environment leakage rather than an empty scan.
+#
+# A MARKER'S PRESENCE, NOT A SEMANTIC VERIFICATION of what an `env=` expression
+# actually does — the same shape `boot_reads_watched.py` checks its own markers
+# with. `env=os.environ` is refused the same as a missing `env=`, because it is
+# the identical leak spelled out loud; any OTHER `env=` expression is accepted,
+# on the convention this estate's own two fixtures already settled.
+#
+# TRACKED FILES ONLY, via `git ls-files` rather than a filesystem walk — ledger
+# 845's own fix, reused in the gate written immediately after it.
+#
+# SCOPED TO TEST FILES, never production hook/script code: `service_immutable.py`
+# and `repin.py` shell to `git` with the ambient environment correctly, because
+# they read the real checkout the process already runs in, with no competing
+# fixture repository to confuse it with.
+#
+# `always_run` WITH `pass_filenames: false`: the subject is every tracked test
+# file, not the one somebody touched — the same choice `no-test-skips` and
+# `pytest-scripts` already record, and a `files:` filter would leave a violation
+# added outside the touched set unjudged.
+#
+# `language: script`, NOT python, for the reason every hook above already
+# carries: `language: python` makes pre-commit pip-install this repository,
+# which is not a package. Stdlib only, `ast` included — this reads PYTHON
+# source, where a real parser is free.
+#
+# ADOPTION IS PER REPOSITORY AND IS NOT AUTOMATIC (ADR-0577, ADR-0607). A
+# repository with no git-shelling test fixture references it for free: the
+# examined count reads 0 and the gate passes having looked.
+- id: hermetic-git
+  name: ledger 1131 — a test's own git calls isolate this process's GIT_* env
+  language: script
+  entry: hooks/hermetic_git.py
+  always_run: true
+  pass_filenames: false
+  verbose: true
