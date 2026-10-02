@@ -628,6 +628,97 @@ def test_the_estates_own_File_type_is_not_a_filesystem_read(tmp_path):
     assert "UNCLASSIFIED" not in run_result.stderr
 
 
+def test_an_unmarked_read_inside_cfg_not_test_is_refused_not_swallowed(tmp_path):
+    r"""LEDGER 1240. `#[cfg(not(test))]` is PRODUCTION code -- it compiles into
+    the binary in every build EXCEPT a test build. The old `test_spans()`
+    regex `#\[cfg\((?:[^)]*\b)?test\b` matches the literal substring `test`
+    inside `not(test)` too, because `[^)]*` happily consumes `not(` (it has no
+    `)`), so a `#[cfg(not(test))] fn` was blanked out of Side A the same way a
+    real `#[cfg(test)]` module is. An unmarked boot read inside it was never
+    judged -- a detector whose forgetting-case is green is the defect.
+    """
+    run_result = run(
+        tree_with(
+            tmp_path,
+            "fn load(p: &Path) {\n"
+            "    // ADR-0523-WATCHED: ServerTls\n"
+            "    let _ = std::fs::read(p);\n"
+            "}\n"
+            "\n"
+            "#[cfg(not(test))]\n"
+            "fn load_prod(q: &Path) {\n"
+            "    let _ = std::fs::read(q);\n"
+            "}\n",
+        )
+    )
+    assert run_result.returncode == 1, run_result.stdout
+    assert "src/serve.rs:8" in run_result.stderr
+    assert "no ADR-0523 marker" in run_result.stderr
+
+
+def test_a_real_test_module_beside_cfg_not_test_is_still_excluded(tmp_path):
+    """The fix must not overcorrect: a GENUINE `#[cfg(test)]` module is still
+    test code and is still not judged, even sitting right next to a
+    `#[cfg(not(test))]` one.
+    """
+    run_result = run(
+        tree_with(
+            tmp_path,
+            "#[cfg(not(test))]\n"
+            "fn load_prod(q: &Path) {\n"
+            "    // ADR-0523-WATCHED: ServerTls\n"
+            "    let _ = std::fs::read(q);\n"
+            "}\n"
+            "\n"
+            "#[cfg(test)]\n"
+            "mod tests {\n"
+            "    #[test]\n"
+            "    fn fixture() {\n"
+            '        let _ = std::fs::read("fixture.pem");\n'
+            "    }\n"
+            "}\n",
+        )
+    )
+    assert run_result.returncode == 0, run_result.stderr
+    assert "1 filesystem read(s) judged" in run_result.stdout
+
+
+def test_a_material_impl_inside_cfg_not_test_is_not_hidden_from_side_b(tmp_path):
+    """LEDGER 1240, THE OTHER DIRECTION: the same false match inside
+    `watch_set_names()` blanks a REAL `impl Material` sitting under
+    `#[cfg(not(test))]` in `src/rotate.rs`, which falsely refuses a correct
+    WATCHED marker naming it -- Side B false refusal on legitimate code.
+
+    `UpstreamTls` names a material found ONLY inside the blanked impl block,
+    never in the `watch_set` signature itself -- `ServerTls` would pass even
+    under the bug, because `watch_set`'s own parameter list already mentions
+    it, which would make this a false green for a reason unrelated to the fix.
+    """
+    rotate = (
+        "#[cfg(not(test))]\n"
+        "impl Material for UpstreamTls {\n"
+        "    fn files(&self) -> Vec<File<'_>> {\n"
+        "        vec![File::read(self.key_file())]\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "pub fn watch_set(config: &Configuration) -> Inputs {\n"
+        "    Inputs::of(SERVICE, &[config])\n"
+        "}\n"
+    )
+    run_result = run(
+        tree_with(
+            tmp_path,
+            "fn load(p: &Path) {\n"
+            "    // ADR-0523-WATCHED: UpstreamTls\n"
+            "    let _ = std::fs::read(p);\n"
+            "}\n",
+            rotate=rotate,
+        )
+    )
+    assert run_result.returncode == 0, run_result.stderr
+
+
 def test_File_open_is_still_a_read(tmp_path):
     run_result = run(
         tree_with(tmp_path, "fn f(p: &Path) { let _ = std::fs::File::open(p); }\n")

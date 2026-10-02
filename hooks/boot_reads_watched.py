@@ -257,6 +257,19 @@ MIN_REASON = 24
 IMPL_MATERIAL = re.compile(r"\bimpl(?:\s*<[^>]*>)?\s+Material\s+for\s+([A-Za-z_][A-Za-z0-9_]*)")
 WATCH_SET_FN = re.compile(r"\bfn\s+watch_set\b")
 
+# LEDGER 1240. `#[cfg(test)]` and `#[cfg(all(test, ...))]` mark TEST code; a
+# negative lookahead refuses to match when `cfg(`'s very next token is `not(`
+# -- `#[cfg(not(test))]` is PRODUCTION code (it compiles into every build
+# EXCEPT a test build) and must never be treated as a test span, on either
+# side of this gate's comparison: it is scanned here (Side A, this file's
+# `test_spans`) and again inside `watch_set_names()` (Side B), which blanks
+# `src/rotate.rs` the identical way. The lookahead is zero-width and the
+# optional `all(` group has no quantifier nested inside another quantifier,
+# so matching stays linear in line length -- unlike `RAW_STRING` above, this
+# runs once per line rather than once per character and needs no slice-free
+# rewrite to avoid the same quadratic trap.
+CFG_TEST = re.compile(r"#\[cfg\((?!not\()(?:all\(\s*)?test\b")
+
 # MATCHED AT A POSITION, NEVER AGAINST A SLICE. `re.match(p, text[i:])` copies
 # the tail of the file on every character it inspects, which is quadratic and
 # turns a 60 KB `main.rs` into a hang rather than a slow run -- measured on
@@ -333,7 +346,9 @@ def blank_noncode(text: str) -> str:
 
 
 def test_spans(code: str) -> list[tuple[int, int]]:
-    """Line ranges (1-based, inclusive) of every `#[cfg(test)]` item.
+    """Line ranges (1-based, inclusive) of every `#[cfg(test)]` / `#[cfg(all(test,
+    ...))]` item -- NEVER `#[cfg(not(test))]`, which is production code (LEDGER
+    1240; see `CFG_TEST`).
 
     The attribute's item is found by taking the first `{` after it and following
     the depth back to zero, over BLANKED code so a format string cannot move it.
@@ -341,7 +356,7 @@ def test_spans(code: str) -> list[tuple[int, int]]:
     """
     spans = []
     lines = code.splitlines()
-    starts = [i for i, line in enumerate(lines) if re.search(r"#\[cfg\((?:[^)]*\b)?test\b", line)]
+    starts = [i for i, line in enumerate(lines) if CFG_TEST.search(line)]
     for start in starts:
         depth, j, opened = 0, start, False
         while j < len(lines):
