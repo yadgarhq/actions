@@ -71,30 +71,6 @@ HEADING = re.compile(r"^[ \t]*(#{1,6})[ \t]+(.+?)[ \t]*$", re.M)
 
 REQUIRED = ("What", "Why", "Changelog", "Verification", "Risk")
 
-# DEFENSE IN DEPTH, NOT THE ONLY GUARD, since `actions#97` (ledger 941):
-# `pr_body.body_lines()` now drops the squash SUBJECT before EITHER reader --
-# `next_version.read()`'s derivation and `pr_body.review()`'s merge-time
-# gate -- hands a message to `looks_wrapped`, so a long title can no longer
-# make that judgement treat the whole message as author-typed and reassemble
-# nothing. Before #97 it could: GitHub hard-wraps a pull request BODY at 72
-# columns on its way into the squash commit but does NOT wrap the SUBJECT,
-# and `looks_wrapped` judged the message AS A WHOLE, so one over-long title
-# reaching it alongside the body reassembled no Changelog bullet the wrap had
-# broken, truncating it at the annotated tag -- uncorrectable, since a
-# published tag never moves in this organisation. This budget is kept anyway:
-# a short title reads better, GitHub's own UI still truncates a long one in
-# notifications and commit lists, and it is a second guard against a reader
-# of `%B` that forgets to call `body_lines()` first.
-#
-# 64 RATHER THAN 72, and the difference is the suffix GitHub appends. The squash
-# subject is the pull request title plus ` (#NNN)`, which is 8 characters at a
-# four-digit number — so 64 is the widest title that still lands at or under
-# `pr_body.WRAP` once the number is on it. The estate's own near-miss is the
-# measurement: `actions#78` carried a 77-character title, which would have made
-# an 85-column subject and, before #97, silently truncated all five of its
-# bullets.
-SUBJECT_BUDGET = 64
-
 Dep = namedtuple("Dep", "name producer tag")
 Bump = namedtuple("Bump", "dep tag")
 
@@ -304,25 +280,34 @@ def branch(bumps):
 def title(bumps):
     """The pull request title, which becomes the consumer's squash subject.
 
-    IT NAMES THE CRATES WHILE THEY FIT AND COUNTS THEM WHEN THEY DO NOT. The
-    earlier form appended " to their semver-greatest tags", which put a three-
-    crate subject at 84 columns with the number on it — over
-    `SUBJECT_BUDGET` and over `pr_body.WRAP`. That phrase says what the `## What`
-    section already says at length, so the subject drops it rather than truncating
-    somewhere a reader cannot predict.
+    NAMES EVERY CRATE, UNCONDITIONALLY. THE EARLIER FORM TRUNCATED. A
+    `SUBJECT_BUDGET` constant used to fall back to a bare count past 64
+    columns, because `pr_body.looks_wrapped` judges the message AS A WHOLE and
+    GitHub never wraps the SUBJECT -- so an over-long title made it read every
+    line as author-typed, silently truncating every wrapped Changelog bullet
+    at the annotated tag it reached (ADR-0704). `actions#97` (1cd493f, ledger
+    941) closed that at its root instead of at this call site:
+    `pr_body.body_lines()` now drops the squash subject before EITHER reader
+    of a commit's `%B` -- `next_version.read()`'s derivation,
+    `pr_body.review()`'s merge-time gate -- ever hands a message to
+    `looks_wrapped`, so a long title can no longer defeat either one.
+    ADR-0704's own `revisit_trigger` names exactly that fix and says the cap
+    "becomes unnecessary and should be withdrawn rather than left as folklore"
+    once it lands. It has, so this function no longer imposes one --
+    `test_a_long_subject_no_longer_defeats_the_derivation_end_to_end`
+    (`scripts/tests/test_repin.py`) proves the replacement property: a title
+    this long, through the real derivation call, is still parsed correctly.
 
-    THE FALLBACK IS NOT DECORATION. Nothing here knows the four crate names, so a
-    fifth crate with a long one must not be able to blow the budget — the failure
-    would be a truncated tag message in somebody else's repository, months from
-    now. When the names do not fit, the count does.
+    An earlier form of THIS docstring's own first paragraph also appended " to
+    their semver-greatest tags", which put a three-crate subject at 84 columns
+    with the number on it. That phrase said what the `## What` section already
+    says at length, so the subject still drops it -- shortness remains a
+    legibility choice here, never a safety one.
     """
     ordered = sorted(bumps, key=lambda b: b.dep.name)
-    named = "chore(deps): re-pin " + ", ".join(
+    return "chore(deps): re-pin " + ", ".join(
         b.dep.name.removeprefix("yadgar-") for b in ordered
     )
-    if len(named) <= SUBJECT_BUDGET:
-        return named
-    return f"chore(deps): re-pin {len(ordered)} in-org crate pins"
 
 
 def headings(text):

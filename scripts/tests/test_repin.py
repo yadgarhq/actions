@@ -738,38 +738,6 @@ def test_a_refusal_is_reported_as_an_error_annotation_not_a_traceback(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def test_a_long_subject_defeats_the_derivation_which_is_why_the_budget_exists():
-    """THE NEGATIVE CONTROL. Without it the budget test proves nothing.
-
-    `looks_wrapped` judges the message AS A WHOLE, so ONE over-long multi-word
-    line makes it read every line as author-typed and reassemble nothing. This
-    is the raw mechanism, fed the subject directly rather than through
-    `pr_body.body_lines()` -- which is what `next_version.read()`'s derivation
-    and `pr_body.review()`'s merge-time gate actually call today. Since
-    `actions#97` (ledger 941) both readers drop the squash SUBJECT via
-    `body_lines()` before reaching `looks_wrapped`, so a long title can no
-    longer defeat the derivation by this path; `SUBJECT_BUDGET` is defense in
-    depth against it now rather than the only guard. This test still pins the
-    raw mechanism, because that is WHY `body_lines()` has to drop the subject.
-    """
-    bumps = repin.plan(repin.git_deps(MANIFEST), TAGS)
-    body = repin.body(TEMPLATE, bumps, "yadgarhq/iam-db")
-    long_subject = (
-        "chore(deps): re-pin lifecycle, store, telemetry to their "
-        "semver-greatest tags (#1234)"
-    )
-    assert len(long_subject) > pr_body.WRAP
-    assert len(long_subject.split()) > 1
-    assert not pr_body.looks_wrapped((long_subject + "\n\n" + wrap(body)).splitlines())
-
-
-def test_the_generated_subject_stays_within_the_wrap_column():
-    bumps = repin.plan(repin.git_deps(MANIFEST), TAGS)
-    assert len(repin.title(bumps)) <= repin.SUBJECT_BUDGET
-    # GitHub appends ` (#NNN)` to the squash subject, and that has to fit too.
-    assert len(repin.title(bumps) + " (#1234)") <= pr_body.WRAP
-
-
 def test_the_generated_subject_does_not_defeat_the_derivation():
     bumps = repin.plan(repin.git_deps(MANIFEST), TAGS)
     body = repin.body(TEMPLATE, bumps, "yadgarhq/iam-db")
@@ -781,27 +749,58 @@ def test_the_generated_subject_does_not_defeat_the_derivation():
 
 
 def test_all_four_crates_at_once_still_fit():
-    """The widest real case in this estate: a consumer holding all four crates."""
+    """The widest real case in this estate: a consumer holding all four crates.
+
+    Still names every one of them -- there is no budget left to fall out of
+    (see `title()`'s docstring and ADR-0704's withdrawn cap).
+    """
     four = ["telemetry", "lifecycle", "dial", "store"]
     bumps = [
         repin.Bump(repin.Dep(f"yadgar-{name}", name, "v0.2.9"), "v0.2.13")
         for name in four
     ]
-    assert len(repin.title(bumps)) <= repin.SUBJECT_BUDGET
-    assert len(repin.title(bumps) + " (#1234)") <= pr_body.WRAP
+    subject = repin.title(bumps)
+    for name in four:
+        assert name in subject
+    assert "in-org crate pins" not in subject
 
 
-def test_an_unfittable_crate_list_falls_back_and_still_fits():
-    """A name nobody has yet must not be able to blow the budget."""
+def test_a_long_subject_no_longer_defeats_the_derivation_end_to_end():
+    """LEDGER 1239, ADR-0704'S OWN `revisit_trigger`. `SUBJECT_BUDGET` used to
+    cap `title()` at 64 columns because an over-long SUBJECT made
+    `pr_body.looks_wrapped` read the WHOLE squash message as author-typed and
+    reassemble nothing -- the mechanism `test_the_generated_subject_does_not_
+    defeat_the_derivation` above exercises at a length that never triggered
+    it. This builds a title long enough that it WOULD have, through the SAME
+    raw mechanism (replacing `test_a_long_subject_defeats_the_derivation_
+    which_is_why_the_budget_exists` and `test_an_unfittable_crate_list_falls_
+    back_and_still_fits`, both of which pinned behaviour this function no
+    longer has), and then proves the real derivation call survives it anyway.
+    """
     deps = [
         repin.Dep(f"yadgar-an-extremely-long-crate-name-{i}", f"prod{i}", "v0.1.0")
         for i in range(6)
     ]
     bumps = [repin.Bump(d, "v0.2.0") for d in deps]
     subject = repin.title(bumps)
-    assert len(subject) <= repin.SUBJECT_BUDGET
-    assert len(subject + " (#1234)") <= pr_body.WRAP
-    assert "6" in subject
+    assert len(subject) > pr_body.WRAP, "fixture must genuinely be long enough to matter"
+    assert len(subject.split()) > 1
+
+    body = repin.body(TEMPLATE, bumps, "yadgarhq/iam-db")
+    message = subject + " (#1234)\n\n" + wrap(body)
+
+    # THE RAW MECHANISM, UNCHANGED -- kept as the negative control. Fed
+    # directly (no `body_lines()`), this long subject still poisons
+    # `looks_wrapped` exactly as it always did. What changed is that nothing
+    # feeds it this way in production any more.
+    assert not pr_body.looks_wrapped(message.splitlines())
+
+    # THE REAL PATH. `next_version.read()`'s derivation and `pr_body.review()`'s
+    # `WRAPPED=true` arm both call `body_lines()` before `commit_entries` --
+    # see `pr_body.body_lines()` (`actions#97`, 1cd493f, ledger 941).
+    _, matches, lenient = pr_body.commit_entries(pr_body.body_lines(message))
+    assert len(matches) == 6
+    assert pr_body.bump_for(matches) == pr_body.bump_for(lenient) == "patch"
 
 
 def test_the_subject_is_a_conventional_commits_line_so_the_bump_is_derivable():
