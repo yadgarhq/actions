@@ -524,13 +524,14 @@ jobs:
       # the push above just did.
       #
       # THIS COMMENT NO LONGER CLAIMS A NEW PACKAGE IS PRIVATE BY DEFAULT.
-      # ADR-0723 STATES THE RULE: a package pushed by `GITHUB_TOKEN` from a
-      # public repository is created public. The MEASUREMENT that confirms it
-      # is `scripts/chart_publicly_pullable.py`'s own docstring, not the ADR
-      # itself — `yadgarhq/config` tagged `v0.1.0` on 2026-09-19, and the
-      # `charts/config` package this job created was PUBLIC from the moment it
-      # existed, with no window for a manual settings flip. The gate stays for
-      # what it verifies, not for a defect it no longer has evidence of.
+      # ADR-0723 RECORDS THE GENERAL MEASUREMENT: "a GHCR package pushed by
+      # `GITHUB_TOKEN` from a PUBLIC repository is created public", measured
+      # on 2026-09-19. The SPECIFIC INSTANCE is not in the ADR, and is what
+      # `scripts/chart_publicly_pullable.py`'s own docstring carries instead
+      # — `yadgarhq/config` tagged `v0.1.0` that same day, and the
+      # `charts/config` package this job created was PUBLIC from the moment
+      # it existed, with no window for a manual settings flip. The gate stays
+      # for what it verifies, not for a defect it no longer has evidence of.
       #
       # ADR-0705 IS WHAT MAKES A PRIVATE PACKAGE FATAL RATHER THAN UNTIDY. An installation
       # clones nothing: it REFERENCES this published chart from its own GitOps
