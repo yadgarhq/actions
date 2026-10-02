@@ -166,6 +166,43 @@ def test_env_os_environ_merged_with_bitor_is_refused():
     assert len(found) == 1
 
 
+def test_an_aliased_from_import_is_still_a_subprocess_call():
+    """LEDGER 1241. `subprocess_bindings()` already maps `check_output as co`
+    to the LOCAL name `co` in `imported_call_names` -- but `subprocess_call_name`
+    then returns that same local alias `co`, which `violations()` checks
+    against `SUBPROCESS_CALLS` (`{"run", "check_call", "check_output", ...}`).
+    `"co"` is not in that set, so an aliased import slips past unjudged even
+    though it is exactly the `check_output` call this gate exists to catch.
+    """
+    found = _violations(
+        "from subprocess import check_output as co\n"
+        "def git(cwd, *a):\n"
+        "    co(['git', *a], cwd=cwd)\n"
+    )
+    assert len(found) == 1
+    assert "test_fixture.py:3" in found[0]
+    assert "no `env=`" in found[0]
+
+
+def test_a_chained_bitor_merge_is_still_refused():
+    """LEDGER 1241. `os.environ | {"A": "1"} | {"B": "2"}` parses as
+    `BinOp(BinOp(os.environ, |, {"A": "1"}), |, {"B": "2"})` -- `os.environ`
+    is the LEFT child of the INNER BinOp, never a direct operand of the outer
+    one. `is_ambient_environ`'s BitOr branch checked only
+    `_is_os_environ(node.left) or _is_os_environ(node.right)` at the top
+    level, so a second `|` in the chain hid the leak from a check that never
+    recursed into its own operands.
+    """
+    found = _violations(
+        "import subprocess, os\n"
+        "def git(cwd, *a):\n"
+        "    subprocess.run(['git', *a], cwd=cwd, "
+        "env=os.environ | {'A': '1'} | {'B': '2'})\n"
+    )
+    assert len(found) == 1
+    assert "ambient environment" in found[0]
+
+
 def test_a_local_function_named_run_is_not_treated_as_subprocess():
     """THE FALSE-POSITIVE CONTROL. A local function or test fixture helper
     that happens to be named `run`/`call`/`Popen` and takes a `["git", ...]`
