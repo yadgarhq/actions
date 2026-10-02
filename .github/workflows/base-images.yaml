@@ -261,9 +261,18 @@ jobs:
           fi
           echo "latest -> ${PUSHED}"
 
-      # See ci-release.yaml for why this exists: a new package is private by
-      # default, no API can change it, and nothing else would report it.
-      # ANONYMOUSLY, which is the whole point and is what this check got wrong.
+      # See ci-release.yaml for why this step exists: visibility is a
+      # GitHub-side property this job never sets, and no API changes it either
+      # — it lives on the package's own settings page and nowhere else.
+      # Nothing else here would report that an adopter cannot pull
+      # ANONYMOUSLY, which is the whole point and is what the first version of
+      # this check got wrong.
+      #
+      # THIS COMMENT NO LONGER CLAIMS A NEW PACKAGE IS PRIVATE BY DEFAULT.
+      # ADR-0723 measured the opposite for a package pushed from a public
+      # repository — see `ci-release.yaml`'s own corrected comment for the
+      # measurement. This check stays for what it verifies, not for a defect
+      # it no longer has evidence of.
       #
       # It used `docker manifest inspect`, which runs AFTER docker/login-action
       # in this same job — so it inspected as an authenticated org member and
