@@ -742,10 +742,15 @@ def test_a_long_subject_defeats_the_derivation_which_is_why_the_budget_exists():
     """THE NEGATIVE CONTROL. Without it the budget test proves nothing.
 
     `looks_wrapped` judges the message AS A WHOLE, so ONE over-long multi-word
-    line makes it read every line as author-typed and reassemble nothing. GitHub
-    does not wrap the squash SUBJECT, so a long pull request title is exactly
-    that line — and every wrapped Changelog bullet then reaches the annotated tag
-    truncated at the wrap, uncorrectable because a published tag never moves.
+    line makes it read every line as author-typed and reassemble nothing. This
+    is the raw mechanism, fed the subject directly rather than through
+    `pr_body.body_lines()` -- which is what `next_version.read()`'s derivation
+    and `pr_body.review()`'s merge-time gate actually call today. Since
+    `actions#97` (ledger 941) both readers drop the squash SUBJECT via
+    `body_lines()` before reaching `looks_wrapped`, so a long title can no
+    longer defeat the derivation by this path; `SUBJECT_BUDGET` is defense in
+    depth against it now rather than the only guard. This test still pins the
+    raw mechanism, because that is WHY `body_lines()` has to drop the subject.
     """
     bumps = repin.plan(repin.git_deps(MANIFEST), TAGS)
     body = repin.body(TEMPLATE, bumps, "yadgarhq/iam-db")

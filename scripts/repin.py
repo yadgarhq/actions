@@ -71,20 +71,28 @@ HEADING = re.compile(r"^[ \t]*(#{1,6})[ \t]+(.+?)[ \t]*$", re.M)
 
 REQUIRED = ("What", "Why", "Changelog", "Verification", "Risk")
 
-# THE SQUASH SUBJECT IS PERMANENT HISTORY AND IT MUST NOT EXCEED THE WRAP COLUMN.
-# GitHub hard-wraps a pull request BODY at 72 columns on its way into the squash
-# commit but does NOT wrap the SUBJECT, and `pr_body.looks_wrapped` judges the
-# message AS A WHOLE: one over-long multi-word line makes it read every line as
-# author-typed, so it reassembles nothing and every Changelog bullet the wrap
-# broke reaches the annotated tag TRUNCATED. A published tag never moves in this
-# organisation, so that truncation can never be corrected.
+# DEFENSE IN DEPTH, NOT THE ONLY GUARD, since `actions#97` (ledger 941):
+# `pr_body.body_lines()` now drops the squash SUBJECT before EITHER reader --
+# `next_version.read()`'s derivation and `pr_body.review()`'s merge-time
+# gate -- hands a message to `looks_wrapped`, so a long title can no longer
+# make that judgement treat the whole message as author-typed and reassemble
+# nothing. Before #97 it could: GitHub hard-wraps a pull request BODY at 72
+# columns on its way into the squash commit but does NOT wrap the SUBJECT,
+# and `looks_wrapped` judged the message AS A WHOLE, so one over-long title
+# reaching it alongside the body reassembled no Changelog bullet the wrap had
+# broken, truncating it at the annotated tag -- uncorrectable, since a
+# published tag never moves in this organisation. This budget is kept anyway:
+# a short title reads better, GitHub's own UI still truncates a long one in
+# notifications and commit lists, and it is a second guard against a reader
+# of `%B` that forgets to call `body_lines()` first.
 #
 # 64 RATHER THAN 72, and the difference is the suffix GitHub appends. The squash
 # subject is the pull request title plus ` (#NNN)`, which is 8 characters at a
 # four-digit number — so 64 is the widest title that still lands at or under
 # `pr_body.WRAP` once the number is on it. The estate's own near-miss is the
 # measurement: `actions#78` carried a 77-character title, which would have made
-# an 85-column subject and silently truncated all five of its bullets.
+# an 85-column subject and, before #97, silently truncated all five of its
+# bullets.
 SUBJECT_BUDGET = 64
 
 Dep = namedtuple("Dep", "name producer tag")

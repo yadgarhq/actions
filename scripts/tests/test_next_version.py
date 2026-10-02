@@ -68,9 +68,11 @@ def call(last="v0.2.17", tags=("v0.2.17",), messages=(), authors=None, files=())
 
 
 def test_no_baseline_at_all_stays_green():
-    """`argocd`, `config`, `deploy`, `docs` and `estate` carry zero tags.
+    """`argocd`, `deploy`, `docs` and `estate` carry zero tags. (`config` does
+    not belong on this list — it carries ten, `v0.1.0` through `v0.2.0` — and
+    is on the release model like any other tagged repository.)
 
-    All five are deliberate — two are GitOps manifest repositories Argo syncs
+    All four are deliberate — two are GitOps manifest repositories Argo syncs
     from `main`, and a release model they never opted into must not redden every
     merge. This is the branch that keeps them quiet.
     """

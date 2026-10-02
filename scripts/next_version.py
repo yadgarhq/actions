@@ -24,10 +24,12 @@ nobody should trust.
 THE PREDICATE THAT DECIDES GREEN FROM RED, and it needs no per-repository
 configuration: a repository that already carries at least one `v*` tag has OPTED
 INTO the release model, so a no-tag outcome there is a FAILURE. A repository with
-no baseline at all is not on the model, and silence is the correct answer. Five
-repositories — `argocd`, `config`, `deploy`, `docs`, `estate` — carry zero tags
+no baseline at all is not on the model, and silence is the correct answer. Four
+repositories — `argocd`, `deploy`, `docs`, `estate` — carry zero tags
 deliberately, and two of them are GitOps manifest repositories Argo syncs from
-`main`, where a release tag has never been part of the mechanism.
+`main`, where a release tag has never been part of the mechanism. (`config`
+is NOT among them — it carries ten, `v0.1.0` through `v0.2.0`, and is on the
+release model like any other tagged repository.)
 
 WHAT STAYS GREEN, and neither is an oversight:
 
