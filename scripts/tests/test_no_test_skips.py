@@ -1073,6 +1073,43 @@ def test_a_tree_with_no_git_index_is_refused(tmp_path):
     assert "NOT A GIT REPOSITORY" in result.stderr
 
 
+def test_an_untracked_root_inside_a_real_repository_is_refused(tmp_path):
+    """A REVIEW FINDING. `--root` pointed at a directory that is itself inside
+    a real git work tree but has NOTHING tracked under it -- a stray scratch
+    directory, the wrong subpath -- passes with every count at zero exactly
+    the way a genuinely test-free repository does (`tracked()` returning
+    `frozenset()` either way), and a real skip sitting right there, untracked,
+    is invisible. That is a DIFFERENT fact from "this repository is tracked
+    and genuinely holds no test suite" (`test_an_empty_tree_reports_what_it_
+    examined`, which stays green), and the two must not collapse to the same
+    green verdict.
+    """
+    root = tree(
+        tmp_path,
+        {"Cargo.toml": MANIFEST, ".github/workflows/ci.yaml": WORKFLOW_PLAIN},
+    )
+    stray = root / "outer" / "sub" / "tests" / "skip.rs"
+    stray.parent.mkdir(parents=True)
+    stray.write_text(IGNORED_TEST)  # deliberately not `git add`-ed
+    result = run(root / "outer" / "sub")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "nothing" in result.stderr.lower()
+
+
+def test_a_tracked_file_missing_from_disk_is_not_counted_as_examined(tmp_path):
+    """A REVIEW FINDING. A file `git` still tracks but that was deleted from
+    the working tree without staging the deletion reads as `""` and was still
+    counted as an examined file -- inflating the count ADR-0645 relies on to
+    tell "scanned and clean" from "scanned nothing" without having scanned
+    anything real.
+    """
+    root = tree(tmp_path, {"src/lib.rs": "fn main() {}\n"})
+    (root / "src" / "lib.rs").unlink()
+    result = run(root)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "0 rust files" in result.stdout
+
+
 # --------------------------------------------------------------------------
 # LEDGER 842 — what FEEDS the audit, read out of the workflow rather than
 # asserted about a constructed log.

@@ -250,6 +250,16 @@ def audit_pytest_tally(text: str):
 # non-git tree is a refusal rather than a quiet pass over nothing. The
 # constructed fixtures in `scripts/tests/test_no_test_skips.py` are each `git
 # init`-ed by the `tree()` helper for exactly this reason.
+#
+# A REVIEW FOUND A SECOND SHAPE THE SAME CLASS COVERS: `--root` can sit INSIDE
+# a real work tree and still have NOTHING tracked under it -- a scratch
+# directory, the wrong subpath. `report_layer_one` refuses that too, on
+# `tracked(root)` being empty, because it reads exactly like a repository
+# that IS tracked and genuinely holds no test suite, and the two are
+# different facts a reader must be able to tell apart. TWO DISTINCT
+# REFUSALS, not one: `walk()` raises `NotAGitRepository` when `root` is not
+# inside a work tree at all; `report_layer_one` refuses separately when it is
+# inside one but tracks zero files.
 PRUNE = {
     ".git",
     ".ci-actions",
@@ -342,8 +352,17 @@ def walk(root: Path, suffixes: tuple[str, ...]):
     for rel in sorted(found):
         if any(part in PRUNE for part in rel.parts):
             continue
-        if rel.suffix in suffixes:
-            yield root / rel
+        if rel.suffix not in suffixes:
+            continue
+        path = root / rel
+        # A REVIEW FINDING: git's index can carry a path the working tree no
+        # longer has -- a file deleted without staging the deletion. `read()`
+        # on it returns "" and that empty read used to still count as an
+        # examined file, inflating the count ADR-0645 relies on to tell
+        # "scanned and clean" from "scanned nothing real".
+        if not path.is_file():
+            continue
+        yield path
 
 
 def read(path: Path) -> str:
@@ -875,6 +894,28 @@ def report_layer_one(root: Path) -> int:
             file=sys.stderr,
         )
         return 1
+
+    # A REVIEW FINDING: `root` can be INSIDE a real git work tree and still
+    # have NOTHING tracked under it -- a stray scratch directory, `--root`
+    # pointed at the wrong subpath. That reads EXACTLY like a repository that
+    # is tracked and genuinely holds no test suite (`examined` all zero,
+    # `problems` empty), and the two are different facts: one has nothing to
+    # find, the other has an untracked file right there that this scan never
+    # had an index entry to even look at. `tracked(root)` is empty ONLY in the
+    # first case -- a tracked-but-irrelevant file (a lone `README.md`) keeps
+    # it non-empty, which is what keeps a genuinely test-free repository green.
+    if not tracked(root):
+        print(
+            f"no-test-skips gate: git tracks NOTHING under {root}. Either this\n"
+            "  is not this repository's own root, or the root itself is untracked\n"
+            "  -- a stray scratch directory, a second checkout, a worktree at any\n"
+            "  name. A scan with no tracked file to examine at all proves nothing,\n"
+            "  which is a different fact from a repository that IS tracked and\n"
+            "  genuinely holds no test suite of any kind.",
+            file=sys.stderr,
+        )
+        return 1
+
     counted = ", ".join(f"{v} {k}" for k, v in examined.items())
     if problems:
         print("A test would stop running, and nothing would say so:", file=sys.stderr)
