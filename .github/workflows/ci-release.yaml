@@ -1131,7 +1131,7 @@ jobs:
       # The App — `yadgarhq-bot`, app id 4814165 — holds `contents: write` and
       # `actions: write` organisation-wide with `repository_selection: all`, so
       # `estate` is already in reach. There is NO new credential, no new secret
-      # and no caller change: the five chart-carrying repositories that already
+      # and no caller change: the chart-carrying repositories that already
       # pass `RELEASE_APP_*` to their `release:` job need no edit, and the
       # `workflow_call` signature above is untouched.
       - name: mint a token that can ask estate for a verdict and nothing else
@@ -1164,7 +1164,7 @@ jobs:
       # binary is the tolerance, and it reads exactly the payload sent below: for
       # the gateway it polls `server/discover` for up to ten minutes until the
       # served version equals the dispatched tag with the leading `v` stripped;
-      # for the other four modules it REFUSES — the run ends red, saying the
+      # for every module but the gateway it REFUSES — the run ends red, saying the
       # roll cannot be confirmed from the front door, and none of the nine rows
       # execute (ledger 675 measured the old "prints a caveat and proceeds"
       # shape as six false greens, `yadgarhq/estate#24`). Stage 3's A-04
@@ -1213,8 +1213,8 @@ jobs:
       # filtered by `event=repository_dispatch` is therefore SET-EQUAL to this
       # one, and naming the workflow separates nothing.
       #
-      # THE CROSS-MODULE COLLISION IS STILL OPEN, ON THIS SIDE. Five modules
-      # POST the same event to the same workflow within seconds; each records
+      # THE CROSS-MODULE COLLISION IS STILL OPEN, ON THIS SIDE. Every module
+      # POSTs the same event to the same workflow within seconds; each records
       # the same `before`, each POSTs, and each confirms on whichever run
       # appeared first. Module A can pass on module B's run and print B's URL
       # into A's release summary. `estate`'s `smoke.yaml` now carries
@@ -1270,8 +1270,8 @@ jobs:
         run: |
           set -euo pipefail
           module="${REPO#*/}"
-          # SCOPED TO smoke.yaml, not to the event alone. See above: five
-          # modules rolling at once would otherwise confirm on each other.
+          # SCOPED TO smoke.yaml, not to the event alone. See above: every
+          # module rolling at once would otherwise confirm on each other.
           w="actions/workflows/smoke.yaml/runs"
           runs="repos/${OWNER}/estate/${w}?event=repository_dispatch&per_page=1"
 
@@ -1296,11 +1296,19 @@ jobs:
               echo "the Actions tab of \`${OWNER}/estate\`: smoke's"
               echo "\`workflow_dispatch\` takes \`module\` and \`tag\`, but only"
               echo "\`gateway\` is confirmed by name — naming any other module now"
-              echo "refuses the run. For \`${module}\`, wait for the roll to settle"
-              echo "and send it with both left EMPTY instead; for \`gateway\`, send"
-              echo "\`module=gateway\` and \`tag=v${VERSION}\`. Re-running this job"
-              echo "once the cause is cleared is the other option. RELEASING AGAIN"
-              echo "IS NOT THE REPAIR."
+              echo "refuses the run."
+              if [ "$module" = gateway ]; then
+                echo "Send \`module=gateway\` and \`tag=v${VERSION}\`: smoke polls the"
+                echo "edge for up to ten minutes until it serves that tag."
+              else
+                echo "For \`${module}\`, wait until the pods serve the roll (estate"
+                echo "measures pin-to-serving at 285-290s, pin-to-pod-start up to"
+                echo "303s, after the \`${OWNER}/argocd\` write above), then send it"
+                echo "with both left EMPTY — sent earlier it measures the PREVIOUS"
+                echo "pods. Re-running this job buys nothing: it replays"
+                echo "\`${module}\`'s own dispatch, which smoke refuses the same way."
+              fi
+              echo "RELEASING AGAIN IS NOT THE REPAIR."
             } >> "$GITHUB_STEP_SUMMARY"
             echo "::error::${OWNER}/estate was not asked for a verdict: $1"
             exit 1
@@ -1332,12 +1340,19 @@ jobs:
               echo "wrong and there is nothing to repair. Only if none is there,"
               echo "send one by hand: smoke takes \`module\` and \`tag\` on"
               echo "\`workflow_dispatch\`, but only \`gateway\` is confirmed by name —"
-              echo "for \`${module}\`, wait for the roll to settle and send it with"
-              echo "both left EMPTY instead; for \`gateway\`, send \`module=gateway\`"
-              echo "and \`tag=v${VERSION}\`. Either way it joins smoke's"
-              echo "\`estate-smoke\` group, which queues rather than running"
-              echo "alongside, so a blind send while a real run is already waiting"
-              echo "risks losing a verdict rather than gaining one."
+              if [ "$module" = gateway ]; then
+                echo "send \`module=gateway\` and \`tag=v${VERSION}\`."
+              else
+                echo "for \`${module}\`, wait until the pods serve the roll (estate"
+                echo "measures pin-to-serving at 285-290s, pin-to-pod-start up to"
+                echo "303s, after the \`${OWNER}/argocd\` write above), then send it"
+                echo "with both left EMPTY — sent earlier it measures the PREVIOUS"
+                echo "pods."
+              fi
+              echo "Either way it joins smoke's \`estate-smoke\` group, which queues"
+              echo "rather than running alongside, so a blind send while a real run"
+              echo "is already waiting risks losing a verdict rather than gaining"
+              echo "one."
               echo ""
               echo "Re-running is the heavier option and there is"
               echo "no cheap form of it: this step is \`continue-on-error\`, so the"
@@ -1345,7 +1360,12 @@ jobs:
               echo "it. **Re-run all jobs** can, and that rebuilds and re-pushes"
               echo "the image — moving \`:latest\` again and giving \`:${VERSION}\` a"
               echo "digest \`argocd\` is not pinned to — as well as replaying the"
-              echo "\`argocd\` write. RELEASING AGAIN IS NOT THE REPAIR EITHER."
+              echo "\`argocd\` write."
+              if [ "$module" != gateway ]; then
+                echo "For \`${module}\` it also buys nothing beyond that cost: the"
+                echo "replayed dispatch is refused the same way."
+              fi
+              echo "RELEASING AGAIN IS NOT THE REPAIR EITHER."
             } >> "$GITHUB_STEP_SUMMARY"
             echo "::error::${OWNER}/estate: no smoke run confirmed in ${window}s, but one may exist — open the Actions tab of ${OWNER}/estate before repairing anything. See the job summary."
             exit 1
