@@ -120,7 +120,64 @@ import sys
 from pathlib import Path
 
 # A repository adopting this gate must have a watch set for a marker to name.
+# LEDGER 813: `yadgar-lifecycle` split a 1536-line `src/rotate.rs` into
+# `src/rotate/{mod,inputs,schedule,schedule_error}.rs` to clear this estate's
+# 500-line file ceiling (ledger 719). A consumer's own `src/rotate.rs` crosses
+# that ceiling the same way eventually, so Side B accepts either shape --
+# `rotate_files()` below is where that is decided; ROTATE/ROTATE_DIR are used
+# only for messages and the flat-file fast path.
 ROTATE = Path("src") / "rotate.rs"
+ROTATE_DIR = Path("src") / "rotate"
+ROTATE_DESC = f"{ROTATE} (or {ROTATE_DIR}/)"
+
+
+def rotate_files() -> list[Path]:
+    """Every file declaring the watch set, THE UNION of both shapes this gate
+    accepts, since Rust 2018 makes them coexist by design rather than by
+    accident.
+
+    Flat: `src/rotate.rs`. Split: `src/rotate/*.rs` (ledger 813) -- `mod.rs`
+    plus whatever siblings the file holds, since `impl Material for T` and
+    `fn watch_set` may land in any of them (lifecycle's own split puts them in
+    different files).
+
+    `src/rotate.rs` DECLARING `mod schedule;` WITH NO `src/rotate/mod.rs` AT
+    ALL is valid, idiomatic Rust 2018+ -- `schedule` then lives at
+    `src/rotate/schedule.rs`, a sibling directory of the very file that
+    declares it. An earlier revision of this function treated the flat file
+    and the directory as mutually exclusive, picking the flat file whenever
+    both existed. That refuses exactly the tree a PARTIAL split produces: a
+    repository that pulled one `impl Material` out of a growing `rotate.rs`
+    into `rotate/schedule.rs`, without renaming `rotate.rs` to `rotate/mod.rs`,
+    has its watch set declared across BOTH, and the old either-or logic would
+    judge a marker naming the extracted material against the flat file alone
+    and refuse it as unknown. Reading the union costs nothing when only one
+    shape exists and is the only correct answer when both do: growing the
+    accepted name set can only let a WATCHED marker validate more Side B
+    names, never let an unmarked read through unjudged.
+
+    Neither existing returns an empty list, which the call sites below treat
+    as "no watch set declared".
+
+    TEST-NAMED FILES EXCLUDED THE SAME WAY `source_files()` EXCLUDES THEM FROM
+    SIDE A -- a REVIEW FINDING. `ROTATE_DIR.rglob("*.rs")` read `src/rotate/
+    tests.rs` and `src/rotate/tests/*.rs` the same as any real sibling, so a
+    `FakeMaterial` planted in test-only fixture code -- never compiled into
+    the service -- validated a WATCHED marker naming it. Side B must apply
+    the identical exclusion Side A already does, or a marker can be satisfied
+    by a name that names nothing real.
+    """
+    found: list[Path] = []
+    if ROTATE.is_file():
+        found.append(ROTATE)
+    if ROTATE_DIR.is_dir():
+        for path in sorted(ROTATE_DIR.rglob("*.rs")):
+            if not path.is_file():
+                continue
+            if "tests" in path.parts or path.name == "tests.rs":
+                continue
+            found.append(path)
+    return found
 
 # `fs::NAME` calls that read file CONTENT. Each needs a marker.
 READ_FS = {"read", "read_to_string", "read_dir"}
@@ -368,19 +425,36 @@ def markers(raw: str, spans: list[tuple[int, int]]) -> list[tuple[int, str, str]
 def watch_set_names() -> set[str]:
     """Every name a `WATCHED` marker may legitimately claim.
 
-    The `impl Material for T` blocks in `src/rotate.rs`, plus the identifiers in
-    the `watch_set` signature -- which is where `Path` and `Configuration` live,
-    whose `Material` impls belong to `yadgar-lifecycle` rather than to the
-    service. THIS IS SIDE B, and it is read out of a different file from the one
-    the marker sits in.
+    The `impl Material for T` blocks in `rotate_files()`, plus the identifiers
+    in the `watch_set` signature -- which is where `Path` and `Configuration`
+    live, whose `Material` impls belong to `yadgar-lifecycle` rather than to
+    the service. THIS IS SIDE B, and it is read out of different file(s) from
+    the one the marker sits in.
+
+    `#[cfg(test)]` SPANS ARE BLANKED HERE THE SAME WAY `classify()` ALREADY
+    BLANKS THEM FOR SIDE A -- a REVIEW FINDING. A filename exclusion in
+    `rotate_files()` catches a fake material in a file named for tests; it
+    does not catch one inline, inside a real sibling's own `#[cfg(test)] mod
+    tests { ... }` block. Blanking those spans before scanning for `impl
+    Material`/`fn watch_set` closes that gap the same way it is already
+    closed on the read side.
     """
-    text = blank_noncode(ROTATE.read_text(encoding="utf-8"))
-    names = set(IMPL_MATERIAL.findall(text))
-    match = WATCH_SET_FN.search(text)
-    if match:
-        tail = text[match.start() :]
-        end = tail.find("{")
-        names |= set(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", tail[: end if end > 0 else 0]))
+    names: set[str] = set()
+    for path in rotate_files():
+        code = blank_noncode(path.read_text(encoding="utf-8"))
+        spans = test_spans(code)
+        text = "\n".join(
+            "" if in_span(lineno, spans) else line
+            for lineno, line in enumerate(code.splitlines(), start=1)
+        )
+        names |= set(IMPL_MATERIAL.findall(text))
+        match = WATCH_SET_FN.search(text)
+        if match:
+            tail = text[match.start() :]
+            end = tail.find("{")
+            names |= set(
+                re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", tail[: end if end > 0 else 0])
+            )
     return names
 
 
@@ -396,7 +470,7 @@ def report(problems: list[str]) -> int:
     print("", file=sys.stderr)
     print("  Mark the read with ONE of:", file=sys.stderr)
     print(
-        "    // ADR-0523-WATCHED: <Material>    -- named in src/rotate.rs",
+        f"    // ADR-0523-WATCHED: <Material>    -- named in {ROTATE_DESC}",
         file=sys.stderr,
     )
     print(
@@ -424,12 +498,19 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    if not ROTATE.is_file():
+    sources = rotate_files()
+    if not sources:
+        # NOT NECESSARILY ABSENT. `src/rotate/` can EXIST and still leave
+        # `rotate_files()` empty -- every `.rs` it holds excluded as test
+        # code (a review finding; see `rotate_files()`'s own docstring). The
+        # message says what is actually true of the tree: no accepted `.rs`
+        # file, not that neither path exists.
         print(
-            f"ADR-0523 gate: {ROTATE} DOES NOT EXIST. A repository adopting this\n"
-            "  gate declares its watch set there, and a WATCHED marker names a\n"
-            "  material out of that file. With no watch set there is nothing for\n"
-            "  a marker to name and this gate cannot judge anything.",
+            f"ADR-0523 gate: NO `.rs` FILE UNDER {ROTATE} OR {ROTATE_DIR}/. A\n"
+            "  repository adopting this gate declares its watch set there, and a\n"
+            "  WATCHED marker names a material out of it. With no watch set\n"
+            "  there is nothing for a marker to name and this gate cannot judge\n"
+            "  anything.",
             file=sys.stderr,
         )
         return 1
@@ -437,10 +518,10 @@ def main() -> int:
     names = watch_set_names()
     if not names:
         print(
-            f"ADR-0523 gate: {ROTATE} DECLARES NO MATERIAL AND NO watch_set.\n"
-            "  Side B of this comparison is empty, so every WATCHED marker would\n"
-            "  be refused and every UNWATCHED one accepted -- a verdict that says\n"
-            "  nothing about the watch set.",
+            f"ADR-0523 gate: {ROTATE_DESC} DECLARES NO MATERIAL AND NO\n"
+            "  watch_set. Side B of this comparison is empty, so every WATCHED\n"
+            "  marker would be refused and every UNWATCHED one accepted -- a\n"
+            "  verdict that says nothing about the watch set.",
             file=sys.stderr,
         )
         return 1
@@ -479,7 +560,7 @@ def main() -> int:
             if kind == "watched" and payload not in names:
                 problems.append(
                     f"{path}:{read}: ADR-0523-WATCHED names `{payload}`, which "
-                    f"{ROTATE} does not declare. A marker may only name a material "
+                    f"{ROTATE_DESC} does not declare. A marker may only name a material "
                     "the watch set actually folds in."
                 )
             if kind == "unwatched" and len(payload) < MIN_REASON:
@@ -491,7 +572,7 @@ def main() -> int:
 
     print(
         f"ADR-0523 gate: {len(files)} non-test file(s) under {' '.join(roots)}, "
-        f"{judged} filesystem read(s) judged against {len(names)} name(s) in {ROTATE}."
+        f"{judged} filesystem read(s) judged against {len(names)} name(s) in {ROTATE_DESC}."
     )
 
     # THE PROBLEMS COME BEFORE THE FLOOR, and the order is not cosmetic. An
