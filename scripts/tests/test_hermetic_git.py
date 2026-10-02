@@ -85,7 +85,50 @@ def test_env_os_environ_spelled_out_is_refused_the_same_as_missing():
         "    subprocess.run(['git', *a], cwd=cwd, env=os.environ)\n"
     )
     assert len(found) == 1
-    assert "env=os.environ" in found[0]
+    assert "ambient environment" in found[0]
+
+
+def test_env_os_environ_copy_is_refused_the_same_as_the_bare_attribute():
+    """`.copy()` makes a new dict, but every `GIT_*` key is still in it."""
+    found = _violations(
+        "import subprocess, os\n"
+        "def git(cwd, *a):\n"
+        "    subprocess.run(['git', *a], cwd=cwd, env=os.environ.copy())\n"
+    )
+    assert len(found) == 1
+
+
+def test_env_dict_of_os_environ_is_refused_the_same_as_the_bare_attribute():
+    found = _violations(
+        "import subprocess, os\n"
+        "def git(cwd, *a):\n"
+        "    subprocess.run(['git', *a], cwd=cwd, env=dict(os.environ))\n"
+    )
+    assert len(found) == 1
+
+
+def test_env_unpacking_os_environ_in_a_dict_literal_is_refused():
+    """`{**os.environ, 'FOO': 'bar'}` only ADDS a key; it filters nothing
+    out, so every `GIT_*` key rides along unchanged."""
+    found = _violations(
+        "import subprocess, os\n"
+        "def git(cwd, *a):\n"
+        "    subprocess.run(['git', *a], cwd=cwd, env={**os.environ, 'FOO': 'bar'})\n"
+    )
+    assert len(found) == 1
+
+
+def test_env_comprehension_over_os_environ_items_is_still_accepted():
+    """THE CONTROL for the three refusals above: a dict COMPREHENSION that
+    filters `os.environ.items()` — the real `_git_env()` shape — is a
+    different AST node (`DictComp`, not `Dict`/`Call`) and must stay green."""
+    found = _violations(
+        "import subprocess, os\n"
+        "def git(cwd, *a):\n"
+        "    env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}\n"
+        "    subprocess.run(['git', *a], cwd=cwd, env=env)\n"
+    )
+    assert found == []
 
 
 def test_check_call_check_output_and_popen_are_all_covered():

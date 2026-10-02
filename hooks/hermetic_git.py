@@ -26,11 +26,13 @@ WHAT THIS CHECKS, MECHANICALLY. Every `subprocess.run`/`check_call`/
 `check_output`/`call`/`Popen` call whose first positional argument is a
 list or tuple literal opening with the string `"git"` -- the shape every
 git-shelling test in this estate already uses -- must carry an `env=`
-keyword. `env=os.environ` (the leak written out loud instead of implied by
-omission) is refused the same way a missing `env=` is; passing it through
-any OTHER expression -- a call to a helper, a dict literal, a dict built by
-unpacking something else -- is accepted. THIS IS NOT A PROOF the helper
-actually filters `GIT_*`: it is the same shape of check `boot_reads_watched.py`
+keyword. `env=os.environ`, `env=os.environ.copy()`, `env=dict(os.environ)` and
+`env={**os.environ, ...}` (the leak written out loud, or wrapped in just
+enough code to look deliberate) are each refused the same way a missing
+`env=` is; passing it through any OTHER expression -- a call to a helper, a
+dict comprehension that filters `os.environ.items()` -- is accepted. THIS IS
+NOT A PROOF the helper actually filters `GIT_*`: it is the same shape of
+check `boot_reads_watched.py`
 makes about its own markers, a MARKER'S PRESENCE rather than a semantic
 verification of what it does, matched against the one convention this
 estate's own fixtures already settled on (`_git_env()` in `test_next_version.py`
@@ -43,6 +45,17 @@ which reads the call's own argument list rather than tracing data flow.
 Every real `git`-shelling test in this estate today calls `subprocess.run`
 with the list written inline, so this is a real gap and not a theoretical
 one being pre-empted.
+
+A SECOND, NAMED BLIND SPOT: a test that runs a SCRIPT which itself shells to
+`git` -- `subprocess.run([sys.executable, str(GATE), ...])` -- with no `env=`
+of its own. The nested `git` call is inside the gate under test, not inside
+this test file, so the AST scan here finds no `["git", ...]` literal to flag
+at all. That call still needs isolating, for the identical reason: an
+inherited `GIT_DIR` reaches the gate's own `git` invocations exactly as it
+would a bare one. `test_next_version.py`'s and `test_no_test_skips.py`'s own
+`run()` helpers already pass `env=_git_env()` to that outer call for this
+reason, but this gate cannot verify it -- the leak would surface one process
+boundary away from anything written here.
 
 SCOPED TO TEST FILES, NEVER PRODUCTION HOOK CODE. `scripts/service_immutable.py`
 and `scripts/repin.py` also shell out to `git` with no `env=` override, and
@@ -131,9 +144,50 @@ def env_keyword(call: ast.Call) -> ast.AST | None:
     return None
 
 
+def _is_os_environ(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == "environ"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "os"
+    )
+
+
 def is_ambient_environ(node: ast.AST) -> bool:
-    """Whether `node` is plainly `os.environ` -- the leak spelled out loud."""
-    return isinstance(node, ast.Attribute) and node.attr == "environ"
+    """Whether `node` passes `os.environ` through with nothing that could
+    filter `GIT_*` out of it -- the leak spelled out loud, or wrapped in just
+    enough code to look deliberate.
+
+    CAUGHT: `os.environ`, `os.environ.copy()`, `dict(os.environ)`, and a dict
+    literal that unpacks `**os.environ` -- `{**os.environ, "FOO": "bar"}` only
+    ADDS a key, it does not filter one out, so it carries the leak too. NOT
+    caught: a dict COMPREHENSION over `os.environ.items()` -- `{k: v for k, v
+    in os.environ.items() if not k.startswith("GIT_")}`, the `_git_env()`
+    convention this gate exists to require -- a `ast.DictComp`, a different
+    node entirely from the `ast.Dict` literal checked here.
+    """
+    if _is_os_environ(node):
+        return True
+    if isinstance(node, ast.Call):
+        func = node.func
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr == "copy"
+            and _is_os_environ(func.value)
+        ):
+            return True
+        if (
+            isinstance(func, ast.Name)
+            and func.id == "dict"
+            and len(node.args) == 1
+            and _is_os_environ(node.args[0])
+        ):
+            return True
+    if isinstance(node, ast.Dict):
+        for key, value in zip(node.keys, node.values):
+            if key is None and _is_os_environ(value):
+                return True
+    return False
 
 
 def subprocess_call_name(node: ast.Call) -> str | None:
@@ -159,8 +213,8 @@ def violations(path: Path, tree: ast.AST) -> list[str]:
             continue
         found.append(
             f"{path}:{node.lineno}: a subprocess `git` call carries "
-            f"{'env=os.environ' if env is not None else 'no `env=`'}, so this "
-            f"process's own GIT_* leaks into it. A nested `git init`/`git "
+            f"{'an unfiltered copy of the ambient environment' if env is not None else 'no `env=`'}"
+            f", so this process's own GIT_* leaks into it. A nested `git init`/`git "
             f"commit` under `tmp_path` then addresses the OUTER repository "
             f"this gate itself runs in rather than the fixture it just "
             f"built -- ledger 1131, and it has cost two files already. Pass "
