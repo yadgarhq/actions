@@ -264,7 +264,88 @@ def test_a_repository_without_a_watch_set_file_is_refused(tmp_path):
     write(tmp_path, "src/serve.rs", "fn main() {}\n")
     run_result = run(tmp_path)
     assert run_result.returncode == 1
-    assert "DOES NOT EXIST" in run_result.stderr
+    assert "NEITHER" in run_result.stderr
+    assert "EXISTS" in run_result.stderr
+
+
+def tree_with_split_rotate(tmp_path: Path, body: str) -> Path:
+    """LEDGER 813, LEDGER 719: `yadgar-lifecycle` split a 1536-line
+    `src/rotate.rs` into `src/rotate/{mod,inputs,schedule,schedule_error}.rs`
+    to clear this estate's 500-line file ceiling. A consumer's own
+    `src/rotate.rs` crosses that ceiling the same way eventually, so this
+    fixture puts the `impl Material` in one sibling and `fn watch_set` in
+    another -- matching lifecycle's real split, where `Configuration`'s impl
+    lives in `schedule.rs` rather than `mod.rs`.
+    """
+    write(
+        tmp_path,
+        "src/rotate/mod.rs",
+        "mod schedule;\n\n"
+        "use crate::serve::ServerTls;\n\n"
+        "impl Material for ServerTls {\n"
+        "    fn files(&self) -> Vec<File<'_>> {\n"
+        "        vec![\n"
+        "            File::certificate(Presented::Serving, self.cert_file()),\n"
+        "            File::read(self.key_file()),\n"
+        "        ]\n"
+        "    }\n"
+        "}\n",
+    )
+    write(
+        tmp_path,
+        "src/rotate/schedule.rs",
+        "pub fn watch_set(listener: Option<&ServerTls>, config: &Configuration) -> Inputs {\n"
+        "    Inputs::of(SERVICE, &[&listener, config])\n"
+        "}\n",
+    )
+    write(tmp_path, "src/serve.rs", body)
+    return tmp_path
+
+
+def test_a_split_rotate_directory_is_accepted(tmp_path):
+    """THE WHOLE POINT OF 813: the directory form must not hard-fail.
+
+    Before the fix, `ROTATE.is_file()` is False for a directory and the gate
+    refuses with "DOES NOT EXIST" even though the watch set is fully declared.
+    """
+    run_result = run(
+        tree_with_split_rotate(
+            tmp_path,
+            "fn load(p: &Path) {\n"
+            "    // ADR-0523-WATCHED: ServerTls\n"
+            "    let _ = std::fs::read(p);\n"
+            "}\n",
+        )
+    )
+    assert run_result.returncode == 0, run_result.stderr
+    assert "1 filesystem read(s) judged" in run_result.stdout
+
+
+def test_a_split_rotate_directory_still_refuses_an_unmarked_read(tmp_path):
+    """The directory form is accepted, not exempted -- it still judges reads."""
+    run_result = run(
+        tree_with_split_rotate(tmp_path, "fn load(p: &Path) {\n    std::fs::read(p);\n}\n")
+    )
+    assert run_result.returncode == 1
+    assert "no ADR-0523 marker" in run_result.stderr
+
+
+def test_a_flat_rotate_file_wins_when_both_shapes_exist(tmp_path):
+    """`src/rotate.rs` plus a stray `src/rotate/` directory is an odd tree, but
+    the gate must pick one deterministically rather than merging silently."""
+    tmp = tree_with_split_rotate(
+        tmp_path,
+        "fn load(p: &Path) {\n"
+        "    // ADR-0523-WATCHED: ServerTls\n"
+        "    let _ = std::fs::read(p);\n"
+        "}\n",
+    )
+    write(tmp, "src/rotate.rs", "// nothing here yet\n")
+    run_result = run(tmp)
+    # The flat file is empty of material, so if it wins (as it must) Side B is
+    # empty -- the directory's ServerTls impl must NOT be picked up instead.
+    assert run_result.returncode == 1
+    assert "DECLARES NO MATERIAL" in run_result.stderr
 
 
 def test_a_rotate_file_declaring_no_material_is_refused(tmp_path):

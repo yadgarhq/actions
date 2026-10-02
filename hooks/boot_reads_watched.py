@@ -120,7 +120,31 @@ import sys
 from pathlib import Path
 
 # A repository adopting this gate must have a watch set for a marker to name.
+# LEDGER 813: `yadgar-lifecycle` split a 1536-line `src/rotate.rs` into
+# `src/rotate/{mod,inputs,schedule,schedule_error}.rs` to clear this estate's
+# 500-line file ceiling (ledger 719). A consumer's own `src/rotate.rs` crosses
+# that ceiling the same way eventually, so Side B accepts either shape --
+# `rotate_files()` below is where that is decided; ROTATE/ROTATE_DIR are used
+# only for messages and the flat-file fast path.
 ROTATE = Path("src") / "rotate.rs"
+ROTATE_DIR = Path("src") / "rotate"
+ROTATE_DESC = f"{ROTATE} (or {ROTATE_DIR}/)"
+
+
+def rotate_files() -> list[Path]:
+    """Every file declaring the watch set, in either shape this gate accepts.
+
+    Flat: `src/rotate.rs`. Split: `src/rotate/*.rs` (ledger 813) -- `mod.rs`
+    plus whatever siblings the file holds, since `impl Material for T` and
+    `fn watch_set` may land in any of them (lifecycle's own split puts them in
+    different files). Neither existing returns an empty list, which the call
+    sites below treat as "no watch set declared".
+    """
+    if ROTATE.is_file():
+        return [ROTATE]
+    if ROTATE_DIR.is_dir():
+        return sorted(p for p in ROTATE_DIR.rglob("*.rs") if p.is_file())
+    return []
 
 # `fs::NAME` calls that read file CONTENT. Each needs a marker.
 READ_FS = {"read", "read_to_string", "read_dir"}
@@ -368,19 +392,23 @@ def markers(raw: str, spans: list[tuple[int, int]]) -> list[tuple[int, str, str]
 def watch_set_names() -> set[str]:
     """Every name a `WATCHED` marker may legitimately claim.
 
-    The `impl Material for T` blocks in `src/rotate.rs`, plus the identifiers in
-    the `watch_set` signature -- which is where `Path` and `Configuration` live,
-    whose `Material` impls belong to `yadgar-lifecycle` rather than to the
-    service. THIS IS SIDE B, and it is read out of a different file from the one
-    the marker sits in.
+    The `impl Material for T` blocks in `rotate_files()`, plus the identifiers
+    in the `watch_set` signature -- which is where `Path` and `Configuration`
+    live, whose `Material` impls belong to `yadgar-lifecycle` rather than to
+    the service. THIS IS SIDE B, and it is read out of different file(s) from
+    the one the marker sits in.
     """
-    text = blank_noncode(ROTATE.read_text(encoding="utf-8"))
-    names = set(IMPL_MATERIAL.findall(text))
-    match = WATCH_SET_FN.search(text)
-    if match:
-        tail = text[match.start() :]
-        end = tail.find("{")
-        names |= set(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", tail[: end if end > 0 else 0]))
+    names: set[str] = set()
+    for path in rotate_files():
+        text = blank_noncode(path.read_text(encoding="utf-8"))
+        names |= set(IMPL_MATERIAL.findall(text))
+        match = WATCH_SET_FN.search(text)
+        if match:
+            tail = text[match.start() :]
+            end = tail.find("{")
+            names |= set(
+                re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", tail[: end if end > 0 else 0])
+            )
     return names
 
 
@@ -396,7 +424,7 @@ def report(problems: list[str]) -> int:
     print("", file=sys.stderr)
     print("  Mark the read with ONE of:", file=sys.stderr)
     print(
-        "    // ADR-0523-WATCHED: <Material>    -- named in src/rotate.rs",
+        f"    // ADR-0523-WATCHED: <Material>    -- named in {ROTATE_DESC}",
         file=sys.stderr,
     )
     print(
@@ -424,12 +452,14 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    if not ROTATE.is_file():
+    sources = rotate_files()
+    if not sources:
         print(
-            f"ADR-0523 gate: {ROTATE} DOES NOT EXIST. A repository adopting this\n"
-            "  gate declares its watch set there, and a WATCHED marker names a\n"
-            "  material out of that file. With no watch set there is nothing for\n"
-            "  a marker to name and this gate cannot judge anything.",
+            f"ADR-0523 gate: NEITHER {ROTATE} NOR {ROTATE_DIR}/ EXISTS. A\n"
+            "  repository adopting this gate declares its watch set there, and a\n"
+            "  WATCHED marker names a material out of it. With no watch set\n"
+            "  there is nothing for a marker to name and this gate cannot judge\n"
+            "  anything.",
             file=sys.stderr,
         )
         return 1
@@ -437,10 +467,10 @@ def main() -> int:
     names = watch_set_names()
     if not names:
         print(
-            f"ADR-0523 gate: {ROTATE} DECLARES NO MATERIAL AND NO watch_set.\n"
-            "  Side B of this comparison is empty, so every WATCHED marker would\n"
-            "  be refused and every UNWATCHED one accepted -- a verdict that says\n"
-            "  nothing about the watch set.",
+            f"ADR-0523 gate: {ROTATE_DESC} DECLARES NO MATERIAL AND NO\n"
+            "  watch_set. Side B of this comparison is empty, so every WATCHED\n"
+            "  marker would be refused and every UNWATCHED one accepted -- a\n"
+            "  verdict that says nothing about the watch set.",
             file=sys.stderr,
         )
         return 1
@@ -479,7 +509,7 @@ def main() -> int:
             if kind == "watched" and payload not in names:
                 problems.append(
                     f"{path}:{read}: ADR-0523-WATCHED names `{payload}`, which "
-                    f"{ROTATE} does not declare. A marker may only name a material "
+                    f"{ROTATE_DESC} does not declare. A marker may only name a material "
                     "the watch set actually folds in."
                 )
             if kind == "unwatched" and len(payload) < MIN_REASON:
@@ -491,7 +521,7 @@ def main() -> int:
 
     print(
         f"ADR-0523 gate: {len(files)} non-test file(s) under {' '.join(roots)}, "
-        f"{judged} filesystem read(s) judged against {len(names)} name(s) in {ROTATE}."
+        f"{judged} filesystem read(s) judged against {len(names)} name(s) in {ROTATE_DESC}."
     )
 
     # THE PROBLEMS COME BEFORE THE FLOOR, and the order is not cosmetic. An
