@@ -1163,11 +1163,13 @@ jobs:
       # and reports green for code that is not running. `estate`'s `await-roll`
       # binary is the tolerance, and it reads exactly the payload sent below: for
       # the gateway it polls `server/discover` for up to ten minutes until the
-      # served version equals the dispatched tag with the leading `v` stripped,
-      # and for the other four modules it prints on the run itself that the
-      # verdict may describe the previous pods. Stage 3's A-04 replaces both
-      # halves with digest parity — which is why `digest` is in the payload
-      # although nothing reads it yet.
+      # served version equals the dispatched tag with the leading `v` stripped;
+      # for the other four modules it REFUSES — the run ends red, saying the
+      # roll cannot be confirmed from the front door, and none of the nine rows
+      # execute (ledger 675 measured the old "prints a caveat and proceeds"
+      # shape as six false greens, `yadgarhq/estate#24`). Stage 3's A-04
+      # replaces the refusal with digest parity for every module — which is
+      # why `digest` is in the payload although nothing reads it yet.
       #
       # A FAILED DISPATCH MUST NOT REDDEN THE RELEASE. By the time this step
       # runs the tag is cut and permanent, the image is pushed and signed, and
@@ -1211,16 +1213,18 @@ jobs:
       # filtered by `event=repository_dispatch` is therefore SET-EQUAL to this
       # one, and naming the workflow separates nothing.
       #
-      # THE CROSS-MODULE COLLISION IS STILL OPEN. Five modules POST the same
-      # event to the same workflow within seconds; each records the same
-      # `before`, each POSTs, and each confirms on whichever run appeared first.
-      # Module A can pass on module B's run and print B's URL into A's release
-      # summary. Nothing in the runs list identifies the payload, because
-      # `estate`'s `smoke.yaml` carries no `run-name:`, and `created_at` cannot
-      # separate dispatches seconds apart. The fix is two-repo and belongs
-      # there: give `smoke.yaml` a `run-name` carrying `client_payload.module`
-      # and `.tag`, then match on `display_title` here instead of on "newest id
-      # greater than baseline".
+      # THE CROSS-MODULE COLLISION IS STILL OPEN, ON THIS SIDE. Five modules
+      # POST the same event to the same workflow within seconds; each records
+      # the same `before`, each POSTs, and each confirms on whichever run
+      # appeared first. Module A can pass on module B's run and print B's URL
+      # into A's release summary. `estate`'s `smoke.yaml` now carries
+      # `run-name: smoke — <module> <tag> (<event>)` (`yadgarhq/estate#24`), so
+      # the runs list DOES identify the payload — this step just does not read
+      # it yet: `newest()` below still matches on "run id greater than
+      # baseline" alone, never on the title. The fix is local to this file
+      # now: match on `display_title` here, and compare whole tokens rather
+      # than substrings — `iam` is a prefix of `iam-db`, so a naive match would
+      # misattribute one module's run to the other.
       #
       # WHAT THE SCOPING DOES BUY, stated at its real size: it excludes a future
       # second `repository_dispatch` workflow in `estate`, and it turns an
@@ -1289,9 +1293,14 @@ jobs:
               echo "What did not happen is the verdict: $1"
               echo ""
               echo "NO behavioural contract ran for this roll. Send it by hand from"
-              echo "the Actions tab of \`${OWNER}/estate\` — smoke has a"
-              echo "\`workflow_dispatch\` taking \`module\` and \`tag\` — or re-run this"
-              echo "job once the cause is cleared. RELEASING AGAIN IS NOT THE REPAIR."
+              echo "the Actions tab of \`${OWNER}/estate\`: smoke's"
+              echo "\`workflow_dispatch\` takes \`module\` and \`tag\`, but only"
+              echo "\`gateway\` is confirmed by name — naming any other module now"
+              echo "refuses the run. For \`${module}\`, wait for the roll to settle"
+              echo "and send it with both left EMPTY instead; for \`gateway\`, send"
+              echo "\`module=gateway\` and \`tag=v${VERSION}\`. Re-running this job"
+              echo "once the cause is cleared is the other option. RELEASING AGAIN"
+              echo "IS NOT THE REPAIR."
             } >> "$GITHUB_STEP_SUMMARY"
             echo "::error::${OWNER}/estate was not asked for a verdict: $1"
             exit 1
@@ -1321,8 +1330,11 @@ jobs:
               echo "SO OPEN THE ACTIONS TAB OF \`${OWNER}/estate\` FIRST. A smoke"
               echo "run for **${module} v${VERSION}** there means this check was"
               echo "wrong and there is nothing to repair. Only if none is there,"
-              echo "send one by hand — smoke takes \`module\` and \`tag\` on"
-              echo "\`workflow_dispatch\` — bearing in mind that it joins smoke's"
+              echo "send one by hand: smoke takes \`module\` and \`tag\` on"
+              echo "\`workflow_dispatch\`, but only \`gateway\` is confirmed by name —"
+              echo "for \`${module}\`, wait for the roll to settle and send it with"
+              echo "both left EMPTY instead; for \`gateway\`, send \`module=gateway\`"
+              echo "and \`tag=v${VERSION}\`. Either way it joins smoke's"
               echo "\`estate-smoke\` group, which queues rather than running"
               echo "alongside, so a blind send while a real run is already waiting"
               echo "risks losing a verdict rather than gaining one."
