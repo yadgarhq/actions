@@ -158,12 +158,25 @@ def rotate_files() -> list[Path]:
 
     Neither existing returns an empty list, which the call sites below treat
     as "no watch set declared".
+
+    TEST-NAMED FILES EXCLUDED THE SAME WAY `source_files()` EXCLUDES THEM FROM
+    SIDE A -- a REVIEW FINDING. `ROTATE_DIR.rglob("*.rs")` read `src/rotate/
+    tests.rs` and `src/rotate/tests/*.rs` the same as any real sibling, so a
+    `FakeMaterial` planted in test-only fixture code -- never compiled into
+    the service -- validated a WATCHED marker naming it. Side B must apply
+    the identical exclusion Side A already does, or a marker can be satisfied
+    by a name that names nothing real.
     """
     found: list[Path] = []
     if ROTATE.is_file():
         found.append(ROTATE)
     if ROTATE_DIR.is_dir():
-        found.extend(sorted(p for p in ROTATE_DIR.rglob("*.rs") if p.is_file()))
+        for path in sorted(ROTATE_DIR.rglob("*.rs")):
+            if not path.is_file():
+                continue
+            if "tests" in path.parts or path.name == "tests.rs":
+                continue
+            found.append(path)
     return found
 
 # `fs::NAME` calls that read file CONTENT. Each needs a marker.
@@ -417,10 +430,23 @@ def watch_set_names() -> set[str]:
     live, whose `Material` impls belong to `yadgar-lifecycle` rather than to
     the service. THIS IS SIDE B, and it is read out of different file(s) from
     the one the marker sits in.
+
+    `#[cfg(test)]` SPANS ARE BLANKED HERE THE SAME WAY `classify()` ALREADY
+    BLANKS THEM FOR SIDE A -- a REVIEW FINDING. A filename exclusion in
+    `rotate_files()` catches a fake material in a file named for tests; it
+    does not catch one inline, inside a real sibling's own `#[cfg(test)] mod
+    tests { ... }` block. Blanking those spans before scanning for `impl
+    Material`/`fn watch_set` closes that gap the same way it is already
+    closed on the read side.
     """
     names: set[str] = set()
     for path in rotate_files():
-        text = blank_noncode(path.read_text(encoding="utf-8"))
+        code = blank_noncode(path.read_text(encoding="utf-8"))
+        spans = test_spans(code)
+        text = "\n".join(
+            "" if in_span(lineno, spans) else line
+            for lineno, line in enumerate(code.splitlines(), start=1)
+        )
         names |= set(IMPL_MATERIAL.findall(text))
         match = WATCH_SET_FN.search(text)
         if match:
@@ -474,8 +500,13 @@ def main() -> int:
         return 1
     sources = rotate_files()
     if not sources:
+        # NOT NECESSARILY ABSENT. `src/rotate/` can EXIST and still leave
+        # `rotate_files()` empty -- every `.rs` it holds excluded as test
+        # code (a review finding; see `rotate_files()`'s own docstring). The
+        # message says what is actually true of the tree: no accepted `.rs`
+        # file, not that neither path exists.
         print(
-            f"ADR-0523 gate: NEITHER {ROTATE} NOR {ROTATE_DIR}/ EXISTS. A\n"
+            f"ADR-0523 gate: NO `.rs` FILE UNDER {ROTATE} OR {ROTATE_DIR}/. A\n"
             "  repository adopting this gate declares its watch set there, and a\n"
             "  WATCHED marker names a material out of it. With no watch set\n"
             "  there is nothing for a marker to name and this gate cannot judge\n"

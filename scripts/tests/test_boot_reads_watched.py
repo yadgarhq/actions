@@ -264,8 +264,25 @@ def test_a_repository_without_a_watch_set_file_is_refused(tmp_path):
     write(tmp_path, "src/serve.rs", "fn main() {}\n")
     run_result = run(tmp_path)
     assert run_result.returncode == 1
-    assert "NEITHER" in run_result.stderr
-    assert "EXISTS" in run_result.stderr
+    assert "NO `.rs` FILE UNDER" in run_result.stderr
+
+
+def test_a_rotate_directory_holding_only_test_named_files_is_not_reported_as_absent(
+    tmp_path,
+):
+    """A REVIEW FINDING. `src/rotate/` EXISTS here -- it just holds nothing
+    `rotate_files()` accepts, because its only file is excluded as test code.
+    `NEITHER ... EXISTS` would be a false claim about the tree; the refusal
+    must say there is no ACCEPTED `.rs` file there, not that the directory is
+    absent.
+    """
+    tmp = tmp_path / "repo"
+    write(tmp, "src/rotate/tests.rs", "fn f() {}\n")
+    write(tmp, "src/serve.rs", "fn main() {}\n")
+    run_result = run(tmp)
+    assert run_result.returncode == 1
+    assert "NEITHER" not in run_result.stderr
+    assert "NO `.rs` FILE UNDER" in run_result.stderr
 
 
 def tree_with_split_rotate(tmp_path: Path, body: str) -> Path:
@@ -377,6 +394,114 @@ def test_a_flat_rotate_file_and_a_sibling_directory_are_both_read(tmp_path):
     run_result = run(tmp)
     assert run_result.returncode == 0, run_result.stderr
     assert "1 filesystem read(s) judged" in run_result.stdout
+
+
+def test_a_fake_material_in_src_rotate_tests_rs_does_not_validate_a_marker(tmp_path):
+    """A REVIEW FINDING. `rotate_files()`'s `rglob("*.rs")` read `src/rotate/
+    tests.rs` the same as any sibling, so a `FakeMaterial` planted there --
+    test fixture code, never compiled into the service -- validated a WATCHED
+    marker naming it. `source_files()` already excludes `tests.rs` by name
+    from SIDE A; Side B must exclude it the same way, or a marker can be
+    satisfied by a name that names nothing real.
+    """
+    tmp = tmp_path / "repo"
+    write(
+        tmp,
+        "src/rotate/mod.rs",
+        "mod tests;\n\n"
+        "impl Material for ServerTls {\n"
+        "    fn files(&self) -> Vec<File<'_>> { vec![] }\n"
+        "}\n",
+    )
+    write(
+        tmp,
+        "src/rotate/tests.rs",
+        "impl Material for FakeMaterial {\n"
+        "    fn files(&self) -> Vec<File<'_>> { vec![] }\n"
+        "}\n",
+    )
+    write(
+        tmp,
+        "src/serve.rs",
+        "fn load(p: &Path) {\n"
+        "    // ADR-0523-WATCHED: FakeMaterial\n"
+        "    let _ = std::fs::read(p);\n"
+        "}\n",
+    )
+    run_result = run(tmp)
+    assert run_result.returncode == 1, run_result.stdout
+    assert "`FakeMaterial`" in run_result.stderr
+    assert "does not declare" in run_result.stderr
+
+
+def test_a_fake_material_in_a_rotate_tests_directory_does_not_validate_a_marker(tmp_path):
+    """THE OTHER SHAPE `source_files()` excludes: a `tests/` DIRECTORY
+    component, not only a `tests.rs` FILE -- `src/rotate/tests/fixtures.rs`.
+    """
+    tmp = tmp_path / "repo"
+    write(
+        tmp,
+        "src/rotate/mod.rs",
+        "mod tests;\n\n"
+        "impl Material for ServerTls {\n"
+        "    fn files(&self) -> Vec<File<'_>> { vec![] }\n"
+        "}\n",
+    )
+    write(
+        tmp,
+        "src/rotate/tests/fixtures.rs",
+        "impl Material for FakeMaterial {\n"
+        "    fn files(&self) -> Vec<File<'_>> { vec![] }\n"
+        "}\n",
+    )
+    write(
+        tmp,
+        "src/serve.rs",
+        "fn load(p: &Path) {\n"
+        "    // ADR-0523-WATCHED: FakeMaterial\n"
+        "    let _ = std::fs::read(p);\n"
+        "}\n",
+    )
+    run_result = run(tmp)
+    assert run_result.returncode == 1, run_result.stdout
+    assert "`FakeMaterial`" in run_result.stderr
+    assert "does not declare" in run_result.stderr
+
+
+def test_a_cfg_test_impl_inside_a_real_rotate_sibling_does_not_validate_a_marker(tmp_path):
+    """THE NARROWER GAP: not every fake material lives in a file named for
+    tests -- an INLINE `#[cfg(test)] mod tests { impl Material for Fake ... }`
+    inside an otherwise-real sibling is invisible to a filename check alone.
+    `watch_set_names()` must blank `#[cfg(test)]` spans the same way `classify()`
+    already does for Side A.
+    """
+    tmp = tmp_path / "repo"
+    write(
+        tmp,
+        "src/rotate/mod.rs",
+        "use crate::serve::ServerTls;\n\n"
+        "impl Material for ServerTls {\n"
+        "    fn files(&self) -> Vec<File<'_>> { vec![] }\n"
+        "}\n\n"
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        "    impl Material for FakeMaterial {\n"
+        "        fn files(&self) -> Vec<File<'_>> { vec![] }\n"
+        "    }\n"
+        "}\n",
+    )
+    write(
+        tmp,
+        "src/serve.rs",
+        "fn load(p: &Path) {\n"
+        "    // ADR-0523-WATCHED: FakeMaterial\n"
+        "    let _ = std::fs::read(p);\n"
+        "}\n",
+    )
+    run_result = run(tmp)
+    assert run_result.returncode == 1, run_result.stdout
+    assert "`FakeMaterial`" in run_result.stderr
+    assert "does not declare" in run_result.stderr
 
 
 def test_a_rotate_file_declaring_no_material_is_refused(tmp_path):
