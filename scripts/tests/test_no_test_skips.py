@@ -40,6 +40,7 @@ own source text cannot satisfy them.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -86,13 +87,43 @@ PYTEST_FILTERED = (
 PYTEST_PLAIN = "pytest scripts/tests/ -q"
 
 
+def _git_env() -> dict[str, str]:
+    """The environment a fixture repository is built in, with the caller's
+    `GIT_*` stripped.
+
+    HERMETIC BECAUSE IT HAD TO BE (ledger 1131, the gate that stops a fourth
+    file from missing this). This file is run by the `pytest-scripts`
+    pre-commit hook DURING a `git commit`, and `git commit` exports `GIT_DIR`
+    and `GIT_INDEX_FILE` to everything it spawns. A nested `git init` in a
+    temporary directory then obeys the OUTER repository instead of its own.
+    `test_next_version.py` and `test_service_immutable.py` each hit this first
+    and carry the same helper; this is that fix, applied to the file ledger 845
+    gave a reason to call real `git`.
+    """
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(
+        # `core.hooksPath=/dev/null`: a developer with pre-commit installed
+        # through `init.templateDir` gets its hook copied into every `git
+        # init`, which `test_next_version.py`'s helper neutralises the same way.
+        ["git", "-c", "core.hooksPath=/dev/null", *args],
+        cwd=cwd, check=True, capture_output=True, text=True, env=_git_env(),
+    )
+
+
 def run(root: Path):
     """Layer 1 over a tree, the way pre-commit runs it."""
+    # `_git_env` rather than the ambient environment: the gate under test runs
+    # `git` itself (ledger 845), so an inherited `GIT_DIR` would point it at the
+    # outer repository just as it would the fixture builder above.
     return subprocess.run(
         [sys.executable, str(GATE), "--root", str(root)],
         capture_output=True,
         text=True,
         check=False,
+        env=_git_env(),
     )
 
 
@@ -109,14 +140,21 @@ def audit(tmp_path: Path, text: str, name: str = "out.txt"):
 
 
 def tree(tmp_path: Path, files: dict[str, str]) -> Path:
-    """A throwaway repository. Every fixture is a whole tree, because the gate's
-    verdict on an `#[ignore]` depends on the workflows beside it."""
+    """A throwaway GIT REPOSITORY. Every fixture is a whole tree, because the
+    gate's verdict on an `#[ignore]` depends on the workflows beside it.
+
+    LEDGER 845 made this a git repository rather than a plain directory: Layer
+    1 now reads `git ls-files`, which needs an index to read. `git add` alone
+    is enough — `ls-files` reads the index, not a commit.
+    """
     root = tmp_path / "repo"
+    root.mkdir(parents=True, exist_ok=True)
     for rel, text in files.items():
         path = root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
-    root.mkdir(parents=True, exist_ok=True)
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "add", "-A")
     return root
 
 
@@ -992,6 +1030,50 @@ def test_the_same_ignored_test_in_the_repository_is_still_refused(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# LEDGER 845 — THE RESIDUAL LEDGER 860 NAMED: `PRUNE` is a NAME, so a worktree
+# at any name OTHER than `.claude` was still walked. Reading `git ls-files`
+# instead closes the whole class, by what a path IS rather than what it is
+# called.
+# --------------------------------------------------------------------------
+
+
+def test_an_untracked_worktree_at_any_name_is_not_walked(tmp_path):
+    """THE WHOLE POINT OF 845. `wt-other-name` is not in `PRUNE`, and never could
+    be — an operator can put a worktree anywhere. The file below is written to
+    disk but never `git add`-ed, the same fact a REAL second `git worktree`
+    checked out elsewhere has: it belongs to a different repository's index, not
+    this one's.
+    """
+    root = tree(
+        tmp_path,
+        {
+            "Cargo.toml": MANIFEST,
+            "tests/suite.rs": "#[test]\nfn the_real_one() {\n    assert!(true);\n}\n",
+            ".github/workflows/ci.yaml": WORKFLOW_PLAIN,
+        },
+    )
+    stray = root / "wt-other-name" / "tests" / "suite.rs"
+    stray.parent.mkdir(parents=True)
+    stray.write_text(IGNORED_TEST)  # deliberately not `git add`-ed
+    result = run(root)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "wt-other-name" not in result.stdout + result.stderr
+    assert "1 rust files" in result.stdout
+
+
+def test_a_tree_with_no_git_index_is_refused(tmp_path):
+    """A tree Layer 1 cannot read an index for is a failure, not a silent walk
+    of everything under it — the fallback that would reopen this ledger by a
+    different door."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "Cargo.toml").write_text(MANIFEST)
+    result = run(root)
+    assert result.returncode == 1
+    assert "NOT A GIT REPOSITORY" in result.stderr
+
+
+# --------------------------------------------------------------------------
 # LEDGER 842 — what FEEDS the audit, read out of the workflow rather than
 # asserted about a constructed log.
 # --------------------------------------------------------------------------
@@ -1121,6 +1203,7 @@ def test_the_default_root_is_the_working_directory(tmp_path):
         text=True,
         check=False,
         cwd=root,
+        env=_git_env(),
     )
     # The repository's own `#[ignore]` is refused; the worktree's is not reported.
     assert result.returncode == 1, result.stdout + result.stderr

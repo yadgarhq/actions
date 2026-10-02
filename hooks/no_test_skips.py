@@ -72,6 +72,8 @@ Tests: `python3 -m pytest scripts/tests/test_no_test_skips.py -q`.
 from __future__ import annotations
 
 import argparse
+import functools
+import os
 import re
 import subprocess
 import sys
@@ -237,13 +239,17 @@ def audit_pytest_tally(text: str):
 # clones afresh and never has the directory. A gate that refuses locally and
 # passes remotely is the shape that gets a gate switched off.
 #
-# THE RESIDUAL, stated rather than discovered later: this is a NAME, so a
-# worktree the operator puts anywhere else (`<repo>/wt-foo`) is still walked.
-# Only reading the index — `git ls-files` — closes the class, and ledger 845
-# holds that question. It is deferred because it would change this gate's
-# interface from "any tree" to "a git repository", which both the constructed
-# fixtures in `scripts/tests/test_no_test_skips.py` and the `--root <clone>`
-# sweep across nineteen repositories depend on.
+# LEDGER 845 CLOSED THE RESIDUAL NAMED ABOVE: a NAME is still matched below,
+# PRUNE still covers tracked build-output-shaped directories, but a worktree at
+# ANY name is now excluded by what it is rather than by what it is called —
+# `tracked()` below reads `git ls-files` instead of walking the filesystem, and
+# a worktree checked out elsewhere belongs to a DIFFERENT git repository, so it
+# is never in THIS one's index regardless of its name. This DOES change the
+# gate's interface from "any tree" to "a git repository" — `walk()` now raises
+# `NotAGitRepository` rather than silently falling back to the walk, so a
+# non-git tree is a refusal rather than a quiet pass over nothing. The
+# constructed fixtures in `scripts/tests/test_no_test_skips.py` are each `git
+# init`-ed by the `tree()` helper for exactly this reason.
 PRUNE = {
     ".git",
     ".ci-actions",
@@ -260,8 +266,59 @@ PRUNE = {
 }
 
 
+class NotAGitRepository(Exception):
+    """`root` is not inside a git work tree.
+
+    LEDGER 845. Layer 1 now reads `git ls-files` to tell this repository's own
+    source from a stray worktree, a vendored copy or build output — a tree with
+    no index has nothing for that read to tell apart, and this is a failure
+    rather than a silent walk of everything under it.
+    """
+
+
+def _git_env() -> dict[str, str]:
+    """Env for a nested `git` call, this process's own `GIT_*` stripped.
+
+    `git commit` exports `GIT_DIR` and `GIT_INDEX_FILE` to everything it
+    spawns, so this gate — invoked by pre-commit DURING a commit — inherits
+    them. A nested `git -C <root>` would then obey the OUTER repository instead
+    of `root`, exactly the class `test_next_version.py` and
+    `test_service_immutable.py` each hit and fixed with this same helper
+    (ledger 1131 is the gate that stops a FOURTH file from missing it).
+    """
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
+@functools.lru_cache(maxsize=None)
+def tracked(root: Path) -> frozenset[Path] | None:
+    """Every path `git` tracks under `root`, relative to `root`.
+
+    `None` when `root` is not inside a git work tree. Cached per `root`: Layer
+    1 calls `walk()` on the same tree several times over one run.
+    """
+    env = _git_env()
+    probe = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True, text=True, env=env,
+    )
+    if probe.returncode != 0 or probe.stdout.strip() != "true":
+        return None
+    listed = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-z"],
+        capture_output=True, text=True, env=env, check=True,
+    )
+    return frozenset(Path(p) for p in listed.stdout.split("\0") if p)
+
+
 def walk(root: Path, suffixes: tuple[str, ...]):
-    """Every file under `root` with one of `suffixes`, build output pruned.
+    """Every git-tracked file under `root` with one of `suffixes`, build output
+    pruned.
+
+    A `root` THAT DOES NOT EXIST ON DISK yields nothing without consulting git
+    at all — `root / ".github" / "workflows"` is a real caller (`ignored_execution`)
+    and most repositories in this estate have no such directory; that absence is
+    not the same fact as `root` not being a git repository, so it must not be
+    reported as one.
 
     PRUNE IS MATCHED INSIDE THE TREE, NEVER AGAINST THE PATH THAT LEADS TO IT,
     and until ledger 860 it was matched against the whole absolute path. MEASURED
@@ -271,20 +328,22 @@ def walk(root: Path, suffixes: tuple[str, ...]):
     `target`, `vendor`, `venv`, `node_modules`, `.venv` or any cache in the set
     had this gate examine nothing and report green — the check-that-cannot-fail
     class (ADR-0645), reached through the operator's choice of directory rather
-    than through anything in the tree.
-
-    That is also why `.claude` could not simply be added to the set. This
-    estate's agents work in `~/.claude/worktrees/<name>`, so the absolute match
-    would have turned the gate into a no-op in exactly the checkouts ledger 860
-    is about, trading a false red for a false green.
+    than through anything in the tree. PRUNE still matters after ledger 845: it
+    is what keeps a TRACKED build-output-shaped directory (vendored code
+    committed on purpose) out of the scan; a worktree at another name is excluded
+    by `tracked()` instead, because it is untracked by THIS repository regardless
+    of what it is called.
     """
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
+    if not root.exists():
+        return
+    found = tracked(root)
+    if found is None:
+        raise NotAGitRepository(root)
+    for rel in sorted(found):
+        if any(part in PRUNE for part in rel.parts):
             continue
-        if any(part in PRUNE for part in path.relative_to(root).parts):
-            continue
-        if path.suffix in suffixes:
-            yield path
+        if rel.suffix in suffixes:
+            yield root / rel
 
 
 def read(path: Path) -> str:
@@ -804,7 +863,18 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def report_layer_one(root: Path) -> int:
-    problems, examined = layer_one(root)
+    try:
+        problems, examined = layer_one(root)
+    except NotAGitRepository:
+        print(
+            f"no-test-skips gate: {root} IS NOT A GIT REPOSITORY (ledger 845).\n"
+            "  Layer 1 reads git's index to know which files are this repository's\n"
+            "  own and which are a stray worktree, a vendored copy or build output.\n"
+            "  A tree with no index has nothing for that read to tell apart, so this\n"
+            "  is a failure and not a silent walk of everything under it.",
+            file=sys.stderr,
+        )
+        return 1
     counted = ", ".join(f"{v} {k}" for k, v in examined.items())
     if problems:
         print("A test would stop running, and nothing would say so:", file=sys.stderr)
