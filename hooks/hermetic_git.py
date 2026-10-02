@@ -22,29 +22,41 @@ run and red only on the one path that matters: a real `git commit` invoking
 is exactly ADR-0645's class, restated for environment leakage rather than an
 empty scan.
 
-WHAT THIS CHECKS, MECHANICALLY. Every `subprocess.run`/`check_call`/
-`check_output`/`call`/`Popen` call whose first positional argument is a
-list or tuple literal opening with the string `"git"` -- the shape every
-git-shelling test in this estate already uses -- must carry an `env=`
-keyword. `env=os.environ`, `env=os.environ.copy()`, `env=dict(os.environ)` and
-`env={**os.environ, ...}` (the leak written out loud, or wrapped in just
-enough code to look deliberate) are each refused the same way a missing
-`env=` is; passing it through any OTHER expression -- a call to a helper, a
-dict comprehension that filters `os.environ.items()` -- is accepted. THIS IS
-NOT A PROOF the helper actually filters `GIT_*`: it is the same shape of
-check `boot_reads_watched.py`
-makes about its own markers, a MARKER'S PRESENCE rather than a semantic
+WHAT THIS CHECKS, MECHANICALLY, after a review widened it twice. A call
+counts as a subprocess call ONLY through a name this file's own imports
+actually bind to `subprocess` -- `subprocess.<name>(...)` where `subprocess`
+(or its `import ... as` alias) was imported as the module, or a bare
+`<name>(...)` where `<name>` was imported `from subprocess import <name>`.
+A LOCAL function merely named `run`/`call`/`Popen`, never imported from
+`subprocess`, is not in scope, however it is called -- see
+`subprocess_bindings()`. Within `run`/`check_call`/`check_output`/`call`/
+`Popen`, the argv is a list or tuple literal opening with the string `"git"`,
+whether POSITIONAL (`subprocess.run(["git", ...])`) or the `args=` KEYWORD
+form (`subprocess.run(args=["git", ...])`) -- both real shapes in this
+estate's own test helpers. That call must then carry an `env=` keyword.
+`env=None` (to `subprocess` itself, identical to omitting `env=`),
+`env=os.environ`, `env=os.environ.copy()`, `env=dict(os.environ)`,
+`env={**os.environ, ...}` and `env=os.environ | {...}` (PEP 584) -- the leak
+written out loud, or wrapped in just enough code to look deliberate -- are
+each refused the same way a missing `env=` is; passing it through any OTHER
+expression -- a call to a helper, a dict comprehension that filters
+`os.environ.items()` -- is accepted. THIS IS NOT A PROOF the helper actually
+filters `GIT_*`: it is the same shape of check `boot_reads_watched.py` makes
+about its own markers, a MARKER'S PRESENCE rather than a semantic
 verification of what it does, matched against the one convention this
 estate's own fixtures already settled on (`_git_env()` in `test_next_version.py`
 and `test_service_immutable.py`), because actually interpreting an arbitrary
 `env=` expression needs more than a parser.
 
-WHAT THIS DOES NOT SEE. A `git` argv built into a variable before the call
-(`argv = ["git", ...]; subprocess.run(argv)`) is invisible to this scan,
-which reads the call's own argument list rather than tracing data flow.
-Every real `git`-shelling test in this estate today calls `subprocess.run`
-with the list written inline, so this is a real gap and not a theoretical
-one being pre-empted.
+WHAT THIS DOES NOT SEE, after the same review. A `git` argv built into a
+variable before the call (`argv = ["git", ...]; subprocess.run(argv)`) is
+invisible to this scan, which reads the call's own argument list rather than
+tracing data flow. Every real `git`-shelling test in this estate today calls
+`subprocess.run` with the list written inline, so this is a real gap and not
+a theoretical one being pre-empted. An `env=` expression this scan has never
+seen -- a third-party helper, a `**` unpack of something other than
+`os.environ` that itself leaks `GIT_*` -- is accepted on the strength of not
+matching a known-bad shape, not on proof it filters anything.
 
 A SECOND, NAMED BLIND SPOT: a test that runs a SCRIPT which itself shells to
 `git` -- `subprocess.run([sys.executable, str(GATE), ...])` -- with no `env=`
@@ -137,6 +149,19 @@ def is_git_argv(node: ast.AST | None) -> bool:
     return isinstance(first, ast.Constant) and first.value == "git"
 
 
+def argv_node(call: ast.Call) -> ast.AST | None:
+    """The call's argv -- positional (`subprocess.run(["git", ...])`) or the
+    `args=` keyword form (`subprocess.run(args=["git", ...])`), both valid
+    and both real in this estate's own test helpers.
+    """
+    if call.args:
+        return call.args[0]
+    for kw in call.keywords:
+        if kw.arg == "args":
+            return kw.value
+    return None
+
+
 def env_keyword(call: ast.Call) -> ast.AST | None:
     for kw in call.keywords:
         if kw.arg == "env":
@@ -158,14 +183,20 @@ def is_ambient_environ(node: ast.AST) -> bool:
     filter `GIT_*` out of it -- the leak spelled out loud, or wrapped in just
     enough code to look deliberate.
 
-    CAUGHT: `os.environ`, `os.environ.copy()`, `dict(os.environ)`, and a dict
+    CAUGHT: `os.environ`, `os.environ.copy()`, `dict(os.environ)`, a dict
     literal that unpacks `**os.environ` -- `{**os.environ, "FOO": "bar"}` only
-    ADDS a key, it does not filter one out, so it carries the leak too. NOT
-    caught: a dict COMPREHENSION over `os.environ.items()` -- `{k: v for k, v
-    in os.environ.items() if not k.startswith("GIT_")}`, the `_git_env()`
-    convention this gate exists to require -- a `ast.DictComp`, a different
-    node entirely from the `ast.Dict` literal checked here.
+    ADDS a key, it does not filter one out, so it carries the leak too -- and
+    `os.environ | {...}` (PEP 584), the same merge through the `|` operator
+    instead of `**`. `env=None` is caught too: to `subprocess` itself, `None`
+    means "inherit the ambient environment", the identical leak to omitting
+    `env=` spelled a different way. NOT caught: a dict COMPREHENSION over
+    `os.environ.items()` -- `{k: v for k, v in os.environ.items() if not
+    k.startswith("GIT_")}`, the `_git_env()` convention this gate exists to
+    require -- a `ast.DictComp`, a different node entirely from the
+    `ast.Dict` literal checked here.
     """
+    if node is None or (isinstance(node, ast.Constant) and node.value is None):
+        return True
     if _is_os_environ(node):
         return True
     if isinstance(node, ast.Call):
@@ -187,26 +218,67 @@ def is_ambient_environ(node: ast.AST) -> bool:
         for key, value in zip(node.keys, node.values):
             if key is None and _is_os_environ(value):
                 return True
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        if _is_os_environ(node.left) or _is_os_environ(node.right):
+            return True
     return False
 
 
-def subprocess_call_name(node: ast.Call) -> str | None:
+def subprocess_bindings(tree: ast.AST) -> tuple[set[str], set[str]]:
+    """Which names this file's OWN imports actually bind to `subprocess`.
+
+    Returns `(module_names, imported_call_names)`: `module_names` is every
+    local name bound to the `subprocess` MODULE (`import subprocess` ->
+    `{"subprocess"}`, `import subprocess as sp` -> `{"sp"}`);
+    `imported_call_names` is every name bound `from subprocess import NAME`
+    (aliased or not), so a BARE call to it is still recognised.
+
+    A REVIEW FINDING: without this, ANY callable merely named `run`/`call`/
+    `Popen`/... was treated as a subprocess call -- a local test helper or
+    fixture function sharing one of those names, with a `["git", ...]`
+    argument for reasons that have nothing to do with `subprocess`, was a
+    false positive. Only `subprocess.<name>(...)` through a name this file
+    actually imported, or a name actually imported FROM `subprocess`, counts.
+    """
+    module_names: set[str] = set()
+    imported_call_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "subprocess":
+                    module_names.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "subprocess":
+                for alias in node.names:
+                    imported_call_names.add(alias.asname or alias.name)
+    return module_names, imported_call_names
+
+
+def subprocess_call_name(
+    node: ast.Call, module_names: set[str], imported_call_names: set[str]
+) -> str | None:
     func = node.func
-    if isinstance(func, ast.Attribute):
+    if (
+        isinstance(func, ast.Attribute)
+        and isinstance(func.value, ast.Name)
+        and func.value.id in module_names
+    ):
         return func.attr
-    if isinstance(func, ast.Name):
+    if isinstance(func, ast.Name) and func.id in imported_call_names:
         return func.id
     return None
 
 
 def violations(path: Path, tree: ast.AST) -> list[str]:
     found = []
+    module_names, imported_call_names = subprocess_bindings(tree)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        if subprocess_call_name(node) not in SUBPROCESS_CALLS:
+        if subprocess_call_name(node, module_names, imported_call_names) not in SUBPROCESS_CALLS:
             continue
-        if not node.args or not is_git_argv(node.args[0]):
+        argv = argv_node(node)
+        if not is_git_argv(argv):
             continue
         env = env_keyword(node)
         if env is not None and not is_ambient_environ(env):

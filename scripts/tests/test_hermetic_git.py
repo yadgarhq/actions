@@ -131,6 +131,56 @@ def test_env_comprehension_over_os_environ_items_is_still_accepted():
     assert found == []
 
 
+def test_env_none_is_refused_the_same_as_missing():
+    """`env=None` means "inherit the ambient environment" to `subprocess`
+    itself -- the identical leak to omitting `env=` altogether, spelled a
+    different way."""
+    found = _violations(
+        "import subprocess\n"
+        "def git(cwd, *a):\n"
+        "    subprocess.run(['git', *a], cwd=cwd, env=None)\n"
+    )
+    assert len(found) == 1
+
+
+def test_git_argv_passed_as_the_args_keyword_is_still_detected():
+    """`subprocess.run(args=[...])` is the keyword form of the same call --
+    the argv is not `node.args[0]` here, it is the `args=` keyword."""
+    found = _violations(
+        "import subprocess\n"
+        "def git(cwd, *a):\n"
+        "    subprocess.run(args=['git', *a], cwd=cwd)\n"
+    )
+    assert len(found) == 1
+
+
+def test_env_os_environ_merged_with_bitor_is_refused():
+    """`os.environ | {...}` (PEP 584) merges the ambient environment into a
+    new dict and ADDS keys -- it filters nothing out, the same leak as the
+    dict-unpack shape, through the `|` operator instead of `**`."""
+    found = _violations(
+        "import subprocess, os\n"
+        "def git(cwd, *a):\n"
+        "    subprocess.run(['git', *a], cwd=cwd, env=os.environ | {'FOO': 'bar'})\n"
+    )
+    assert len(found) == 1
+
+
+def test_a_local_function_named_run_is_not_treated_as_subprocess():
+    """THE FALSE-POSITIVE CONTROL. A local function or test fixture helper
+    that happens to be named `run`/`call`/`Popen` and takes a `["git", ...]`
+    argument for reasons that have nothing to do with `subprocess` must not
+    be refused -- only `subprocess.<name>(...)`, or a name actually imported
+    `from subprocess import <name>`, is a subprocess call.
+    """
+    found = _violations(
+        "def run(argv):\n"
+        "    return argv\n"
+        "x = run(['git', 'init'])\n"
+    )
+    assert found == []
+
+
 def test_check_call_check_output_and_popen_are_all_covered():
     for call in ("check_call", "check_output", "call", "Popen"):
         found = _violations(
