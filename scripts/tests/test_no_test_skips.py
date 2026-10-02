@@ -686,13 +686,45 @@ def test_an_empty_tree_reports_what_it_examined(tmp_path):
     """A repository with no test suite of any kind — `argocd`, `proto` and
     `deploy` are three — is not a skip, and Layer 1 is a STATIC scan rather than
     an execution audit, so it passes. The counts are what makes that verdict
-    readable rather than indistinguishable from a green one (ADR-0645)."""
-    root = tree(tmp_path, {"README.md": "nothing here\n"})
+    readable rather than indistinguishable from a green one (ADR-0645).
+
+    THE FIXTURE CARRIES A WORKFLOW, NOT JUST A README — a review found that
+    `examined` ALL ZERO is now its own refusal (see
+    `test_a_tree_with_nothing_this_gate_reads_is_refused`), and a README-only
+    tree is exactly that: every real no-test-suite repository in this estate
+    (measured: `argocd`, `proto`, `deploy` included) still has at least one
+    `.github/workflows/` file tracked, keeping `examined["workflows"]` at
+    least 1. A fixture with nothing tracked but a README does not occur in
+    the real estate; this one is rebuilt to match what does.
+    """
+    root = tree(
+        tmp_path,
+        {"README.md": "nothing here\n", ".github/workflows/ci.yaml": WORKFLOW_PLAIN},
+    )
     result = run(root)
-    assert result.returncode == 0
+    assert result.returncode == 0, result.stdout + result.stderr
     assert "0 rust files" in result.stdout
     assert "0 rust test items" in result.stdout
     assert "0 python test items" in result.stdout
+    assert "1 workflows" in result.stdout
+
+
+def test_a_tree_with_nothing_this_gate_reads_is_refused(tmp_path):
+    """A REVIEW FINDING. git tracks something here — a README — but NONE of
+    it is a Rust file, a Python file, a command file or a workflow: nothing
+    this scan reads at all. That is EXAMINED NOTHING, the ADR-0645 floor,
+    even though `tracked(root)` itself is non-empty (unlike
+    `test_an_untracked_root_inside_a_real_repository_is_refused`'s shape,
+    where nothing is tracked under root at all). Measured: no repository in
+    this estate is actually in this state today — every one carries at least
+    one workflow or command file — so this is a constructed floor case, not a
+    reproduction.
+    """
+    root = tree(tmp_path, {"README.md": "nothing here\n"})
+    result = run(root)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "EXAMINED NOTHING" in result.stderr
+    assert "examined nothing proves nothing" in result.stderr
 
 
 def test_a_python_only_repository_is_not_reported_as_zero_test_items(tmp_path):
@@ -1103,7 +1135,13 @@ def test_a_tracked_file_missing_from_disk_is_not_counted_as_examined(tmp_path):
     tell "scanned and clean" from "scanned nothing" without having scanned
     anything real.
     """
-    root = tree(tmp_path, {"src/lib.rs": "fn main() {}\n"})
+    # A WORKFLOW BESIDE IT, so the fixture does not ALSO trip the separate
+    # "examined nothing" floor once the deleted file correctly stops counting
+    # -- this test is about the count not being inflated, not about the floor.
+    root = tree(
+        tmp_path,
+        {"src/lib.rs": "fn main() {}\n", ".github/workflows/ci.yaml": WORKFLOW_PLAIN},
+    )
     (root / "src" / "lib.rs").unlink()
     result = run(root)
     assert result.returncode == 0, result.stdout + result.stderr

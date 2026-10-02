@@ -788,6 +788,7 @@ def layer_one(root: Path):
         "python test items": 0,
         "command files": 0,
         "workflows": 0,
+        "config files": 0,
     }
 
     workflow_dir = root / ".github" / "workflows"
@@ -848,6 +849,13 @@ def layer_one(root: Path):
             examined["command files"] += 1
             problems.extend(scan_invocations(path.relative_to(root), read(path)))
         if path.name in CONFIG_FILES:
+            # A REVIEW FINDING, the floor below this loop needed: `pyproject.
+            # toml`/`pytest.ini`/`setup.cfg`/`tox.ini` were each READ and
+            # scanned for `addopts` narrowing, but never counted anywhere --
+            # `.toml`/`.ini`/`.cfg` are not in the "command files" suffix set
+            # above. A tree holding only a `pytest.ini` genuinely examined
+            # something and must not read as EXAMINED NOTHING.
+            examined["config files"] += 1
             text = read(path)
             for idx, line in enumerate(text.splitlines(), start=1):
                 if ADDOPTS_NARROWING.search(line):
@@ -895,23 +903,43 @@ def report_layer_one(root: Path) -> int:
         )
         return 1
 
-    # A REVIEW FINDING: `root` can be INSIDE a real git work tree and still
-    # have NOTHING tracked under it -- a stray scratch directory, `--root`
-    # pointed at the wrong subpath. That reads EXACTLY like a repository that
-    # is tracked and genuinely holds no test suite (`examined` all zero,
-    # `problems` empty), and the two are different facts: one has nothing to
-    # find, the other has an untracked file right there that this scan never
-    # had an index entry to even look at. `tracked(root)` is empty ONLY in the
-    # first case -- a tracked-but-irrelevant file (a lone `README.md`) keeps
-    # it non-empty, which is what keeps a genuinely test-free repository green.
-    if not tracked(root):
+    # A REVIEW FINDING, APPLIED AT THE FLOOR ADR-0645 ACTUALLY NAMES: a scan
+    # that examined nothing proves nothing, whichever of two reasons produced
+    # the zero. `root` can be INSIDE a real git work tree and still have
+    # NOTHING tracked under it -- a stray scratch directory, `--root` pointed
+    # at the wrong subpath -- and a real skip sitting there, untracked, is
+    # invisible. Or `root` can be tracked and hold files, none of which this
+    # scan reads at all (no Rust, no Python, no command file, no workflow).
+    # MEASURED ACROSS EVERY REPOSITORY IN THIS ESTATE (`argocd`, `chart`,
+    # `config`, `deploy`, `dial`, `docs`, `estate`, `gateway`, `iam`, `iam-db`,
+    # `lifecycle`, `platform`, `project`, `project-db`, `proto`, `store`,
+    # `task`, `task-db`, `telemetry`): every one of them has at least one
+    # workflow or command file tracked, so `examined` is never all-zero for a
+    # REAL repository today, even the three the docstring names as having no
+    # Rust or Python test suite at all (`argocd`, `proto`, `deploy`) -- their
+    # `.github/workflows/` alone keeps at least one count above zero. The
+    # README-only fixture this refusal used to let through does not occur in
+    # the actual estate; it is rebuilt below to match what a genuinely
+    # test-free repository's tree really looks like.
+    if not any(examined.values()):
+        if not tracked(root):
+            print(
+                f"no-test-skips gate: git tracks NOTHING under {root}. Either this\n"
+                "  is not this repository's own root, or the root itself is\n"
+                "  untracked -- a stray scratch directory, a second checkout, a\n"
+                "  worktree at any name.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"no-test-skips gate: EXAMINED NOTHING under {root}. git tracks\n"
+                "  files there, but none of them is a Rust file, a Python file, a\n"
+                "  command file or a workflow -- nothing this scan reads at all.",
+                file=sys.stderr,
+            )
         print(
-            f"no-test-skips gate: git tracks NOTHING under {root}. Either this\n"
-            "  is not this repository's own root, or the root itself is untracked\n"
-            "  -- a stray scratch directory, a second checkout, a worktree at any\n"
-            "  name. A scan with no tracked file to examine at all proves nothing,\n"
-            "  which is a different fact from a repository that IS tracked and\n"
-            "  genuinely holds no test suite of any kind.",
+            "  A scan that examined nothing proves nothing (ADR-0645), whichever\n"
+            "  of those two reasons produced the zero.",
             file=sys.stderr,
         )
         return 1
