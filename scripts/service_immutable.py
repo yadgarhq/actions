@@ -694,7 +694,8 @@ def main() -> int:
             print(
                 f"::error::could not read `{CHART}` as of `{revision}`, so "
                 f"the derived document floor has nothing to derive from: "
-                f"{error}"
+                f"{error}. Re-fetch the base (`fetch-depth: 0`, no `filter:`) "
+                f"or re-run."
             )
             return 1
         if base_exists:

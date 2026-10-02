@@ -842,6 +842,12 @@ def test_an_unreadable_base_chart_refuses_rather_than_floors_to_zero(repo):
     assert "::error::" in result.stdout
     assert "could not read" in result.stdout
     assert f"as of `{base}`" in result.stdout
+    # A REVIEW FINDING: the refusal named the problem but not a remedy. This
+    # failure is recoverable -- re-fetch and retry -- unlike the genuine
+    # absence arm below, which names nothing to do because there is nothing
+    # to fetch.
+    assert "fetch-depth: 0" in result.stdout
+    assert "re-run" in result.stdout
     # NOT the legitimate-absence wording — conflating the two is the defect
     # this pins, and `test_a_chart_new_on_this_branch_is_accepted` is the
     # control that a GENUINE absence still passes, unaffected.
