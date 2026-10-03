@@ -921,17 +921,16 @@ def test_the_pin_name_comes_from_the_chart_and_not_the_repository():
     assert workflow()["jobs"]["detect"]["outputs"]["chartname"]
 
 
-def test_the_chart_token_is_a_second_mint_and_not_a_wider_first_one():
-    """The separation ruling: the argocd token must not be able to write the chart.
+def test_the_chart_token_is_its_own_mint_and_not_a_wider_one():
+    """The separation ruling: this mint must not be able to write anywhere else.
 
-    Widening the `argocd` mint would hand the token that pins the cluster's
-    images write access to the chart repository, and hand this write path the
-    power to rewrite every `versions/*.yaml`.
+    Widening it beyond `chart` would hand the token that pins the parent chart
+    write access to a repository it has no business touching. `deployment`'s
+    own mint, scoped to `estate`, makes the same call for the same reason.
     """
     mint = steps("parent")["app"]
     assert mint["with"]["repositories"] == "chart"
     assert mint["with"]["permission-contents"] == "write"
-    assert steps("deployment")["app"]["with"]["repositories"] == "argocd"
     assert steps("deployment")["estate_app"]["with"]["repositories"] == "estate"
 
 
