@@ -173,32 +173,31 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
-      # THE DIGEST IS ASSERTED ONCE, HERE, AND NOWHERE ELSE. Five things read it
-      # and not one of them checked it: the trivy scan below, the SBOM, the
-      # cosign signature, the `yq` rewrite of `chart/values.yaml` in the `chart`
-      # job, and the `versions/<module>.yaml` write in the `deployment` job. The
-      # first three build a reference ending in `@` and fail on a malformed ref,
-      # which is luck rather than a check. The last two fail SILENTLY, and that
-      # is what this step is for: an empty digest publishes a chart carrying
+      # THE DIGEST IS ASSERTED ONCE, HERE, AND NOWHERE ELSE. Four things read
+      # it for a build that depends on it being real: the trivy scan below,
+      # the SBOM, the cosign signature, and the `yq` rewrite of
+      # `chart/values.yaml` in the `chart` job. The first three build a
+      # reference ending in `@` and fail on a malformed ref, which is luck
+      # rather than a check. The last fails SILENTLY, and that is what this
+      # step is for: an empty digest publishes a chart carrying
       # `image.digest: ""` and NO TAG AT ALL, because the same `yq` expression
-      # deletes `image.tag`; and it pins the module to `:<version>`, a GHCR tag
-      # this file's own comment further down admits is mutable.
+      # deletes `image.tag`. (A fifth value, sent to `estate` in the dispatch
+      # payload further down, matches nothing yet — see the note there.)
       #
-      # AT THE PRODUCER RATHER THAN AT EACH CONSUMER. A guard in `deployment`
-      # protects one of those five writes. Here it protects all five, and the
-      # gating already carries the failure downstream: wherever there is an
-      # image at all, `chart` requires this job to have SUCCEEDED and
-      # `deployment` runs on `== 'success'`, so a red guard skips both writes
-      # rather than letting them run on a value nobody vouched for. (`chart`
-      # read `!= 'failure'` when this comment was written, which admitted a
-      # cancelled job; ledger 729 replaced it — see the condition itself.) The
-      # sixth consumer, whenever it arrives, gets the
-      # guarantee without having to remember to ask for it.
+      # AT THE PRODUCER RATHER THAN AT EACH CONSUMER. Here this step protects
+      # all four, and the gating already carries the failure downstream:
+      # wherever there is an image at all, `chart` requires this job to have
+      # SUCCEEDED, so a red guard skips its silent write rather than letting
+      # it run on a value nobody vouched for. (`chart` read `!= 'failure'`
+      # when this comment was written, which admitted a cancelled job; ledger
+      # 729 replaced it — see the condition itself.) A later consumer gets
+      # the guarantee without having to remember to ask for it.
       #
-      # THE SHAPE IS NOT INVENTED HERE. `^sha256:[0-9a-f]{64}$` is what
-      # `scripts/versions_pinned.py` in `yadgarhq/argocd` enforces on the value
-      # this workflow writes there, so matching it turns a pod that will never
-      # pull into a build that will not pass.
+      # THE SHAPE IS NOT ARBITRARY. `^sha256:[0-9a-f]{64}$` is the only form
+      # every downstream reader below can act on — the trivy scan, the SBOM
+      # and the cosign signature all build a reference out of it — so matching
+      # it here turns a reference nothing downstream could use into a build
+      # that does not pass.
       #
       # TESTED AS A VARIABLE, NEVER AS A PIPELINE. The `if ! cmd | grep -q ...`
       # shape collapses a tool error, an absent tool and a genuine mismatch into
@@ -221,10 +220,8 @@ jobs:
             echo "is not \`sha256:\` followed by 64 lowercase hex characters."
             echo ""
             echo "Nothing downstream would have said so. The published chart would"
-            echo "carry \`image.digest: \"\"\` and no \`image.tag\` at all, and"
-            echo "\`versions/<module>.yaml\` would pin \`:<version>\` — a GHCR tag that"
-            echo "any re-run of this job overwrites. Both look like a successful"
-            echo "release."
+            echo "carry \`image.digest: \"\"\` and no \`image.tag\` at all, which looks"
+            echo "like a successful release."
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::error::The image push reported no usable digest. See the job summary."
           exit 1
@@ -614,8 +611,8 @@ jobs:
   # only the DEFAULT-BRANCH copy of that workflow, and it answers 204 whether or
   # not any workflow matched the event — so its exit status is a check that cannot
   # fail, and confirming it means watching for a run to appear, which the `estate`
-  # step below spends a hundred lines doing. The direct write mirrors the `argocd`
-  # write below instead, which is the mechanism this file already has.
+  # step below spends a hundred lines doing. A direct write, retried and confirmed
+  # by its own response, avoids all of that.
   #
   # NOT GATED ON `image`, AND THAT IS THE WHOLE REASON THIS IS NOT A STEP IN
   # `deployment`. That job requires `needs.image.result == 'success'`, and
@@ -745,13 +742,11 @@ jobs:
           echo "::error::the parent chart was not re-pinned: no release App is configured for this repository. See the parent job in yadgarhq/actions."
           exit 1
 
-      # SCOPED TO `chart`, AND IT IS A SECOND MINT RATHER THAN A WIDER FIRST ONE.
-      # The `deployment` job below narrows its token to `repositories: argocd` and
-      # says why; adding `chart` to that list would hand the token that pins the
-      # cluster's images write access to the chart repository, and hand this write
-      # path the power to rewrite every `versions/*.yaml`. The `estate` dispatch
-      # already made the same call for the same reason. Three mints cost two extra
-      # API calls and keep each token unable to do the others' job.
+      # SCOPED TO `chart`, AND IT IS ITS OWN MINT RATHER THAN A SHARED ONE.
+      # The `deployment` job below mints its own token scoped to `repositories:
+      # estate` for the same reason: one token unable to do the other's job.
+      # Two mints cost one extra API call each and keep every token narrower
+      # than the App's own organisation-wide grant.
       #
       # `repositories:` ALONE DOES NOTHING — the action makes it conditional on
       # `owner:`, so the two travel together or the default quietly scopes the
@@ -860,73 +855,35 @@ jobs:
           fi
           python3 "$dir/example_published.py"
 
-  # PUBLISHING AN IMAGE DID NOT ROLL A POD, and this job is the whole fix. Every
-  # module Deployment renders `image: <repo>:latest` with `imagePullPolicy:
-  # Always`, because a chart in git points at a moving tag (D65). `Always` is
-  # evaluated when a container is CREATED and never itself causes one to be
-  # created, so a release moved the tag and nothing restarted — with Argo CD
-  # reporting Synced/Healthy throughout. Measured 2026-09-03: FOUR of the five
-  # deployed services were behind for a full day, `task-db` by four releases, and
-  # `kubectl rollout restart` by hand was the only thing that ever deployed them.
-  # The fifth was current only because an unrelated pod-spec change had restarted
-  # it, which is the same accident by another name.
+  # THIS JOB ASKS `yadgarhq/estate` FOR A VERDICT ON EVERY RELEASE THAT HAS A
+  # RELEASE APP CONFIGURED, by sending it a `module-rolled` dispatch. It used
+  # to also write the released version into `yadgarhq/argocd` so Argo CD would
+  # roll the new image; ADR-0848 (ledger 1270) retired that write, because
+  # nothing in `yadgarhq/argocd` read it — the `yadgar-modules` ApplicationSet
+  # it fed generates zero Applications (ADR-0786).
   #
-  # Writing the released version into the deployment repository changes the pod
-  # template, and a changed pod template is what makes a rollout happen.
-  #
-  # D55 IS NOT NARROWED BY THIS. The chart still comes from the module
-  # repository at HEAD — the ApplicationSet's source is still `repoURL: {{
-  # .url }}`, `targetRevision: {{ .branch }}`, `path: chart` — so a chart change
-  # still reaches the cluster with no release at all. Only the image tag is
-  # pinned. What changes is that a RELEASE now deploys, which is faster than the
-  # never it managed before.
-  #
-  # THIS IS INERT AS SHIPPED and needs two things done by hand, IN THIS ORDER:
-  #
-  #   1. the release App added to the `main` ruleset bypass in `yadgarhq/argocd`,
-  #      so this write lands as a direct push and no pull request is created;
-  #   2. each module's own `ci.yaml` release job passing the two secrets below,
-  #      the way its `main` job already passes them to `ci-pr.yaml`.
-  #
-  # In the other order every release turns red on a ruleset that refuses the
-  # push. ADR-0527 shipped into 13 repositories the same way, dark until the
-  # credential arrived.
-  #
-  # NOT A CONTRADICTION OF D66, which rejected "dispatch from each module on
-  # release" for `chart` — and rejected it on the ground that ~61 repositories
-  # would each need a credential with write access to another repository, to
-  # hold, rotate and audit. ADR-0527 replaced those with ONE org-owned App
-  # minting a short-lived token per run, so that objection has nothing left to
-  # bite on. Polling, D66's answer, is also not available here: it is the
-  # release that must deploy, not a schedule that eventually notices.
-  #
-  # NOT A REVIEW MANUFACTURED, which is ADR-0531's test. With the bypass in
-  # place the write is a direct push and there is no pull request whose approval
-  # would be a formality. It is precisely the third case that ADR's
-  # `revisit_trigger` anticipated — a write that reaches a protected branch
-  # WITHOUT a pull request — so it satisfies the cause the two stated cases were
-  # drawn from while falling outside their letter.
+  # THIS IS INERT AS SHIPPED and needs the module's own `ci.yaml` release job
+  # passing the two secrets below, the way its `main` job already passes them
+  # to `ci-pr.yaml`. ADR-0527 shipped into 13 repositories the same way, dark
+  # until the credential arrived.
   deployment:
     needs: [detect, image]
-    # A repository with no `chart/` is not deployed by the ApplicationSet at all
-    # — its filter is `pathsExist: [chart]` — so there would be nothing to point
-    # at. A repository that has a chart but not the `yadgar-deployable` topic
-    # gets a file nothing reads, which is residue rather than a fault; detecting
-    # the topic would cost an API call to prevent an unused file.
+    # A repository with no `chart/` has no module for `estate` to roll-check,
+    # and `needs.image.result == 'success'` keeps this job from asking about a
+    # release whose image never published.
     if: needs.detect.outputs.chart == 'true' && needs.image.result == 'success'
     runs-on: ubuntu-latest
     # A BOUND, BECAUSE THIS JOB RUNS PAST THE POINT OF NO RETURN. No job in this
     # file sets one, so every job here inherits GitHub's 360-minute default.
     # That is merely wasteful for a job that can be re-run freely, and it is not
-    # tolerable for this one: by the time these steps run the tag is cut, the
-    # image is pushed and `:latest` has moved, and the steps below make roughly
-    # fourteen `gh api` calls, one of which polls. A wedged read would hold a
-    # runner for six hours on a release that already shipped.
+    # tolerable for this one: by the time these steps run the tag is cut and the
+    # image is pushed, and the steps below still make several `gh api` calls,
+    # one of which polls. A wedged read would hold a runner for six hours on a
+    # release that already shipped.
     #
     # TEN, and the arithmetic is the argument rather than a round number. The
-    # worst path here is the three argocd write attempts with their 5s and 10s
-    # backoff, then the estate poll at 150s, plus two token mints and the reads
-    # between them — under four minutes. Ten leaves more than twice that as
+    # worst path here is the estate poll at 150s, plus one token mint and the
+    # reads around it — under three minutes. Ten leaves more than twice that as
     # headroom, so raising the poll window again does not quietly arrive at the
     # ceiling, while still cutting a hung job short by a factor of thirty-six.
     timeout-minutes: 10
@@ -947,168 +904,11 @@ jobs:
           else
             echo "configured=false" >> "$GITHUB_OUTPUT"
             {
-              echo "_No release App is configured here, so \`yadgarhq/argocd\`"
-              echo "was not told about this version and no pod will roll, and"
-              echo "\`yadgarhq/estate\` was not asked for a verdict on it. See the"
+              echo "_No release App is configured here, so \`yadgarhq/estate\`"
+              echo "was not asked for a verdict on this release. See the"
               echo "\`deployment\` job in \`yadgarhq/actions\`._"
             } >> "$GITHUB_STEP_SUMMARY"
           fi
-
-      # SCOPED TO `argocd`, and both narrowings carry weight. With neither
-      # `owner:` nor `repositories:` the action scopes the token to the CURRENT
-      # repository — the one place this token must never be able to write. And
-      # `repositories:` alone does nothing: the action's own documentation makes
-      # it conditional on `owner`, so the two travel together or the default
-      # quietly stands.
-      #
-      # `permission-contents: write` rather than whatever the installation holds,
-      # for the reason `ci-pr.yaml` gives: zizmor's `github-app` audit fails the
-      # blanket form, and a later grant to this App would otherwise be picked up
-      # by this token silently.
-      - name: mint a token that can write to argocd and nowhere else
-        id: app
-        if: steps.cred.outputs.configured == 'true'
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: argocd
-          permission-contents: write
-
-      # ONE FILE PER MODULE, NAMED AFTER THE MODULE, and never a map of modules.
-      # D54's generator enumerates repositories rather than listing them, so a
-      # per-module value has nowhere to live in the ApplicationSet without
-      # reintroducing the central list D54 exists to delete. A file whose PATH is
-      # templated from the generator is not a list: nothing enumerates it, a file
-      # exists because a module released, and a module that never releases is a
-      # file that never appears.
-      #
-      # BOTH THE DIGEST AND THE TAG, AND THE DIGEST IS WHAT GOVERNS. A module
-      # chart's template reads `image.digest` in preference to `image.tag`, so
-      # the pull is by digest — the estate's "pin by digest, SHA or revision"
-      # invariant — while the tag stays in the file for a person to read.
-      #
-      # THE TAG ALONE WOULD NOT DO, and the distinction it rests on is worth
-      # keeping straight. A GIT tag here is immutable: the `release-tags` ruleset
-      # forbids `deletion`, `update` and non-fast-forward. A GHCR IMAGE tag is
-      # NOT. Re-running the `image` job on an existing git tag rebuilds and
-      # overwrites `:<version>`, so a values file naming only the version can
-      # come to mean a different image without the file changing.
-      #
-      # ROLLING BACK IS AN EDIT, NEVER A DELETE. Deleting the file returns the
-      # module to `image.tag: latest` from the chart, and `latest` was moved to
-      # THIS release by the `image` job above — so a delete rolls the pod a
-      # second time onto the very build being rolled back from. To roll back,
-      # set both keys to the previous release's values; `:<previous>` is still
-      # in the registry, because only `latest` moves.
-      #
-      # AND THE HEADER WRITTEN BELOW NOW SAYS SO. It used to end "Deleting this
-      # file returns the module to the moving tag, which now points at THIS
-      # release" — a description of the damage that reads as a documented way
-      # out. `yadgarhq/argocd` REFUSES that deletion now (`ci / passed`,
-      # `scripts/versions_pinned.py`, ledger 608) and its five existing files
-      # were corrected by hand; but this generator rewrites the header on every
-      # release, so the old invitation would have come back one module at a
-      # time. The replacement is lifted from those files and from the script's
-      # own failure message rather than phrased a third way, and it adds the
-      # retirement shape that script had to work out: a module leaves the
-      # cluster by losing its `yadgar-deployable` topic or its `chart/`, after
-      # which nothing reads the file and leaving it costs nothing.
-      #
-      # THE FAILURE IS RED, NOT SILENT, and that is this workflow's own instinct
-      # rather than a new one: the "verify an adopter can actually pull this"
-      # step above already fails the job after a successful push, for a condition
-      # only a human can clear. Swallowing this one would leave the estate
-      # exactly where it started — a published image that never reaches a pod,
-      # with every check green.
-      - name: tell argocd which version to run
-        if: steps.cred.outputs.configured == 'true'
-        env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
-          VERSION: ${{ needs.detect.outputs.version }}
-          DIGEST: ${{ needs.image.outputs.digest }}
-          REPO: ${{ github.repository }}
-          OWNER: ${{ github.repository_owner }}
-        run: |
-          set -euo pipefail
-          module="${REPO#*/}"
-          api="repos/${OWNER}/argocd/contents/versions/${module}.yaml"
-          file="$RUNNER_TEMP/version.yaml"
-          # NO BACKTICKS IN THE STRINGS BELOW, and that is not a style choice.
-          # A backtick inside a single-quoted string reads to SC2016 as a command
-          # substitution somebody meant to expand. actionlint pipes every run
-          # block through shellcheck, so the five markdown backticks that used to
-          # be here failed the workflow lint — found on the day the actionlint
-          # hook first became able to fail at all. The text lands in a YAML
-          # comment that nothing renders as markdown, so the emphasis bought
-          # nothing and the plain words read the same.
-          #
-          # NOR MAY A LINE HERE OPEN WITH THE WORD shellcheck. A comment of that
-          # shape is parsed as a shellcheck DIRECTIVE, and an unparseable one is
-          # SC1072/SC1073 — an error, not an info. The first draft of this very
-          # note tripped it.
-          {
-            printf '# Written by ci-release in %s. Do not edit by hand.\n' "$REPO"
-            printf '# The digest governs the pull; the tag is here to be read.\n'
-            printf '# To roll back, set BOTH keys to the previous release.\n'
-            printf '# DO NOT DELETE THIS FILE. Deleting it hands helm no values,\n'
-            printf '# so the module falls back to the moving tag with nothing\n'
-            printf '# reporting it — ci / passed refuses the deletion (ledger\n'
-            printf '# 608, scripts/versions_pinned.py).\n'
-            printf '# That is an EDIT of both keys and never a delete, because\n'
-            printf '# :latest already points at the release being rolled back\n'
-            printf '# from.\n'
-            printf '# Retiring the module is not a reason to delete it either: a\n'
-            printf '# module leaves the cluster by losing its yadgar-deployable\n'
-            printf '# topic or its chart/, after which nothing reads this file\n'
-            printf '# and leaving it costs nothing.\n'
-            printf 'image:\n  digest: "%s"\n  tag: "%s"\n' "$DIGEST" "$VERSION"
-          } > "$file"
-          err="$RUNNER_TEMP/write_error.txt"
-          # THREE ATTEMPTS, RE-READING THE BLOB SHA EACH TIME. The Contents API
-          # refuses a write carrying a stale sha, and two modules releasing at
-          # once move the branch under each other even though they write
-          # different files. A retry is the whole remedy for that. Three
-          # releases landing at once can still exhaust three attempts, so a
-          # third failure is not proof that no retry could ever clear it — it is
-          # the point at which reporting beats guessing.
-          for attempt in 1 2 3; do
-            sha=$(gh api "$api" --jq .sha 2>/dev/null || true)
-            set -- -X PUT -f "message=ci: ${module} ${VERSION}" \
-                   -f "content=$(base64 -w0 < "$file")"
-            if [ -n "$sha" ]; then set -- "$@" -f "sha=$sha"; fi
-            if gh api "$api" "$@" >/dev/null 2>"$err"; then
-              echo "::notice::argocd now runs ${module} ${VERSION}"
-              echo "\`yadgarhq/argocd\` now pins **${module} ${VERSION}**." \
-                >> "$GITHUB_STEP_SUMMARY"
-              exit 0
-            fi
-            if [ "$attempt" -lt 3 ]; then sleep $((attempt * 5)); fi
-          done
-          cat "$err" >&2
-          {
-            echo "### Published, but NOT deployed"
-            echo ""
-            echo "\`${module} ${VERSION}\` was pushed and signed, but writing"
-            echo "\`versions/${module}.yaml\` to \`${OWNER}/argocd\` was refused."
-            echo "The cluster keeps running the previous image and Argo CD"
-            echo "reports Synced, which is the exact failure this job exists to"
-            echo "end — so this is a red build rather than a warning."
-            echo ""
-            echo "The usual cause is the \`main\` ruleset on \`${OWNER}/argocd\`:"
-            echo "the release App has to be a bypass actor there, or the write"
-            echo "needs a pull request that nothing opens."
-            echo ""
-            echo "RELEASING AGAIN IS NOT THE REPAIR. \`v${VERSION}\` is cut and"
-            echo "permanent — \`release-tags\` forbids deletion, update and"
-            echo "non-fast-forward — and \`:latest\` has already moved. Once the"
-            echo "write is permitted, either **Re-run failed jobs** on this run,"
-            echo "which reuses \`detect\` and \`image\` rather than rebuilding"
-            echo "them, or write \`versions/${module}.yaml\` by hand."
-          } >> "$GITHUB_STEP_SUMMARY"
-          echo "::error::Could not write the version to ${OWNER}/argocd. See the job summary."
-          exit 1
 
       # ASKING THE ESTATE FOR A VERDICT, and this is the second half of a
       # trigger whose first half has been waiting since the suite was written.
@@ -1116,13 +916,12 @@ jobs:
       # `module-rolled`; nothing in the organisation sent that event, so the
       # behavioural contract suite had never executed once. This is the sender.
       #
-      # A SECOND TOKEN RATHER THAN A WIDER FIRST ONE. The mint above narrows to
-      # `repositories: argocd` and says why. Adding `estate` to that list would
-      # hand the token that pins the cluster's images write access to a test
-      # repository, and hand the dispatch a token that can rewrite every
-      # `versions/*.yaml`. Two mints cost one extra API call and keep each token
-      # unable to do the other's job. Same action at the SAME pinned SHA — two
-      # pins for one action in one file would be a smell of its own.
+      # A TOKEN SCOPED TO `estate` AND NOTHING ELSE. The App holds
+      # `contents: write` and `actions: write` organisation-wide, and minting a
+      # token scoped only to `repositories: estate` keeps this dispatch unable
+      # to write anywhere else — the same discipline the `parent` job's own
+      # mint applies to `chart`. Same action at the SAME pinned SHA — two pins
+      # for one action in one file would be a smell of its own.
       #
       # `contents: write` IS WHAT THE ENDPOINT ASKS FOR, read from GitHub's
       # fine-grained permission reference rather than assumed: `POST
@@ -1150,33 +949,29 @@ jobs:
           permission-contents: write
           permission-actions: read
 
-      # AFTER THE PIN IS WRITTEN, AND THAT ORDER IS WHY THIS IS A STEP RATHER
-      # THAN A JOB. The step that writes `versions/<module>.yaml` exits 1 when
-      # the write is refused, so everything after it is skipped: a roll that
-      # never reached argocd never asks for a verdict on itself. A separate job
-      # with `needs:` would state the same ordering at the cost of minting the
-      # credential a third time.
+      # A STEP RATHER THAN A JOB, to share the `cred` check above and mint only
+      # the one token this dispatch needs. A separate job with `needs:` would
+      # state the same ordering at the cost of minting the credential
+      # separately.
       #
-      # THE DISPATCH IS NOT A PROMISE THAT THE NEW PODS ARE UP, and the
-      # receiving half already knows it. Argo CD syncs seconds to minutes after
-      # the pin lands, so a suite that wins that race measures the PREVIOUS pods
-      # and reports green for code that is not running. `estate`'s `await-roll`
-      # binary is the tolerance, and it reads exactly the payload sent below: for
-      # the gateway it polls `server/discover` for up to ten minutes until the
-      # served version equals the dispatched tag with the leading `v` stripped;
-      # for every module but the gateway it REFUSES — the run ends red, saying the
-      # roll cannot be confirmed from the front door, and none of the nine rows
-      # execute (ledger 675 measured the old "prints a caveat and proceeds"
-      # shape as six false greens, `yadgarhq/estate#24`). Stage 3's A-04
-      # replaces the refusal with digest parity for every module — which is
-      # why `digest` is in the payload although nothing reads it yet.
+      # THE DISPATCH IS NOT A PROMISE THAT ANY NEW PODS ARE UP — nothing in
+      # this workflow deploys the release to the cluster. `estate`'s
+      # `await-roll` binary is the tolerance anyway, and it reads exactly the
+      # payload sent below: for the gateway it polls `server/discover` for up
+      # to ten minutes until the served version equals the dispatched tag with
+      # the leading `v` stripped; for every module but the gateway it
+      # REFUSES — the run ends red, saying the roll cannot be confirmed from
+      # the front door, and none of the nine rows execute (ledger 675 measured
+      # the old "prints a caveat and proceeds" shape as six false greens,
+      # `yadgarhq/estate#24`). Stage 3's A-04 replaces the refusal with digest
+      # parity for every module — which is why `digest` is in the payload
+      # although nothing reads it yet.
       #
       # A FAILED DISPATCH MUST NOT REDDEN THE RELEASE. By the time this step
-      # runs the tag is cut and permanent, the image is pushed and signed, and
-      # argocd is pinned — the release SUCCEEDED and the pods will roll. Failing
-      # the job here would report a shipped release as broken and invite the one
-      # repair the step above spends four lines forbidding, which is releasing
-      # again.
+      # runs the tag is cut and permanent, and the image is pushed and
+      # signed — the release SUCCEEDED. Failing the job here would report a
+      # shipped release as broken and invite the one repair that is never
+      # correct: releasing again.
       #
       # BUT IT IS NOT ALLOWED TO BE SILENT, because a dispatch that fails
       # quietly is this estate's most repeated defect. So the step itself FAILS
@@ -1286,13 +1081,12 @@ jobs:
 
           fail() {
             {
-              echo "### Rolled, but the estate was not asked"
+              echo "### Released, but the estate was not asked"
               echo ""
-              echo "\`${module} ${VERSION}\` is released and \`${OWNER}/argocd\` is"
-              echo "pinned to it, so the release is sound and the pods will roll."
+              echo "\`${module} ${VERSION}\` is released, signed and pullable."
               echo "What did not happen is the verdict: $1"
               echo ""
-              echo "NO behavioural contract ran for this roll. Send it by hand from"
+              echo "NO behavioural contract ran for this release. Send it by hand from"
               echo "the Actions tab of \`${OWNER}/estate\`: smoke's"
               echo "\`workflow_dispatch\` takes \`module\` and \`tag\`, but only"
               echo "\`gateway\` is confirmed by name — naming any other module now"
@@ -1301,13 +1095,8 @@ jobs:
                 echo "Send \`module=gateway\` and \`tag=v${VERSION}\`: smoke polls the"
                 echo "edge for up to ten minutes until it serves that tag."
               else
-                echo "For \`${module}\`, wait until the pods serve the roll (estate"
-                echo "measures pin-to-serving at 285-290s, pin-to-pod-start up to"
-                echo "303s, after the \`${OWNER}/argocd\` write above), then send it"
-                echo "with both left EMPTY — sent earlier it measures the PREVIOUS"
-                echo "pods. Only **Re-run all jobs** could retry, by rebuilding and"
-                echo "re-pushing the image (moving \`:latest\`) to send a dispatch"
-                echo "smoke refuses again."
+                echo "For \`${module}\`, send it with both left EMPTY: nothing in this"
+                echo "workflow deploys the release, so there is no roll to wait for."
               fi
               echo "RELEASING AGAIN IS NOT THE REPAIR."
             } >> "$GITHUB_STEP_SUMMARY"
@@ -1321,10 +1110,9 @@ jobs:
           # for somebody who will act on it without reading either.
           unconfirmed() {
             {
-              echo "### Rolled, but the verdict was not confirmed"
+              echo "### Released, but the verdict was not confirmed"
               echo ""
-              echo "\`${module} ${VERSION}\` is released and \`${OWNER}/argocd\` is"
-              echo "pinned to it, so the release is sound and the pods will roll."
+              echo "\`${module} ${VERSION}\` is released, signed and pullable."
               echo "The dispatch was accepted, and then no new \`smoke\` run was"
               echo "read in ${window}s. WHETHER ONE EXISTS IS NOT KNOWN FROM HERE."
               echo ""
@@ -1344,11 +1132,9 @@ jobs:
               if [ "$module" = gateway ]; then
                 echo "send \`module=gateway\` and \`tag=v${VERSION}\`, only if none is there."
               else
-                echo "for \`${module}\`, wait until the pods serve the roll (estate"
-                echo "measures pin-to-serving at 285-290s, pin-to-pod-start up to"
-                echo "303s, after the \`${OWNER}/argocd\` write above), then send it"
-                echo "with both left EMPTY even if a run is there: that run was"
-                echo "refused; sent earlier, yours measures the PREVIOUS pods."
+                echo "for \`${module}\`, send it with both left EMPTY, only if none is"
+                echo "there: nothing in this workflow deploys the release, so there is"
+                echo "no roll to wait for."
               fi
               echo "Either way it joins smoke's \`estate-smoke\` group, which queues"
               echo "rather than running alongside, so a blind send while a real run"
@@ -1360,8 +1146,7 @@ jobs:
               echo "job concluded SUCCESS and **Re-run failed jobs** cannot reach"
               echo "it. **Re-run all jobs** can, and that rebuilds and re-pushes"
               echo "the image — moving \`:latest\` again and giving \`:${VERSION}\` a"
-              echo "digest \`argocd\` is not pinned to — as well as replaying the"
-              echo "\`argocd\` write."
+              echo "digest nothing else is pinned to."
               if [ "$module" != gateway ]; then
                 echo "For \`${module}\` it also buys nothing beyond that cost: the"
                 echo "replayed dispatch is refused the same way."
