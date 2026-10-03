@@ -135,6 +135,66 @@ forbid_joined \
     'a raw environment read falls back inline.' \
     'Use env_required(key), or mark the line ADR-0569-EXCEPTION with the argument.'
 
+# LEDGER 965, UNIT C-A1. The widening: four more compiled-in-default shapes
+# the census (plan-C.md) found with no marker, plus a fifth read already
+# forbidden above but narrowed.
+#
+# P1 — a lookup/env/get call keyed by a CONFIG KEY, falling back inline
+# through any number of lowercase-method chain links. ANCHORED TO AN
+# UPPERCASE KEY (quoted or bare), not to the call name alone: the unanchored
+# shape matches any map/JSON lookup chained into unwrap_or, and measured
+# 2026-10-03 against yadgarhq/yadgar @ origin/main it false-positives on
+# seven lines that read an untyped value by a lowercase field name or a
+# variable, never a config knob (e.g. src/hook/guard.rs:60 `payload
+# .get("tool_name").and_then(Value::as_str).unwrap_or("")`). A config key in
+# this estate is always ALL_CAPS, bare (gateway broker.rs: `lookup(URL)`) or
+# quoted (`env("YADGAR_CREDENTIAL_TTL_SECONDS")`).
+forbid_joined \
+    '(lookup|env|get)\(\s*"?[A-Z][A-Z0-9_]*"?\s*\)(\.[a-z_]+\([^)]*\))*\.unwrap_or(_else|_default)?\(' \
+    'a lookup/env/get call on a CONFIG KEY falls back inline.' \
+    'Use env_required(key), or mark the line ADR-0569-EXCEPTION with the argument.'
+
+# P2 — the name itself asserts a fallback exists.
+forbid \
+    '(const|static)\s+DEFAULT_[A-Z0-9_]*\s*:' \
+    'a const or static item is named DEFAULT_*.' \
+    'Rename it, read it explicitly as a knob, or mark it ADR-0569-EXCEPTION.'
+
+# P3 — presence tested against a compiled-in "off" literal instead of a read.
+forbid \
+    'get\("[^"]*"\)(\.as_deref\(\))?\s*(!=|==)\s*Some\("' \
+    'presence of a value is tested against Some("...") instead of reading it.' \
+    'Read the value explicitly, or mark the line ADR-0569-EXCEPTION.'
+
+# P4 — a compiled-in log-level fallback.
+forbid \
+    'EnvFilter::new\(' \
+    'EnvFilter::new(...) compiles in a log-level fallback.' \
+    'Mark it ADR-0569-EXCEPTION(LIB): the log level is observability, not behaviour.'
+
+# P5 — a `None` arm beside an env read that answers with a bare
+# SCREAMING_SNAKE_CASE constant is a compiled-in default under another name.
+# SCOPED TO FILES THAT ACTUALLY READ THE ENVIRONMENT (`lookup(` or
+# `env::var(` present somewhere in the file), so an ordinary `None => CONST`
+# in a match that has nothing to do with configuration is not swept in.
+p5_raw=""
+for f in "${files[@]}"; do
+    if grep -qE 'lookup\(|env::var\(' "$f"; then
+        p5_file_hits=$(grep -nE 'None\s*=>\s*(Ok\()?[A-Z][A-Z0-9_]{2,}\s*[,)]' "$f" || true)
+        if [ -n "$p5_file_hits" ]; then
+            p5_raw+="$(printf '%s\n' "$p5_file_hits" | sed "s|^|$f:|")"$'\n'
+        fi
+    fi
+done
+p5_hits=$(printf '%s' "$p5_raw" | grep -v 'ADR-0569-EXCEPTION' || true)
+if [ -n "$p5_hits" ]; then
+    echo "" >&2
+    echo "ADR-0569 VIOLATION — a None arm beside an env read returns a bare constant." >&2
+    while IFS= read -r line; do [ -n "$line" ] && echo "  $line" >&2; done <<<"$p5_hits"
+    echo "  Use env_required(key), or mark the line ADR-0569-EXCEPTION with the argument." >&2
+    fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
     echo "" >&2
     echo "ADR-0569: a knob is read from one source and refuses the boot when absent." >&2
