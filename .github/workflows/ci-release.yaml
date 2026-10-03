@@ -862,10 +862,10 @@ jobs:
   # nothing in `yadgarhq/argocd` read it — the `yadgar-modules` ApplicationSet
   # it fed generates zero Applications (ADR-0786).
   #
-  # THIS IS INERT AS SHIPPED and needs the module's own `ci.yaml` release job
-  # passing the two secrets below, the way its `main` job already passes them
-  # to `ci-pr.yaml`. ADR-0527 shipped into 13 repositories the same way, dark
-  # until the credential arrived.
+  # THE `cred` STEP BELOW IS THE OFF SWITCH: a repository whose `release:` job
+  # does not pass the two secrets gets a named, non-red skip here. All eight
+  # chart-bearing repositories pass them as of 2026-09-19 (see the `parent`
+  # job).
   deployment:
     needs: [detect, image]
     # A repository with no `chart/` has no module for `estate` to roll-check,
@@ -965,7 +965,8 @@ jobs:
       # the old "prints a caveat and proceeds" shape as six false greens,
       # `yadgarhq/estate#24`). Stage 3's A-04 replaces the refusal with digest
       # parity for every module — which is why `digest` is in the payload
-      # although nothing reads it yet.
+      # although nothing reads it yet. So a gateway dispatch times out red
+      # unless the pin was moved within the poll window.
       #
       # A FAILED DISPATCH MUST NOT REDDEN THE RELEASE. By the time this step
       # runs the tag is cut and permanent, and the image is pushed and
@@ -1086,18 +1087,13 @@ jobs:
               echo "\`${module} ${VERSION}\` is released, signed and pullable."
               echo "What did not happen is the verdict: $1"
               echo ""
-              echo "NO behavioural contract ran for this release. Send it by hand from"
-              echo "the Actions tab of \`${OWNER}/estate\`: smoke's"
-              echo "\`workflow_dispatch\` takes \`module\` and \`tag\`, but only"
-              echo "\`gateway\` is confirmed by name — naming any other module now"
-              echo "refuses the run."
-              if [ "$module" = gateway ]; then
-                echo "Send \`module=gateway\` and \`tag=v${VERSION}\`: smoke polls the"
-                echo "edge for up to ten minutes until it serves that tag."
-              else
-                echo "For \`${module}\`, send it with both left EMPTY: nothing in this"
-                echo "workflow deploys the release, so there is no roll to wait for."
-              fi
+              echo "NO behavioural contract ran for this release, and none can yet:"
+              echo "nothing in this workflow deploys it. It reaches the cluster only"
+              echo "when the cluster's parent-chart pin is moved to a version that"
+              echo "carries it (the \`parent\` job above cut that version). After that"
+              echo "pin has rolled, start \`smoke\` in \`${OWNER}/estate\` by"
+              echo "\`workflow_dispatch\` naming no roll: it measures what is deployed."
+              echo "Before then, any verdict describes the PREVIOUS release."
               echo "RELEASING AGAIN IS NOT THE REPAIR."
             } >> "$GITHUB_STEP_SUMMARY"
             echo "::error::${OWNER}/estate was not asked for a verdict: $1"
@@ -1127,15 +1123,10 @@ jobs:
               echo "SO OPEN THE ACTIONS TAB OF \`${OWNER}/estate\` FIRST. A smoke"
               echo "run for **${module} v${VERSION}** there means this check was"
               echo "wrong about whether a run exists. Then"
-              echo "send one by hand: smoke takes \`module\` and \`tag\` on"
-              echo "\`workflow_dispatch\`, but only \`gateway\` is confirmed by name —"
-              if [ "$module" = gateway ]; then
-                echo "send \`module=gateway\` and \`tag=v${VERSION}\`, only if none is there."
-              else
-                echo "for \`${module}\`, send it with both left EMPTY, only if none is"
-                echo "there: nothing in this workflow deploys the release, so there is"
-                echo "no roll to wait for."
-              fi
+              echo "Do not send one by hand for this release: nothing in this"
+              echo "workflow deploys it, so a run now measures the PREVIOUS release."
+              echo "Once the cluster's parent-chart pin carries it and has rolled,"
+              echo "start \`smoke\` by \`workflow_dispatch\` naming no roll."
               echo "Either way it joins smoke's \`estate-smoke\` group, which queues"
               echo "rather than running alongside, so a blind send while a real run"
               echo "is already waiting risks losing a verdict rather than gaining"
@@ -1147,10 +1138,8 @@ jobs:
               echo "it. **Re-run all jobs** can, and that rebuilds and re-pushes"
               echo "the image — moving \`:latest\` again and giving \`:${VERSION}\` a"
               echo "digest nothing else is pinned to."
-              if [ "$module" != gateway ]; then
-                echo "For \`${module}\` it also buys nothing beyond that cost: the"
-                echo "replayed dispatch is refused the same way."
-              fi
+              echo "For \`${module}\` it also buys nothing beyond that cost: the"
+              echo "replayed dispatch is refused or times out the same way."
               echo "RELEASING AGAIN IS NOT THE REPAIR EITHER."
             } >> "$GITHUB_STEP_SUMMARY"
             echo "::error::${OWNER}/estate: no smoke run confirmed in ${window}s, but one may exist — open the Actions tab of ${OWNER}/estate before repairing anything. See the job summary."
