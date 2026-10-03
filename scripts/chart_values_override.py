@@ -14,12 +14,13 @@ LINTS THE CHART OFFLINE: the `helm-lint` hook, `d80_portability.py` and
 gates cannot drift apart on what values the chart is rendered against either.
 
 THE FILE is `chart/ci/values.yaml`, beside `chart/ci/api-versions.txt` in the
-same directory for the same reason: `ci/` is already helm's own convention for
-"what this chart is exercised under" (`helm lint` and `helm test` both read
-it), and the file sits INSIDE the chart so a chart archived at another
-revision -- `service_immutable.py`'s base side -- carries the override it had
-then (EACH SIDE READS ITS OWN DECLARATION, the same rule `api_versions.py`
-documents for the base/HEAD split).
+same directory for the same reason: `ci/` is the chart-testing (`ct`)
+convention for "what this chart is exercised under" -- helm itself never reads
+it, which is why every gate passes `-f` explicitly -- and the file sits INSIDE
+the chart so a chart archived at another revision -- `service_immutable.py`'s
+base side -- carries the override it had then (EACH SIDE READS ITS OWN
+DECLARATION, the same rule `api_versions.py` documents for the base/HEAD
+split).
 
 A CHART WITH NO FILE GETS NO FLAG, and that is the whole backward-compatibility
 argument: every gate appends `-f <path>` to the argv it already ran, so an

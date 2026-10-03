@@ -658,6 +658,27 @@ def test_a_values_override_reaches_the_defaults_render_as_a_flag(tmp_path):
     ]
 
 
+def test_a_toggle_only_the_ci_values_override_sets_is_still_flipped_off(tmp_path):
+    """C-A2's MERGE-BEFORE-FLIP, pinned. `tls.enabled` exists only in
+    `chart/ci/values.yaml` (ADR-0845: no chart default). The override must be
+    merged in BEFORE `flip_toggles`, or the all-off render keeps the override's
+    `true`, the guarded resource survives, and the gate calls a switchable
+    chart unswitchable."""
+    root = tree(
+        tmp_path,
+        {
+            "chart/values.yaml": "_render:\n"
+            + DEPLOYMENT
+            + container()
+            + guarded(SCALED_OBJECT, "tls.enabled"),
+            "chart/ci/values.yaml": "tls:\n  enabled: true\n",
+        },
+    )
+    result = run(root)
+    assert result.returncode == 0, result.stdout
+    assert "cannot switch its optional parts off" not in result.stdout
+
+
 # ----------------------------------------------- the release-shaped render (D65)
 
 

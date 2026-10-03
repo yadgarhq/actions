@@ -230,6 +230,14 @@ if have_chart:
         )
         w()
 
+    if values_override_path:
+        w(
+            f"Every render below merges `{values_override_path}` over "
+            "`chart/values.yaml` (C-A2), so the defaults section reports the "
+            "chart as its CI renders it, not as `values.yaml` alone states it."
+        )
+        w()
+
     # BOTH RENDERS FIRST, then the report. The note about a product defaulting
     # on is only true of a resource that a value can in fact turn off, so it
     # cannot be written before the second render has been read.

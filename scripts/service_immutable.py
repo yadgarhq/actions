@@ -597,9 +597,10 @@ def declared_alternate_values() -> list[str]:
     TWO NAMES, AND BOTH ARE CONVENTIONS THAT ALREADY EXIST rather than a third
     invented here. `example/values.yaml` is the file `yadgarhq/platform` ships
     for an adopter to copy beside their own Argo `Application`, and
-    `chart/ci/*-values.yaml` is helm's own: `helm lint` and `helm test` read that
-    directory precisely as "the values this chart is meant to be exercised
-    under".
+    `chart/ci/*-values.yaml` is the chart-testing (`ct`) convention naming
+    "the values this chart is meant to be exercised under" -- helm itself
+    never reads that directory automatically, which is exactly why this
+    function has to check for the file explicitly.
 
     USING EITHER NAME IS NOT ITSELF THE DECLARATION, and saying so would claim
     more than the code below checks. What counts is what the file PARSES to, and
