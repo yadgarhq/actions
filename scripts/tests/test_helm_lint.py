@@ -129,13 +129,19 @@ def test_the_render_output_is_discarded_as_before(tmp_path):
 
 
 def test_each_declared_version_is_passed_to_the_render_and_not_to_lint(tmp_path):
+    """THE TWO FILES TOGETHER, so the argv pin cannot go stale the way a lint-
+    gets-no-flags pin would once C-A2 gave lint a flag of its own:
+    `chart/ci/values.yaml` reaches BOTH commands, `chart/ci/api-versions.txt`
+    reaches the render alone."""
     root = repository(
         tmp_path, "# operators\nkeda.sh/v1alpha1\ncert-manager.io/v1\n"
     )
+    values_path = root / "chart" / "ci" / "values.yaml"
+    values_path.write_text("tls:\n  enabled: true\n")
     result, calls = run(root)
     assert result.returncode == 0, result.stderr
     assert calls == [
-        ["lint", "--strict", "chart"],
+        ["lint", "--strict", "chart", "-f", "chart/ci/values.yaml"],
         [
             "template",
             "ci-render",
@@ -144,8 +150,56 @@ def test_each_declared_version_is_passed_to_the_render_and_not_to_lint(tmp_path)
             "keda.sh/v1alpha1",
             "--api-versions",
             "cert-manager.io/v1",
+            "-f",
+            "chart/ci/values.yaml",
         ],
     ]
+
+
+# ------------------------------------------- a chart/ci/values.yaml override
+# reaches both commands (C-A2)
+
+
+def test_a_chart_ci_values_file_reaches_both_lint_and_the_render(tmp_path):
+    root = repository(tmp_path)
+    values_path = root / "chart" / "ci" / "values.yaml"
+    values_path.parent.mkdir(parents=True, exist_ok=True)
+    values_path.write_text("tls:\n  enabled: true\n")
+    result, calls = run(root)
+    assert result.returncode == 0, result.stderr
+    assert calls == [
+        ["lint", "--strict", "chart", "-f", "chart/ci/values.yaml"],
+        ["template", "ci-render", "chart", "-f", "chart/ci/values.yaml"],
+    ]
+
+
+def test_without_a_chart_ci_values_file_the_argv_is_still_unchanged(tmp_path):
+    """THE RED CASE for the test above: identical but for the file -- restates
+    `test_without_a_declaration_the_argv_is_the_one_the_bash_entry_ran`'s
+    promise now that a second file could also add flags."""
+    result, calls = run(repository(tmp_path))
+    assert result.returncode == 0, result.stderr
+    assert calls == [
+        ["lint", "--strict", "chart"],
+        ["template", "ci-render", "chart"],
+    ]
+
+
+def test_a_failing_lint_against_the_values_override_stops_before_the_render(
+    tmp_path,
+):
+    """A chart whose coalesced values fail `helm lint --strict` must refuse
+    before the render runs, the same control flow a bare lint failure already
+    has -- the stub cannot model schema validation, so this pins the control
+    flow the real refusal depends on: lint sees the flag and if it refuses,
+    `template` never runs."""
+    root = repository(tmp_path)
+    values_path = root / "chart" / "ci" / "values.yaml"
+    values_path.parent.mkdir(parents=True, exist_ok=True)
+    values_path.write_text("tls:\n  enabled: true\n")
+    result, calls = run(root, STUB_LINT_EXIT=1)
+    assert result.returncode == 1
+    assert calls == [["lint", "--strict", "chart", "-f", "chart/ci/values.yaml"]]
 
 
 def test_a_render_that_needs_a_declared_version_passes(tmp_path):
