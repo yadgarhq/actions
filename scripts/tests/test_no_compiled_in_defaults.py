@@ -205,6 +205,33 @@ def test_absent_as_off_literal_is_refused(tmp_path):
     assert "tested against Some(" in result.stderr
 
 
+def test_absent_as_off_lookup_key_is_refused(tmp_path):
+    """`lookup(TRUST_HEADERS).as_deref() == Some("1")` — gateway attest.rs:219."""
+    write(
+        tmp_path,
+        "src/main.rs",
+        "fn main() {\n"
+        "    let on = lookup(TRUST_HEADERS).as_deref() == Some(\"1\");\n"
+        "}\n",
+    )
+    result = run(tmp_path)
+    assert result.returncode == 1
+    assert "tested against Some(" in result.stderr
+
+
+def test_absent_as_off_lowercase_field_is_not_refused(tmp_path):
+    """The same P3 narrowing as P1: a lowercase field is not a config key."""
+    write(
+        tmp_path,
+        "src/main.rs",
+        "fn main() {\n"
+        '    let is_stdio = v.get("type").as_deref() == Some("stdio");\n'
+        "}\n",
+    )
+    result = run(tmp_path)
+    assert result.returncode == 0, result.stderr
+
+
 def test_envfilter_new_is_refused(tmp_path):
     write(
         tmp_path,
@@ -273,6 +300,72 @@ def test_none_arm_bare_constant_marked_is_not_refused(tmp_path):
         "// ADR-0569-EXCEPTION(ABS): log level default\n"
         "    }\n"
         "}\n",
+    )
+    result = run(tmp_path)
+    assert result.returncode == 0, result.stderr
+
+
+def test_none_arm_bare_constant_scoped_by_bare_env_call_is_refused(tmp_path):
+    """P5's scope widened from `env::var(`/`lookup(` to also match `env(`.
+
+    A bare `env(KEY)` call with no `.unwrap_or` chain is not itself a P1 hit,
+    but it still marks the file as one that reads the environment.
+    """
+    write(
+        tmp_path,
+        "src/main.rs",
+        "fn f(x: Option<&str>, env: impl Fn(&str) -> Option<String>) -> &str {\n"
+        "    let _ = env(SOME_KEY);\n"
+        "    match x {\n"
+        "        Some(v) => v,\n"
+        "        None => DEFAULT_LEVEL,\n"
+        "    }\n"
+        "}\n",
+    )
+    result = run(tmp_path)
+    assert result.returncode == 1
+    assert "None arm beside an env read" in result.stderr
+
+
+# LEDGER 965, UNIT C-A1 FOLLOW-UP. Comment-awareness: a doc comment that
+# merely QUOTES a forbidden shape in prose configures nothing. Measured
+# against gateway src/invalidate.rs:95 at origin/main, a `//!` module doc
+# line quoting `EnvFilter::new("info")` was a false positive under the first
+# version of this gate.
+
+
+def test_envfilter_new_in_doc_comment_is_not_refused(tmp_path):
+    write(
+        tmp_path,
+        "src/main.rs",
+        '//! main builds `EnvFilter::new("info")` with no override.\n'
+        "fn main() {}\n",
+    )
+    result = run(tmp_path)
+    assert result.returncode == 0, result.stderr
+
+
+def test_default_const_in_doc_comment_is_not_refused(tmp_path):
+    write(
+        tmp_path,
+        "src/main.rs",
+        "/// See also const DEFAULT_X: u32 in the sibling module.\n"
+        "fn main() {}\n",
+    )
+    result = run(tmp_path)
+    assert result.returncode == 0, result.stderr
+
+
+def test_default_const_with_trailing_comment_marker_is_still_honoured(tmp_path):
+    """Comment-stripping must drop WHOLE-LINE comments only.
+
+    The ADR-0569-EXCEPTION marker itself lives in a trailing comment, so a
+    trailing comment on a real code line must still be read.
+    """
+    write(
+        tmp_path,
+        "src/main.rs",
+        "const DEFAULT_TTL_SECONDS: u64 = 30; // ADR-0569-EXCEPTION(CC): fine\n",
     )
     result = run(tmp_path)
     assert result.returncode == 0, result.stderr
