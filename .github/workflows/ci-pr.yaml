@@ -662,9 +662,11 @@ jobs:
       # ruling 9) needs that namespace to overlay-mount a fixture onto `/etc` —
       # it reads `/etc/yadgar/config/shared/shared.yaml` unconditionally, with
       # no env override, and `unshare -rm sh -c '... exec "$BIN"'` is the only
-      # way this job gives it one. Without the clear, every such suite's
-      # `cargo test -- --ignored` step would fail the moment a repository adds
-      # it, for a runner reason invisible in the test's own source.
+      # way this job gives it one. Without the clear, the `cargo test
+      # --all-features` step below would fail the moment a repository adds that
+      # harness, for a runner reason invisible in the test's own source. (748's
+      # tests are not `#[ignore]`, so they run in that step, not in the
+      # separate ignored-suites step further down.)
       #
       # PROVEN on a throwaway `yadgarhq/actions` branch before this landed:
       # `unshare -rm` failed with the exact EPERM above, this exact `sysctl -w`
@@ -676,8 +678,22 @@ jobs:
       # there is no other job or later run to leak into — and no other job in
       # this file calls `unshare`. A job-wide step is also what the card asks
       # for: "before `cargo test`", not "for every job".
+      #
+      # THE KEY IS GUARDED, not assumed present. `sysctl -w` on a key the
+      # running kernel does not expose exits 1 (measured) rather than no-op —
+      # unlike most sysctls, there is no silent-success case here. A runner
+      # image that drops the restriction (upstream fix, a different
+      # distribution, a future Ubuntu) would otherwise turn this step red for
+      # a condition that is actually good news. Checking for the proc file is
+      # therefore load-bearing, not defensive dressing: it is what keeps this
+      # job green on exactly the runners where there is nothing left to clear.
       - name: clear the apparmor restriction on unprivileged user namespaces (C-D0/C-D3)
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          else
+            echo "::notice::kernel.apparmor_restrict_unprivileged_userns is absent on this runner; nothing to clear"
+          fi
 
       - name: cargo test --all-features, and an audit of what it executed
         run: |
