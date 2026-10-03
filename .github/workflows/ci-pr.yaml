@@ -655,6 +655,30 @@ jobs:
           # repository under review.
           rm -rf .ci-actions
 
+      # C-D0 measured EPERM on this exact runner image for an unprivileged
+      # `unshare -rm`: `unshare: write failed /proc/self/uid_map: Operation not
+      # permitted`, from Ubuntu 24.04's `kernel.apparmor_restrict_unprivileged_userns`
+      # sysctl. The 748 exit-chain harness (every service binary's drain test,
+      # ruling 9) needs that namespace to overlay-mount a fixture onto `/etc` —
+      # it reads `/etc/yadgar/config/shared/shared.yaml` unconditionally, with
+      # no env override, and `unshare -rm sh -c '... exec "$BIN"'` is the only
+      # way this job gives it one. Without the clear, every such suite's
+      # `cargo test -- --ignored` step would fail the moment a repository adds
+      # it, for a runner reason invisible in the test's own source.
+      #
+      # PROVEN on a throwaway `yadgarhq/actions` branch before this landed:
+      # `unshare -rm` failed with the exact EPERM above, this exact `sysctl -w`
+      # ran, and the identical `unshare -rm` probe then exited 0 and printed
+      # the runner's hostname through the mount. Branch deleted after.
+      #
+      # SCOPED TO THIS JOB, not the workflow. `sysctl -w` only ever reaches the
+      # VM this step runs on — GitHub-hosted runners are single-job VMs, so
+      # there is no other job or later run to leak into — and no other job in
+      # this file calls `unshare`. A job-wide step is also what the card asks
+      # for: "before `cargo test`", not "for every job".
+      - name: clear the apparmor restriction on unprivileged user namespaces (C-D0/C-D3)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: cargo test --all-features, and an audit of what it executed
         run: |
           set -euo pipefail
