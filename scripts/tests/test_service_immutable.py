@@ -1028,3 +1028,135 @@ def test_without_a_declaration_the_render_argv_is_unchanged(tmp_path):
         "--api-versions",
         "keda.sh/v1alpha1",
     ]
+
+
+# ---------------------------------------------------------------------------
+# C-A2: each side renders with the chart/ci/values.yaml override it has
+# ---------------------------------------------------------------------------
+
+# `fail` while the named value is unset -- the same shape `REQUIRES_KEDA` above
+# uses for a capability, and the same shape a `values.schema.json` required key
+# refuses with. Renders to NOTHING when the value is set, the same as
+# `REQUIRES_KEDA`, so the document stays a template helm drops rather than a
+# bare scalar it cannot read back as a manifest.
+REQUIRES_TLS_ENABLED = (
+    '{{- if not .Values.tls.enabled }}'
+    '{{ fail "tls.enabled is required" }}{{- end }}\n'
+)
+DECLARES_TLS_ENABLED = "tls:\n  enabled: true\n"
+
+
+def test_a_chart_whose_values_override_is_declared_is_compared(repo):
+    root, _ = repo
+    write(
+        root,
+        {
+            "chart/templates/validate.yaml": REQUIRES_TLS_ENABLED,
+            "chart/ci/values.yaml": DECLARES_TLS_ENABLED,
+        },
+    )
+    base = commit(root, "the render requires tls.enabled, and declares it")
+    write(root, {"chart/templates/service.yaml": service(headless=True, port=50052)})
+    commit(root, "move the port")
+
+    result = run(root, base)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Compared 2 immutable field(s) across 1 Service(s)" in result.stdout
+
+
+def test_the_same_chart_without_the_values_override_is_refused(repo):
+    """THE RED CASE for the test above: identical but for the file."""
+    root, _ = repo
+    write(root, {"chart/templates/validate.yaml": REQUIRES_TLS_ENABLED})
+    base = commit(root, "the render requires tls.enabled, and does not declare it")
+
+    result = run(root, base)
+    assert result.returncode == 1, result.stdout
+    assert "failed on the chart in this working tree" in result.stdout
+    assert "tls.enabled" in result.stdout
+
+
+def test_the_base_renders_with_the_values_override_it_had_then(repo):
+    """The base chart comes out of `git archive` with its own `ci/`, and it is
+    rendered with THAT override, not this working tree's. Here the branch
+    drops both the check and the override; reading the working tree's file for
+    the base would render the base with no flag and refuse it."""
+    root, _ = repo
+    write(
+        root,
+        {
+            "chart/templates/validate.yaml": REQUIRES_TLS_ENABLED,
+            "chart/ci/values.yaml": DECLARES_TLS_ENABLED,
+        },
+    )
+    base = commit(root, "the render requires tls.enabled, and declares it")
+    write(
+        root, {"chart/templates/validate.yaml": None, "chart/ci/values.yaml": None}
+    )
+    commit(root, "the render no longer requires tls.enabled")
+
+    result = run(root, base)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Compared 2 immutable field(s) across 1 Service(s)" in result.stdout
+
+
+def test_a_base_whose_own_values_override_was_missing_is_refused(repo):
+    """The other half of the test above. The base needed `tls.enabled` and
+    declared nothing; this branch adds the override. The base is still
+    rendered as it was, so it is refused -- which proves the base side does
+    not borrow the working tree's file."""
+    root, _ = repo
+    write(root, {"chart/templates/validate.yaml": REQUIRES_TLS_ENABLED})
+    base = commit(root, "the render requires tls.enabled, and does not declare it")
+    write(root, {"chart/ci/values.yaml": DECLARES_TLS_ENABLED})
+    commit(root, "declare it")
+
+    result = run(root, base)
+    assert result.returncode == 1, result.stdout
+    assert f"failed on the chart as of `{base}`" in result.stdout
+    assert "tls.enabled" in result.stdout
+
+
+def test_without_a_values_override_the_render_argv_is_unchanged(tmp_path):
+    """A repository that declares no override sees no difference (C-A2)."""
+    sys.path.insert(0, str(GATE.parent))
+    import service_immutable
+
+    chart = tmp_path / "chart"
+    chart.mkdir()
+    assert service_immutable.render_command(chart) == [
+        "helm",
+        "template",
+        "immutability-check",
+        str(chart),
+    ]
+    (chart / "ci").mkdir()
+    (chart / "ci" / "values.yaml").write_text("tls:\n  enabled: true\n")
+    assert service_immutable.render_command(chart) == [
+        "helm",
+        "template",
+        "immutability-check",
+        str(chart),
+        "-f",
+        str(chart / "ci" / "values.yaml"),
+    ]
+
+
+def test_both_the_declaration_and_the_values_override_reach_the_render(tmp_path):
+    sys.path.insert(0, str(GATE.parent))
+    import service_immutable
+
+    chart = tmp_path / "chart"
+    (chart / "ci").mkdir(parents=True)
+    (chart / "ci" / "api-versions.txt").write_text("keda.sh/v1alpha1\n")
+    (chart / "ci" / "values.yaml").write_text("tls:\n  enabled: true\n")
+    assert service_immutable.render_command(chart) == [
+        "helm",
+        "template",
+        "immutability-check",
+        str(chart),
+        "--api-versions",
+        "keda.sh/v1alpha1",
+        "-f",
+        str(chart / "ci" / "values.yaml"),
+    ]

@@ -13,12 +13,22 @@ same argv, `template` not run when `lint` fails, the rendered manifests
 discarded, and helm's own exit status passed through. The suite pins each of
 those against the old entry.
 
-`helm lint` GETS NO FLAGS, and needs none. It has no `--api-versions` on either
-helm major, and it grades a template's `fail` as INFO rather than an error.
-Measured 2026-09-27 on helm v3.18.4 and v4.3.0 with a chart that fails unless
-`keda.sh/v1alpha1` is declared: `helm lint --strict` exits 0, a bare
-`helm template` exits 1, and `helm template --api-versions keda.sh/v1alpha1`
-exits 0. So the render is the half that needs the declaration.
+`helm lint` GETS NO API-VERSION FLAGS, and needs none. It has no
+`--api-versions` on either helm major, and it grades a template's `fail` as
+INFO rather than an error. Measured 2026-09-27 on helm v3.18.4 and v4.3.0 with
+a chart that fails unless `keda.sh/v1alpha1` is declared: `helm lint --strict`
+exits 0, a bare `helm template` exits 1, and `helm template --api-versions
+keda.sh/v1alpha1` exits 0. So the render is the half that needs the
+declaration.
+
+`helm lint --strict` DOES VALIDATE EVERY SUBCHART'S `values.schema.json`
+AGAINST THE COALESCED VALUES (C-A2), so a chart whose key is required with no
+default refuses the bare lint exactly as it refuses the bare render.
+`chart/ci/values.yaml` -- `chart_values_override.py`, the same shape as this
+hook's own `api_versions.py` reader -- is passed to BOTH `helm lint --strict`
+and `helm template` when it exists, for exactly that reason. A chart with no
+such file sees no difference, the same backward-compatibility promise
+`api-versions.txt` makes.
 """
 
 import subprocess
@@ -30,6 +40,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from api_versions import DeclarationError, api_version_flags  # noqa: E402
+from chart_values_override import values_override_flags  # noqa: E402
 
 CHART = "chart"
 
@@ -53,10 +64,13 @@ def main() -> int:
     except DeclarationError as error:
         print(f"helm-lint: {error}", file=sys.stderr)
         return 1
-    status = helm("lint", "--strict", CHART)
+    values_flags = values_override_flags(Path(CHART))
+    status = helm("lint", "--strict", CHART, *values_flags)
     if status != 0:
         return status
-    return helm("template", "ci-render", CHART, *flags, discard_stdout=True)
+    return helm(
+        "template", "ci-render", CHART, *flags, *values_flags, discard_stdout=True
+    )
 
 
 if __name__ == "__main__":

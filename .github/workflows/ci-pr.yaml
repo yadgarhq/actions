@@ -1256,15 +1256,20 @@ jobs:
           # operator API versions, so the reader is staged beside it from the
           # SAME checkout. A run whose workflow predates this line copies the
           # gate alone and fails loudly on the import; a re-run clears it.
+          #
+          # C-A2: the gate also imports the shared reader of the chart's own
+          # `chart/ci/values.yaml` override, staged the same way.
           reader="$(dirname "$src")/api_versions.py"
-          for file in "$src" "$reader"; do
+          values_reader="$(dirname "$src")/chart_values_override.py"
+          for file in "$src" "$reader" "$values_reader"; do
             if [ ! -f "$file" ]; then
-              echo "::error::the D80 gate or the gate's reader is missing at $file"
+              echo "::error::the D80 gate or one of the gate's readers is missing at $file"
               exit 1
             fi
           done
           cp "$src" "$RUNNER_TEMP/d80_portability.py"
           cp "$reader" "$RUNNER_TEMP/api_versions.py"
+          cp "$values_reader" "$RUNNER_TEMP/chart_values_override.py"
           # THE SECOND CHECKOUT IS DELETED BEFORE THE GATE RUNS. The gate walks
           # `.` for source-tree tripwires and `actions/checkout` can only write
           # inside the workspace, so leaving it there would scan THIS
@@ -1376,15 +1381,20 @@ jobs:
           fi
           # ADR-0806: staged with the shared reader it imports, from the SAME
           # checkout. The reasoning is above the `portability` copy.
+          #
+          # C-A2: staged with the `chart/ci/values.yaml` reader it also
+          # imports now, the same way.
           reader="$(dirname "$src")/api_versions.py"
-          for file in "$src" "$reader"; do
+          values_reader="$(dirname "$src")/chart_values_override.py"
+          for file in "$src" "$reader" "$values_reader"; do
             if [ ! -f "$file" ]; then
-              echo "::error::the Service immutability gate or the gate's reader is missing at $file"
+              echo "::error::the Service immutability gate or one of the gate's readers is missing at $file"
               exit 1
             fi
           done
           cp "$src" "$RUNNER_TEMP/service_immutable.py"
           cp "$reader" "$RUNNER_TEMP/api_versions.py"
+          cp "$values_reader" "$RUNNER_TEMP/chart_values_override.py"
           # DELETED BEFORE THE GATE RUNS. The gate renders `chart/` and reads
           # this repository's own history for the base ref; a second repository
           # sitting inside the workspace belongs in neither.
