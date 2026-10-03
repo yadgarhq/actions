@@ -602,6 +602,62 @@ def test_a_malformed_declaration_is_refused_by_file_and_line(tmp_path):
     assert "chart/ci/api-versions.txt:1" in result.stdout
 
 
+# --------------------------- chart/ci/values.yaml reaches every render (C-A2)
+
+# `_fail_unless` with a key no chart default sets: a required value with no
+# default (ADR-0845's `*_TLS_ENABLED` shape), modelled with the stub's own
+# guard rather than a real `values.schema.json`, because none of the three
+# renders below is guarded by a toggle this chart can switch off -- the key is
+# required, full stop, so every one of `defaults`, `all-off` and
+# `release-shaped` must see it or the chart cannot render at all.
+REQUIRED_VALUE = "_fail_unless: region\n_render:\n" + DEPLOYMENT + container()
+
+
+def test_the_ci_values_override_reaches_every_render(tmp_path):
+    root = tree(
+        tmp_path,
+        {
+            "chart/values.yaml": REQUIRED_VALUE,
+            "chart/ci/values.yaml": "region: eu\n",
+        },
+    )
+    result = run(root)
+    assert result.returncode == 0, result.stdout
+
+
+def test_without_the_ci_values_override_every_render_is_refused(tmp_path):
+    """THE RED CASE for the test above: identical but for the file."""
+    root = tree(tmp_path, {"chart/values.yaml": REQUIRED_VALUE})
+    result = run(root)
+    assert result.returncode == 1, result.stdout
+    assert "failed on the default values" in result.stdout
+
+
+def test_a_values_override_reaches_the_defaults_render_as_a_flag(tmp_path):
+    """The defaults render has no temp file of its own, so its override must
+    arrive as `-f chart/ci/values.yaml` directly -- the all-off and
+    release-shaped renders already write a full temp file each and pick the
+    override up through the deep merge instead (proved by the pair above)."""
+    log = tmp_path / "helm.log"
+    root = tree(
+        tmp_path,
+        {
+            "chart/values.yaml": "_render:\n" + DEPLOYMENT + container(),
+            "chart/ci/values.yaml": "region: eu\n",
+        },
+    )
+    result = run(root, log=log)
+    assert result.returncode == 0, result.stdout
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert calls[0] == [
+        "template",
+        "d80-render",
+        "chart",
+        "-f",
+        "chart/ci/values.yaml",
+    ]
+
+
 # ----------------------------------------------- the release-shaped render (D65)
 
 

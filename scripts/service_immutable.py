@@ -133,6 +133,10 @@ import yaml
 # this file both here and on the runner: `ci-pr.yaml` stages the two together.
 from api_versions import DeclarationError, api_version_flags
 
+# C-A2. The shared reader of a chart's own `chart/ci/values.yaml` override, the
+# same convention as the import above.
+from chart_values_override import values_override_flags
+
 CHART = Path("chart")
 
 # helm precedes every rendered document with `# Source: <chart>/templates/x.yaml`.
@@ -467,7 +471,7 @@ def sources(output: str) -> dict[str, str]:
 
 
 def render_command(chart_directory: Path) -> list[str]:
-    """The `helm template` argv for `chart_directory` (ADR-0806).
+    """The `helm template` argv for `chart_directory` (ADR-0806, C-A2).
 
     EACH SIDE READS ITS OWN DECLARATION. The declaration lives inside the chart
     (`ci/api-versions.txt`), so the base chart `chart_at` unpacks carries the one
@@ -475,6 +479,11 @@ def render_command(chart_directory: Path) -> list[str]:
     branch that adds a render check and its declaration together, or drops both,
     is then compared against a base rendered the way the base itself asked to
     be. With no declaration the argv is the one this gate always ran.
+
+    THE SAME RULE APPLIES TO `ci/values.yaml` (C-A2): a chart whose key is
+    required with no default needs a value before either side can render at
+    all, and the base chart's own override -- the one it had at `revision` --
+    is what must supply it, not this working tree's.
 
     Raises `DeclarationError` for a declaration that cannot be read.
     """
@@ -484,6 +493,7 @@ def render_command(chart_directory: Path) -> list[str]:
         "immutability-check",
         str(chart_directory),
         *api_version_flags(chart_directory),
+        *values_override_flags(chart_directory),
     ]
 
 

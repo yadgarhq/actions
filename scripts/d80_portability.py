@@ -19,6 +19,10 @@ import yaml
 # this file both here and on the runner: `ci-pr.yaml` stages the two together.
 from api_versions import DeclarationError, api_version_flags
 
+# C-A2. The shared reader of a chart's own `chart/ci/values.yaml` override, the
+# same convention as the import above.
+from chart_values_override import merged_values, values_override
+
 # D80 is an INVARIANT: nothing shipped may depend on the environment it runs
 # inside. This job checks the part of it a machine can check, and SAYS OUT LOUD
 # which part it cannot. A gate that implies more coverage than it has is the
@@ -210,6 +214,8 @@ if have_chart:
         )
         have_chart = False
 
+values_override_path = values_override(pathlib.Path("chart")) if have_chart else None
+
 if have_chart:
     # ADR-0806: named on every run that has a declaration, pass or fail, so a
     # reader can see what the renders below were told the cluster has.
@@ -227,7 +233,11 @@ if have_chart:
     # BOTH RENDERS FIRST, then the report. The note about a product defaulting
     # on is only true of a resource that a value can in fact turn off, so it
     # cannot be written before the second render has been read.
-    default_docs, err_default = helm_render(None, "defaults", api_flags)
+    default_docs, err_default = helm_render(
+        str(values_override_path) if values_override_path else None,
+        "defaults",
+        api_flags,
+    )
     if err_default:
         problems.append(
             f"`helm template chart` failed on the default values: {err_default}"
@@ -244,7 +254,13 @@ if have_chart:
     # The property is: EVERY CRD-BEARING RESOURCE CAN BE TURNED OFF BY A VALUE.
     # That is what makes a chart installable on a bare cluster, which is what an
     # adopter actually needs.
-    off = yaml.safe_load(pathlib.Path("chart/values.yaml").read_text()) or {}
+    # C-A2: the override is merged in BEFORE the flip, so a key with no
+    # default (ADR-0845's `*_TLS_ENABLED` shape) is present for `flip_toggles`
+    # to find -- the chart's own `values.yaml` alone would not have it.
+    off = merged_values(
+        pathlib.Path("chart"),
+        yaml.safe_load(pathlib.Path("chart/values.yaml").read_text()) or {},
+    )
     flipped = []
     flip_toggles(off, "", flipped)
 
@@ -335,7 +351,11 @@ if have_chart:
     # in-git values would report a false positive on every repository here. The
     # shape that ships is the one worth checking, so the gate reproduces the
     # rewrite and inspects THAT.
-    rel = yaml.safe_load(pathlib.Path("chart/values.yaml").read_text()) or {}
+    # C-A2: the same merge as the all-off render above, before the rewrite.
+    rel = merged_values(
+        pathlib.Path("chart"),
+        yaml.safe_load(pathlib.Path("chart/values.yaml").read_text()) or {},
+    )
     if isinstance(rel.get("image"), dict):
         rel["image"]["digest"] = "sha256:" + "0" * 64
         rel["image"].pop("tag", None)
