@@ -529,6 +529,183 @@ def test_judging_zero_reads_is_a_failure(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# LEDGER 925 B-U5: every boot read lives in a library, declared in src/rotate.rs.
+#
+# `yadgar-lifecycle`'s `serve-tls` feature moves the listener's certificate, key
+# and client-CA reads into the crate, beside the crate's own
+# `impl Material for ServerTls`. A repository whose only boot reads were those
+# then judges zero reads, and the floor above refuses it. The declaration below
+# is the one way through that floor, and every arm of it is a refusal first.
+# --------------------------------------------------------------------------
+
+LIBRARY_MARKER = "// ADR-0523-LIBRARY-WATCHED: yadgar_lifecycle::serve_tls::ServerTls\n"
+
+# A watch set whose listener material is the crate's, the shape task,
+# task-db, project, project-db and iam-db take after B-U5.
+ROTATE_LIBRARY = (
+    "pub use yadgar_lifecycle::rotate::{Configuration, Inputs, Material};\n"
+    "use crate::serve::ServerTls;\n"
+    "\n"
+    + LIBRARY_MARKER
+    + "pub fn watch_set(listener: Option<&ServerTls>, config: &Configuration) -> Inputs {\n"
+    "    Inputs::of(SERVICE, &[&listener, config])\n"
+    "}\n"
+)
+
+CARGO_SERVE_TLS = """\
+[package]
+name = "task"
+
+[dependencies]
+yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle.git", tag = "v0.2.20", features = [
+  "serve-tls",
+] }
+"""
+
+NO_READS = "pub use yadgar_lifecycle::serve_tls::ServerTls;\npub fn nothing() -> u8 { 7 }\n"
+
+MARKED_READ = (
+    "fn read_key(p: &str) {\n"
+    f"    let _ = std::fs::read(p); // ADR-0523-UNWATCHED: {REASON}\n"
+    "}\n"
+)
+
+
+def library_tree(
+    tmp_path: Path,
+    body: str = NO_READS,
+    rotate: str = ROTATE_LIBRARY,
+    cargo: str | None = CARGO_SERVE_TLS,
+) -> Path:
+    tree_with(tmp_path, body, rotate=rotate)
+    if cargo is not None:
+        write(tmp_path, "Cargo.toml", cargo)
+    return tmp_path
+
+
+def test_zero_reads_with_a_library_declaration_passes(tmp_path):
+    """THE B-U5 SHAPE: no `fs::` read left in src/, the listener's in the crate."""
+    run_result = run(library_tree(tmp_path))
+    assert run_result.returncode == 0, run_result.stderr
+    assert "0 filesystem read(s) judged" in run_result.stdout
+    assert "yadgar_lifecycle::serve_tls::ServerTls" in run_result.stdout
+
+
+def test_zero_reads_without_a_declaration_names_the_way_through(tmp_path):
+    """The floor still refuses, and now says what an honest zero looks like."""
+    rotate = ROTATE_LIBRARY.replace(LIBRARY_MARKER, "")
+    run_result = run(library_tree(tmp_path, rotate=rotate))
+    assert run_result.returncode == 1
+    assert "JUDGED 0 READS" in run_result.stderr
+    assert "ADR-0523-LIBRARY-WATCHED" in run_result.stderr
+
+
+def test_a_declaration_does_not_excuse_an_unmarked_read(tmp_path):
+    """REGRESSION GUARD: the declaration speaks for the library, never for src/."""
+    run_result = run(library_tree(tmp_path, body="fn load(p: &Path) {\n    std::fs::read(p);\n}\n"))
+    assert run_result.returncode == 1
+    assert "src/serve.rs:2" in run_result.stderr
+    assert "no ADR-0523 marker" in run_result.stderr
+
+
+def test_a_declaration_beside_a_declared_unwatched_read_passes(tmp_path):
+    """The iam shape: library listener, plus crypto keys declared unwatched."""
+    run_result = run(library_tree(tmp_path, body=MARKED_READ))
+    assert run_result.returncode == 0, run_result.stderr
+
+
+def test_a_declaration_without_the_crate_is_refused(tmp_path):
+    """A MARKED read keeps the zero floor out of it, so only the check can fire."""
+    cargo = '[package]\nname = "task"\n\n[dependencies]\ntokio = "1"\n'
+    run_result = run(library_tree(tmp_path, body=MARKED_READ, cargo=cargo))
+    assert run_result.returncode == 1
+    assert "src/rotate.rs:4" in run_result.stderr
+    assert "does not depend on `yadgar-lifecycle`" in run_result.stderr
+
+
+def test_a_declaration_without_the_feature_is_refused(tmp_path):
+    cargo = CARGO_SERVE_TLS.replace('"serve-tls",\n', "")
+    run_result = run(library_tree(tmp_path, body=MARKED_READ, cargo=cargo))
+    assert run_result.returncode == 1
+    assert "feature `serve-tls`" in run_result.stderr
+
+
+def test_a_dev_dependency_does_not_satisfy_a_declaration(tmp_path):
+    """Boot is the production binary; a test-only dependency carries nothing."""
+    cargo = CARGO_SERVE_TLS.replace("[dependencies]", "[dev-dependencies]")
+    run_result = run(library_tree(tmp_path, body=MARKED_READ, cargo=cargo))
+    assert run_result.returncode == 1
+    assert "does not depend on `yadgar-lifecycle`" in run_result.stderr
+
+
+def test_an_optional_dependency_does_not_satisfy_a_declaration(tmp_path):
+    cargo = CARGO_SERVE_TLS.replace('tag = "v0.2.20",', 'tag = "v0.2.20", optional = true,')
+    run_result = run(library_tree(tmp_path, body=MARKED_READ, cargo=cargo))
+    assert run_result.returncode == 1
+    assert "optional" in run_result.stderr
+
+
+def test_a_renamed_package_does_not_satisfy_a_declaration(tmp_path):
+    cargo = CARGO_SERVE_TLS.replace('tag = "v0.2.20",', 'tag = "v0.2.20", package = "evil",')
+    run_result = run(library_tree(tmp_path, body=MARKED_READ, cargo=cargo))
+    assert run_result.returncode == 1
+    assert "package" in run_result.stderr
+
+
+def test_a_missing_manifest_refuses_a_declaration(tmp_path):
+    run_result = run(library_tree(tmp_path, body=MARKED_READ, cargo=None))
+    assert run_result.returncode == 1
+    assert "there is no Cargo.toml beside src/" in run_result.stderr
+    assert "Traceback" not in run_result.stderr
+
+
+def test_an_unknown_library_material_is_refused(tmp_path):
+    """The table is measured, not inferred: a path nobody verified is refused."""
+    rotate = ROTATE_LIBRARY.replace("serve_tls::ServerTls\n", "serve_tls::Invented\n", 1)
+    run_result = run(library_tree(tmp_path, body=MARKED_READ, rotate=rotate))
+    assert run_result.returncode == 1
+    assert "`yadgar_lifecycle::serve_tls::Invented`" in run_result.stderr
+    assert "not a library material this gate knows" in run_result.stderr
+
+
+def test_a_declared_material_absent_from_the_watch_set_is_refused(tmp_path):
+    """SIDE B AGAIN: a library material the watch set never folds in is a lie."""
+    rotate = ROTATE_LIBRARY.replace("listener: Option<&ServerTls>, ", "")
+    run_result = run(library_tree(tmp_path, body=MARKED_READ, rotate=rotate))
+    assert run_result.returncode == 1
+    assert "`ServerTls`" in run_result.stderr
+    assert "watch_set" in run_result.stderr
+
+
+def test_a_local_material_impl_contradicts_a_library_declaration(tmp_path):
+    """Rust forbids implementing lifecycle's trait for lifecycle's type outside
+    lifecycle, so a local `impl Material for ServerTls` means a LOCAL type --
+    whose reads the crate's impl does not carry. Path-qualified spelling too."""
+    for spelling in ("impl Material for ServerTls", "impl crate::rotate::Material for ServerTls"):
+        rotate = ROTATE_LIBRARY + f"{spelling} {{\n    fn files(&self) {{}}\n}}\n"
+        run_result = run(library_tree(tmp_path, body=MARKED_READ, rotate=rotate))
+        assert run_result.returncode == 1, spelling
+        assert "implements `Material` for `ServerTls` locally" in run_result.stderr
+
+
+def test_a_declaration_inside_cfg_test_does_not_count(tmp_path):
+    rotate = ROTATE_LIBRARY.replace(LIBRARY_MARKER, "") + (
+        "#[cfg(test)]\nmod tests {\n    " + LIBRARY_MARKER + "}\n"
+    )
+    run_result = run(library_tree(tmp_path, rotate=rotate))
+    assert run_result.returncode == 1
+    assert "JUDGED 0 READS" in run_result.stderr
+
+
+def test_a_declaration_outside_the_watch_set_files_does_not_count(tmp_path):
+    """It is a Side B statement, so it lives where Side B is read."""
+    rotate = ROTATE_LIBRARY.replace(LIBRARY_MARKER, "")
+    run_result = run(library_tree(tmp_path, body=LIBRARY_MARKER + NO_READS, rotate=rotate))
+    assert run_result.returncode == 1
+    assert "JUDGED 0 READS" in run_result.stderr
+
+
+# --------------------------------------------------------------------------
 # Test code is not the subject, and the estate's own `File` is not std's.
 # --------------------------------------------------------------------------
 

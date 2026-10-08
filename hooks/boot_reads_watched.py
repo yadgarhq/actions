@@ -78,7 +78,13 @@ they are independent.
   * No read site judged. Every repository in this estate reads at least its
     database password or its listener key at boot; a run that judged zero found
     none of them, which means the classifier below no longer recognises the
-    shape the code is written in.
+    shape the code is written in -- UNLESS those reads moved into a library
+    (LEDGER 925 B-U5: `yadgar-lifecycle`'s `serve-tls` reads the listener's
+    files inside the crate). Then, and only then, the watch-set file says so
+    with `ADR-0523-LIBRARY-WATCHED: <path>`, a marker refused unless the path is
+    a measured library material, the watch set names it, `Cargo.toml` compiles
+    the crate's feature in, and no local type shadows it. See
+    `LIBRARY_WATCHED`. It never excuses a read in `src/`.
   * AN UNCLASSIFIED FILESYSTEM TOKEN REFUSES THE RUN. Every `fs::NAME`,
     `File::NAME` and `OpenOptions` in scanned source must be a known read, a
     known write, or a known type mention. A repository that starts reading
@@ -256,6 +262,64 @@ MIN_REASON = 24
 
 IMPL_MATERIAL = re.compile(r"\bimpl(?:\s*<[^>]*>)?\s+Material\s+for\s+([A-Za-z_][A-Za-z0-9_]*)")
 WATCH_SET_FN = re.compile(r"\bfn\s+watch_set\b")
+
+# LEDGER 925 B-U5. A boot read can live in a LIBRARY: `yadgar-lifecycle`'s
+# `serve-tls` feature reads the listener's certificate, key and client CA inside
+# `ServerTls`, and the crate's own `impl Material for ServerTls` puts exactly
+# those files in the watch set. A repository whose only boot reads were the
+# listener's then has no `fs::` read left in `src/`, and the zero-read floor in
+# `main()` refuses it. This marker is the one way through that floor:
+#
+#   // ADR-0523-LIBRARY-WATCHED: yadgar_lifecycle::serve_tls::ServerTls
+#
+# It is a SIDE B statement, so it is read only out of `rotate_files()`, outside
+# `#[cfg(test)]` spans. It is refused unless ALL of these hold, whatever the
+# read count:
+#
+#   * the path is a key of LIBRARY_MATERIALS -- measured, not inferred;
+#   * its last segment is a name the `watch_set` signature or an
+#     `impl Material` in the watch-set files declares (`watch_set_names()`);
+#   * `Cargo.toml` `[dependencies]` -- never dev, build or target tables --
+#     holds the crate under its own name, not `optional`, not a `package =`
+#     rename, with the feature listed;
+#   * no non-test source file implements `Material` for the same name. Rust's
+#     orphan rule forbids implementing lifecycle's trait for lifecycle's type
+#     outside lifecycle, so a local impl means a LOCAL type of that name, whose
+#     reads the crate's impl does not carry.
+#
+# It never excuses a read in `src/`: every `fs::` read is still judged against
+# its own marker, and the declaration only answers the zero-read floor.
+#
+# THE RESIDUAL HOLE: this gate trusts that the library's `files()` names every
+# file the library reads. That is the library's own property, owned by its own
+# suite (`yadgar-lifecycle`'s `tests/serve_tls_watch.rs`), not by this scan.
+LIBRARY_WATCHED = re.compile(
+    r"ADR-0523-LIBRARY-WATCHED:\s*([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+)"
+)
+
+# Library path -> (crate as named in Cargo.toml, feature that compiles the
+# reads AND the impl). Add an entry only after reading the crate's source.
+#
+# `yadgar_lifecycle::serve_tls::ServerTls`: `src/serve_tls.rs`
+# `impl crate::rotate::Material for ServerTls` returns the certificate, the key
+# and -- exactly when a verifying mode reads it -- the client CA; verified at
+# tags v0.2.19 and v0.2.20. The impl landed in the same commit as the
+# `serve-tls` feature (lifecycle#27), so any tag that compiles the feature has
+# the impl, and cargo refuses the feature on any tag before it.
+LIBRARY_MATERIALS = {
+    "yadgar_lifecycle::serve_tls::ServerTls": ("yadgar-lifecycle", "serve-tls"),
+}
+
+MANIFEST = Path("Cargo.toml")
+
+# Any spelling of `impl Material for T`: generics, a path-qualified trait
+# (`impl crate::rotate::Material for ServerTls`, which is how lifecycle itself
+# writes it), a path-qualified or borrowed self type.
+LOCAL_IMPL_MATERIAL = re.compile(
+    r"\bimpl(?:\s*<[^>]*>)?\s+(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*Material\s+for\s+"
+    r"(?:&\s*(?:'[A-Za-z_][A-Za-z0-9_]*\s+)?(?:mut\s+)?)?"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*([A-Za-z_][A-Za-z0-9_]*)"
+)
 
 # LEDGER 1240, THIRD PASS. "A `test` atom anywhere not under `not(`" is the
 # WRONG predicate -- a REVIEW FINDING. `cfg(any(not(x), test))` is PRODUCTION
@@ -665,6 +729,109 @@ def watch_set_names() -> set[str]:
     return names
 
 
+def library_declarations() -> list[tuple[Path, int, str]]:
+    """Every `ADR-0523-LIBRARY-WATCHED` marker in `rotate_files()`, outside
+    `#[cfg(test)]` spans, as (file, line, path). Read from RAW text, like
+    `markers()`, since a marker is a comment the blanking pass erases."""
+    found = []
+    for path in rotate_files():
+        raw = path.read_text(encoding="utf-8")
+        spans = test_spans(blank_noncode(raw))
+        for lineno, line in enumerate(raw.splitlines(), start=1):
+            if in_span(lineno, spans):
+                continue
+            if m := LIBRARY_WATCHED.search(line):
+                found.append((path, lineno, m.group(1)))
+    return found
+
+
+def manifest_problem(crate: str, feature: str) -> str | None:
+    """Why `Cargo.toml` does not compile `feature` of `crate` into the binary,
+    or None. `tomllib` is imported here, not at module level: a repository
+    that never declares a library material never needs it."""
+    import tomllib
+
+    if not MANIFEST.is_file():
+        return f"there is no {MANIFEST} beside src/ to show that the crate is compiled in"
+    try:
+        manifest = tomllib.loads(MANIFEST.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as error:
+        return f"{MANIFEST} does not parse ({error})"
+    dependency = manifest.get("dependencies", {}).get(crate)
+    if dependency is None:
+        return (
+            f"{MANIFEST} [dependencies] does not depend on `{crate}`. Only the "
+            "production dependency table counts: dev, build and target tables do "
+            "not reach boot."
+        )
+    if not isinstance(dependency, dict):
+        dependency = {}
+    if dependency.get("package", crate) != crate:
+        return (
+            f"{MANIFEST} names `{crate}` as a rename of package "
+            f"`{dependency['package']}`, so the declared path is not that crate."
+        )
+    if dependency.get("optional") is True:
+        return (
+            f"{MANIFEST} marks `{crate}` optional, so a build can leave it out and "
+            "the reads it declares would then happen nowhere this gate can see."
+        )
+    if feature not in dependency.get("features", []):
+        return f"{MANIFEST} does not enable feature `{feature}` of `{crate}`."
+    return None
+
+
+def local_material_impls(files: list[Path]) -> dict[str, tuple[Path, int]]:
+    """Every name some non-test source file implements `Material` for, with
+    where. `#[cfg(test)]` spans blanked, the same way Side A and Side B are."""
+    found: dict[str, tuple[Path, int]] = {}
+    for path in files:
+        code = blank_noncode(path.read_text(encoding="utf-8"))
+        spans = test_spans(code)
+        for lineno, line in enumerate(code.splitlines(), start=1):
+            if in_span(lineno, spans):
+                continue
+            for m in LOCAL_IMPL_MATERIAL.finditer(line):
+                found.setdefault(m.group(1), (path, lineno))
+    return found
+
+
+def library_problems(
+    declarations: list[tuple[Path, int, str]], names: set[str], files: list[Path]
+) -> list[str]:
+    """Every reason a library declaration does not hold. See LIBRARY_WATCHED."""
+    problems = []
+    local = local_material_impls(files) if declarations else {}
+    for path, lineno, declared in declarations:
+        where = f"{path}:{lineno}: ADR-0523-LIBRARY-WATCHED `{declared}`"
+        if declared not in LIBRARY_MATERIALS:
+            problems.append(
+                f"{where} is not a library material this gate knows. Known: "
+                f"{', '.join(sorted(LIBRARY_MATERIALS))}. Add one to LIBRARY_MATERIALS in "
+                "hooks/boot_reads_watched.py only after reading that crate's own "
+                "`impl Material`."
+            )
+            continue
+        material = declared.rsplit("::", 1)[1]
+        if material not in names:
+            problems.append(
+                f"{where}: `{material}` is not in the watch_set signature or an "
+                f"`impl Material` in {ROTATE_DESC}, so the watch set never folds the "
+                "library's files in."
+            )
+        if material in local:
+            impl_path, impl_line = local[material]
+            problems.append(
+                f"{where}: {impl_path}:{impl_line} implements `Material` for "
+                f"`{material}` locally. Only a local type can carry a local impl, so "
+                "the watch set holds that type, not the library's."
+            )
+        crate, feature = LIBRARY_MATERIALS[declared]
+        if why := manifest_problem(crate, feature):
+            problems.append(f"{where}: {why}")
+    return problems
+
+
 def report(problems: list[str]) -> int:
     for problem in problems:
         print(f"  {problem}", file=sys.stderr)
@@ -777,10 +944,17 @@ def main() -> int:
                     f"next; write at least {MIN_REASON} characters saying why."
                 )
 
+    # VALIDATED WHATEVER THE READ COUNT. A declaration that only mattered at
+    # zero reads would sit unchecked in every repository that still has one.
+    declarations = library_declarations()
+    problems.extend(library_problems(declarations, names, files))
+
     print(
         f"ADR-0523 gate: {len(files)} non-test file(s) under {' '.join(roots)}, "
         f"{judged} filesystem read(s) judged against {len(names)} name(s) in {ROTATE_DESC}."
     )
+    for path, lineno, declared in declarations:
+        print(f"ADR-0523 gate: {path}:{lineno} declares library material `{declared}`.")
 
     # THE PROBLEMS COME BEFORE THE FLOOR, and the order is not cosmetic. An
     # unclassified access is the reason a run judges nothing, so reporting the
@@ -791,16 +965,29 @@ def main() -> int:
         print("ADR-0523 VIOLATION", file=sys.stderr)
         return report(problems)
 
-    if judged == 0:
+    # THE FLOOR, AND ITS ONE WAY THROUGH. Zero reads in src/ is honest only when
+    # boot reads in a library the watch set declares -- and every declaration
+    # reaching this line has already been validated above.
+    if judged == 0 and not declarations:
         print(
             f"ADR-0523 gate: JUDGED 0 READS across {len(files)} file(s) under "
             f"{' '.join(roots)}.\n"
             "  Every service in this estate reads at least a credential or a\n"
             "  listener key at boot, so a run that found none means the classifier\n"
-            "  no longer recognises the shape this code is written in.",
+            "  no longer recognises the shape this code is written in -- or that\n"
+            "  every boot read now lives in a library. In that case say so at the\n"
+            f"  watch set, in {ROTATE_DESC}:\n"
+            "    // ADR-0523-LIBRARY-WATCHED: <crate::module::Material>\n"
+            f"  Known: {', '.join(sorted(LIBRARY_MATERIALS))}.",
             file=sys.stderr,
         )
         return 1
+    if judged == 0:
+        print(
+            "ADR-0523 gate: no read in src/; every boot read is in a declared "
+            "library material."
+        )
+        return 0
     print("ADR-0523 gate: every read is watched or declared unwatched.")
     return 0
 
