@@ -331,7 +331,9 @@
 # evidence. `observe-coverage` and `complexity` print nothing at all on a pass;
 # `boot-reads-watched` prints a sentence with no number, and its non-vacuity is
 # already enforced by an exit code rather than by a line (it REFUSES on 0 reads
-# judged). Those three stay quiet until they have a number to show.
+# judged, unless a validated `ADR-0523-LIBRARY-WATCHED` declaration says boot
+# reads only inside a library). Those three stay quiet until they have a number
+# to show.
 #
 # IT CHANGES DISPLAY AND NEVER A VERDICT. `verbose` is a pre-commit display
 # setting; no consumer's exit status moves because of it.
@@ -476,6 +478,18 @@
 # would be nothing for a marker to name. It sees only the CONSUMER's tree, so a
 # read inside `yadgar-dial`, `yadgar-store` or `yadgar-lifecycle` is judged when
 # that repository adopts the hook, not by the service that calls into it.
+#
+# A CONSUMER WHOSE EVERY BOOT READ IS IN A LIBRARY (LEDGER 925 B-U5: the
+# listener's files read inside `yadgar-lifecycle`'s `serve-tls` `ServerTls`)
+# judges zero reads, which the gate refuses as blindness. The one way through
+# is a line at the watch set, in `src/rotate.rs`:
+#
+#   // ADR-0523-LIBRARY-WATCHED: yadgar_lifecycle::serve_tls::ServerTls
+#
+# refused unless the path is in the hook's measured LIBRARY_MATERIALS table,
+# `watch_set` names the material, `Cargo.toml` `[dependencies]` enables the
+# crate's feature (not optional, not renamed), and no local `impl Material`
+# shadows the name. It never excuses an unmarked read in `src/`.
 - id: boot-reads-watched
   name: ADR-0523 — a boot read is watched, or declared unwatched
   language: script
