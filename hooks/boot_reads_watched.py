@@ -285,27 +285,48 @@ WATCH_SET_FN = re.compile(r"\bfn\s+watch_set\b")
 #   * no non-test source file implements `Material` for the same name. Rust's
 #     orphan rule forbids implementing lifecycle's trait for lifecycle's type
 #     outside lifecycle, so a local impl means a LOCAL type of that name, whose
-#     reads the crate's impl does not carry.
+#     reads the crate's impl does not carry;
+#   * POSITIVE EVIDENCE that the name IS the library's: some non-test source
+#     file imports it from the declared module (`use yadgar_lifecycle::
+#     serve_tls::ServerTls` or `use yadgar_lifecycle::serve_tls::{.., ServerTls,
+#     ..}`), and no non-test source file aliases anything `as ServerTls`, which
+#     would let `use crate::tls::MyTls as ServerTls` borrow the name.
 #
 # It never excuses a read in `src/`: every `fs::` read is still judged against
 # its own marker, and the declaration only answers the zero-read floor.
 #
-# THE RESIDUAL HOLE: this gate trusts that the library's `files()` names every
-# file the library reads. That is the library's own property, owned by its own
-# suite (`yadgar-lifecycle`'s `tests/serve_tls_watch.rs`), not by this scan.
+# TWO RESIDUAL HOLES, stated plainly.
+#
+#   * This gate trusts that the library's `files()` names every file the
+#     library reads. That is the library's own property, owned by its own suite
+#     (`yadgar-lifecycle`'s `tests/serve_tls_watch.rs`), not by this scan. Reads
+#     inside OTHER libraries -- `yadgar-store`'s `DB_PASSWORD_FILE`, sqlx's
+#     `DB_SSL_CA_FILE` in the `-db` repositories -- are outside this scan with or
+#     without a declaration.
+#   * In a DECLARING repository the zero-read floor no longer catches a blind
+#     classifier. Shapes this scan does not see -- `use std::fs as sfs;
+#     sfs::read_to_string(..)`, `use std::fs::File as F; F::open(..)`,
+#     `fs_err::read_to_string(..)`, a read through any helper crate -- pass with
+#     the marker and are refused without it. They already pass silently on main
+#     in any repository with at least one visible read, so the declaration
+#     widens no hole that a repository with reads does not already have.
 LIBRARY_WATCHED = re.compile(
     r"ADR-0523-LIBRARY-WATCHED:\s*([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+)"
 )
 
 # Library path -> (crate as named in Cargo.toml, feature that compiles the
-# reads AND the impl). Add an entry only after reading the crate's source.
+# READS). Add an entry only after reading the crate's source.
 #
 # `yadgar_lifecycle::serve_tls::ServerTls`: `src/serve_tls.rs`
 # `impl crate::rotate::Material for ServerTls` returns the certificate, the key
 # and -- exactly when a verifying mode reads it -- the client CA; verified at
-# tags v0.2.19 and v0.2.20. The impl landed in the same commit as the
-# `serve-tls` feature (lifecycle#27), so any tag that compiles the feature has
-# the impl, and cargo refuses the feature on any tag before it.
+# tags v0.2.19 and v0.2.20 (src/serve_tls.rs:471 at v0.2.20). `serve-tls`
+# compiles only the reads: the impl is `#[cfg(feature = "rotate")]`, and
+# `rotate` is a DEFAULT feature of the crate. This gate does not check it
+# because it need not: a consumer whose `watch_set` folds `ServerTls` in as a
+# `Material` cannot compile without that impl. The impl landed in the same
+# commit as the `serve-tls` feature (lifecycle#27), and cargo refuses the
+# feature on any tag before it.
 LIBRARY_MATERIALS = {
     "yadgar_lifecycle::serve_tls::ServerTls": ("yadgar-lifecycle", "serve-tls"),
 }
@@ -781,19 +802,62 @@ def manifest_problem(crate: str, feature: str) -> str | None:
     return None
 
 
+def production_code(path: Path) -> str:
+    """`path` with strings and comments blanked and every `#[cfg(test)]` span's
+    lines emptied -- line count kept, so an offset still maps to its line.
+    One text, not a line at a time: an item header may wrap, and a per-line
+    match misses `impl\\n    Material for T` (a REVIEW FINDING)."""
+    code = blank_noncode(path.read_text(encoding="utf-8"))
+    spans = test_spans(code)
+    return "\n".join(
+        "" if in_span(lineno, spans) else line
+        for lineno, line in enumerate(code.splitlines(), start=1)
+    )
+
+
+def line_of(text: str, offset: int) -> int:
+    return text.count("\n", 0, offset) + 1
+
+
 def local_material_impls(files: list[Path]) -> dict[str, tuple[Path, int]]:
     """Every name some non-test source file implements `Material` for, with
     where. `#[cfg(test)]` spans blanked, the same way Side A and Side B are."""
     found: dict[str, tuple[Path, int]] = {}
     for path in files:
-        code = blank_noncode(path.read_text(encoding="utf-8"))
-        spans = test_spans(code)
-        for lineno, line in enumerate(code.splitlines(), start=1):
-            if in_span(lineno, spans):
-                continue
-            for m in LOCAL_IMPL_MATERIAL.finditer(line):
-                found.setdefault(m.group(1), (path, lineno))
+        text = production_code(path)
+        for m in LOCAL_IMPL_MATERIAL.finditer(text):
+            found.setdefault(m.group(1), (path, line_of(text, m.start())))
     return found
+
+
+def import_problem(declared: str, files: list[Path]) -> str | None:
+    """Why the source does not show that `declared`'s last segment IS the
+    library's type, or None. Positive evidence: a production `use` of it out of
+    the declared module, plain or inside a brace group. Refused outright: any
+    production `as <Name>` alias, which could hand the name to a local type."""
+    module, name = declared.rsplit("::", 1)
+    module_re = r"\s*::\s*".join(re.escape(part) for part in module.split("::"))
+    use_re = re.compile(
+        r"\buse\s+(?:::\s*)?" + module_re + r"\s*::\s*"
+        r"(?:" + re.escape(name) + r"\b|\{[^}]*\b" + re.escape(name) + r"\b[^}]*\})"
+    )
+    alias_re = re.compile(r"\bas\s+" + re.escape(name) + r"\b")
+    imported = False
+    for path in files:
+        text = production_code(path)
+        if m := alias_re.search(text):
+            return (
+                f"{path}:{line_of(text, m.start())} aliases something `as {name}`, so "
+                f"`{name}` in this tree need not be the library's type."
+            )
+        imported = imported or bool(use_re.search(text))
+    if not imported:
+        return (
+            f"no production source file imports `{name}` from `{module}` (`use "
+            f"{module}::{name}` or `use {module}::{{.., {name}, ..}}`), so nothing "
+            f"shows that the `{name}` the watch set names is the library's."
+        )
+    return None
 
 
 def library_problems(
@@ -826,6 +890,8 @@ def library_problems(
                 f"`{material}` locally. Only a local type can carry a local impl, so "
                 "the watch set holds that type, not the library's."
             )
+        if why := import_problem(declared, files):
+            problems.append(f"{where}: {why}")
         crate, feature = LIBRARY_MATERIALS[declared]
         if why := manifest_problem(crate, feature):
             problems.append(f"{where}: {why}")
@@ -983,9 +1049,11 @@ def main() -> int:
         )
         return 1
     if judged == 0:
+        listed = ", ".join(sorted({declared for _, _, declared in declarations}))
         print(
-            "ADR-0523 gate: no read in src/; every boot read is in a declared "
-            "library material."
+            "ADR-0523 gate: no read in src/; the zero-read floor is answered by "
+            f"declared library material(s) {listed}. Reads inside other libraries "
+            "are outside this scan."
         )
         return 0
     print("ADR-0523 gate: every read is watched or declared unwatched.")

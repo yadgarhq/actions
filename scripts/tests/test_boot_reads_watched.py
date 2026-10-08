@@ -565,6 +565,7 @@ yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle.git", tag = "v
 NO_READS = "pub use yadgar_lifecycle::serve_tls::ServerTls;\npub fn nothing() -> u8 { 7 }\n"
 
 MARKED_READ = (
+    "pub use yadgar_lifecycle::serve_tls::ServerTls;\n"
     "fn read_key(p: &str) {\n"
     f"    let _ = std::fs::read(p); // ADR-0523-UNWATCHED: {REASON}\n"
     "}\n"
@@ -589,6 +590,8 @@ def test_zero_reads_with_a_library_declaration_passes(tmp_path):
     assert run_result.returncode == 0, run_result.stderr
     assert "0 filesystem read(s) judged" in run_result.stdout
     assert "yadgar_lifecycle::serve_tls::ServerTls" in run_result.stdout
+    assert "the zero-read floor is answered by declared library material(s)" in run_result.stdout
+    assert "Reads inside other libraries are outside this scan." in run_result.stdout
 
 
 def test_zero_reads_without_a_declaration_names_the_way_through(tmp_path):
@@ -703,6 +706,65 @@ def test_a_declaration_outside_the_watch_set_files_does_not_count(tmp_path):
     run_result = run(library_tree(tmp_path, body=LIBRARY_MARKER + NO_READS, rotate=rotate))
     assert run_result.returncode == 1
     assert "JUDGED 0 READS" in run_result.stderr
+
+
+def test_a_wrapped_local_material_impl_still_contradicts_a_declaration(tmp_path):
+    """REVIEW FINDING: a line-at-a-time scan let both wrapped headers through."""
+    for spelling in ("impl\n    Material for ServerTls", "impl Material\n    for ServerTls"):
+        rotate = ROTATE_LIBRARY + f"{spelling} {{}}\n"
+        run_result = run(library_tree(tmp_path, rotate=rotate))
+        assert run_result.returncode == 1, spelling
+        assert "src/rotate.rs:8 implements `Material` for `ServerTls` locally" in run_result.stderr
+
+
+def test_a_material_impl_inside_cfg_test_does_not_contradict_a_declaration(tmp_path):
+    """Test-only fixtures never reach the binary, so they shadow nothing."""
+    rotate = ROTATE_LIBRARY + (
+        "#[cfg(test)]\nmod tests {\n    impl Material for ServerTls {}\n}\n"
+    )
+    run_result = run(library_tree(tmp_path, rotate=rotate))
+    assert run_result.returncode == 0, run_result.stderr
+
+
+def test_a_foreign_path_ending_in_the_material_name_is_refused(tmp_path):
+    """The table key is matched EXACTLY, never by its last segment."""
+    rotate = ROTATE_LIBRARY.replace("yadgar_lifecycle::serve_tls::ServerTls", "evil::x::ServerTls")
+    run_result = run(library_tree(tmp_path, body=MARKED_READ, rotate=rotate))
+    assert run_result.returncode == 1
+    assert "`evil::x::ServerTls` is not a library material this gate knows" in run_result.stderr
+
+
+def test_a_declaration_without_a_library_import_is_refused(tmp_path):
+    """POSITIVE EVIDENCE: something must import the name out of the library."""
+    body = "pub fn nothing() -> u8 { 7 }\n"
+    run_result = run(library_tree(tmp_path, body=body))
+    assert run_result.returncode == 1
+    assert "no production source file imports `ServerTls`" in run_result.stderr
+
+
+def test_a_library_import_only_in_a_comment_or_test_is_not_evidence(tmp_path):
+    for body in (
+        "// use yadgar_lifecycle::serve_tls::ServerTls;\npub fn nothing() {}\n",
+        "#[cfg(test)]\nmod tests {\n    use yadgar_lifecycle::serve_tls::ServerTls;\n}\n",
+    ):
+        run_result = run(library_tree(tmp_path, body=body))
+        assert run_result.returncode == 1, body
+        assert "no production source file imports `ServerTls`" in run_result.stderr
+
+
+def test_a_braced_library_import_is_evidence(tmp_path):
+    """The project-db shape: `pub use yadgar_lifecycle::serve_tls::{ClientAuth, ServerTls};`."""
+    body = "pub use yadgar_lifecycle::serve_tls::{\n    ClientAuth,\n    ServerTls,\n};\n"
+    run_result = run(library_tree(tmp_path, body=body))
+    assert run_result.returncode == 0, run_result.stderr
+
+
+def test_an_alias_borrowing_the_material_name_is_refused(tmp_path):
+    """`use crate::tls::MyTls as ServerTls` hands the name to a local type."""
+    body = NO_READS + "use crate::tls::MyTls as ServerTls;\n"
+    run_result = run(library_tree(tmp_path, body=body))
+    assert run_result.returncode == 1
+    assert "src/serve.rs:3 aliases something `as ServerTls`" in run_result.stderr
 
 
 # --------------------------------------------------------------------------
