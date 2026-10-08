@@ -406,13 +406,110 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.ref }}
+      # `misconfig` DROPPED FROM THIS SCANNER (ledger 1150, D-A1). The action
+      # has no `--helm-values` / `--helm-api-versions` input and never resolves
+      # a chart's dependencies first, so its misconfig scanner's only behaviour
+      # against a real chart here was the `[helm scanner] Skipping chart` WARN
+      # and zero findings — silent, not clean. `vuln` and `secret` are
+      # untouched by any of that; only the chart-shaped half of what this job
+      # used to attempt moves to the steps below, which render and scan a
+      # chart properly instead of not at all.
+      #
+      # `version: v0.74.0` IS LOAD-BEARING, not decoration, and not merely
+      # "the version `trivy_gate.py` was measured against". With no `version:`
+      # input this action installs its OWN default — measured on a real run
+      # of this job, 0.70.0 — into its own bin directory and PREPENDS that
+      # directory onto `$GITHUB_PATH` for every later step in this job. A
+      # SEPARATE install of 0.74.0 run AFTER this step would be shadowed by
+      # this one rather than used, so `trivy` on `PATH` for every step below
+      # is whatever this `version:` names, with no second install anywhere
+      # in this job. `trivy_gate.py`'s own `require_trivy_version` refuses
+      # outright if the two ever disagree again.
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
-          scanners: vuln,misconfig,secret
+          scanners: vuln,secret
           severity: CRITICAL,HIGH
           exit-code: "1"
           ignore-unfixed: true
+          version: v0.74.0
+
+      # ADR-0725, same step and reasoning as `precommit`'s and `portability`'s
+      # copies: `trivy_gate.py` below renders the chart through trivy's own
+      # helm support, which refuses an unresolved `dependencies:` key exactly
+      # as `helm lint --strict` does. Gated on `detect`'s `chart` fact, not an
+      # inline `[ -d chart ]`: most consumers have no `chart/` at all, and a
+      # bare `helm dependency update chart` there fails outright rather than
+      # no-opping.
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.18.4
+      - name: resolve chart dependencies
+        if: needs.detect.outputs.chart == 'true'
+        run: helm dependency update chart
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x"
+      # `trivy_gate.py` parses `.trivyignore.yaml` and each `Chart.lock` with
+      # PyYAML, the same pin `portability` and `passed` already use.
+      - name: install PyYAML
+        run: pip install --disable-pip-version-check "pyyaml==6.0.3"
+
+      # THE GATE IS A CHECKED-IN SCRIPT, staged from a second checkout exactly
+      # as `portability`'s `d80_portability.py` copy is — see that job for why
+      # this is `main` and why it is a repository-name test rather than a
+      # file-presence test.
+      - if: github.repository != 'yadgarhq/actions'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: yadgarhq/actions
+          ref: main
+          path: .ci-actions
+
+      - name: stage the gate
+        env:
+          UNDER_REVIEW: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$UNDER_REVIEW" = "yadgarhq/actions" ]; then
+            src=scripts/trivy_gate.py
+          else
+            src=.ci-actions/scripts/trivy_gate.py
+          fi
+          # ADR-0806 and C-A2: the gate imports the same two shared readers
+          # `d80_portability.py` does, staged beside it from the SAME checkout
+          # so an import never silently resolves against a stale copy.
+          reader="$(dirname "$src")/api_versions.py"
+          values_reader="$(dirname "$src")/chart_values_override.py"
+          for file in "$src" "$reader" "$values_reader"; do
+            if [ ! -f "$file" ]; then
+              echo "::error::the trivy gate or one of its readers is missing at $file"
+              exit 1
+            fi
+          done
+          cp "$src" "$RUNNER_TEMP/trivy_gate.py"
+          cp "$reader" "$RUNNER_TEMP/api_versions.py"
+          cp "$values_reader" "$RUNNER_TEMP/chart_values_override.py"
+          # THE SECOND CHECKOUT IS DELETED BEFORE THE GATE RUNS, same reasoning
+          # as the D80 copy: trivy scans `.` for the repository under review,
+          # and a leftover `.ci-actions/` would be scanned as if it belonged
+          # to it.
+          rm -rf .ci-actions
+          echo "trivy gate staged from \`$src\`." >> "$GITHUB_STEP_SUMMARY"
+
+      # UNGATED ON `detect`'s `chart` FACT, unlike the two steps above: a
+      # repository with no `chart/` at all still gets a bare `trivy config .`
+      # over whatever misconfigurable files it does have (a Containerfile, a
+      # raw Kubernetes manifest), which is what `scan-type: fs`'s `misconfig`
+      # scanner covered before this split. `trivy_gate.py`'s own readers
+      # already answer "no chart" with "no extra flags" (`chart_values_override`
+      # and `api_versions` both check `Path.is_file()` before anything else),
+      # so nothing here needs to ask `needs.detect.outputs.chart` a second
+      # time.
+      - name: trivy renders what it scans (ledger 1150)
+        run: python3 "$RUNNER_TEMP/trivy_gate.py"
 
   # The template is checked, not suggested. A template nobody fills in is a
   # template that does not exist, and nothing else would notice.

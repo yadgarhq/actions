@@ -76,11 +76,11 @@ a `run:` block is a shell injection — the exact class `zizmor` audits for.
 
 ## Security scanning
 
-| Where               | What                                                                                                                             |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| every PR            | `gitleaks` (full history), `zizmor` (workflow audit), `trivy fs` (deps, misconfig, secrets), `cargo-deny` (advisories, licences) |
-| every release       | `trivy image` on the published digest, plus an SBOM                                                                              |
-| base images, weekly | the same, scanned hardest — a CVE there is a CVE in sixty-one images                                                             |
+| Where               | What                                                                                                                                                                                 |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| every PR            | `gitleaks` (full history), `zizmor` (workflow audit), `trivy fs` (deps, secrets), `trivy config` on the rendered chart (misconfig, ledger 1150), `cargo-deny` (advisories, licences) |
+| every release       | `trivy image` on the published digest, plus an SBOM                                                                                                                                  |
+| base images, weekly | the same, scanned hardest — a CVE there is a CVE in sixty-one images                                                                                                                 |
 
 **The image scan targets the digest that was just pushed**, not the source tree.
 The filesystem scan on a PR catches dependency problems early; only the artifact
@@ -95,6 +95,17 @@ rather than fixed. The weekly base rebuild is what picks fixes up when they land
 repository with `packages: write` and an OIDC identity — the injection and
 over-permission mistakes it finds are the ones that only surface when somebody
 exploits them.
+
+**The chart's misconfig scan runs the installed `trivy` binary directly,
+unfiltered, never `trivy-action`'s misconfig scanner.** `trivy-action` has no
+`--helm-values` / `--helm-api-versions` input and never resolves a chart's
+dependencies first, so against a real chart it only ever produced a `[helm
+scanner] Skipping chart` WARN and zero findings — silent, not clean (ledger
+1150). `scripts/trivy_gate.py` renders the chart at the same CI values every
+other shared gate uses, scans it with nothing suppressed, and applies
+`.trivyignore.yaml` itself: an upstream finding (a vendored chart's own
+templates) may be covered by a reviewed, expiring entry; a finding in this
+repository's own templates may never be.
 
 ## One definition of "clean": the hooks
 
