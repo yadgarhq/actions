@@ -710,6 +710,104 @@ def test_a_host_port_is_refused(tmp_path):
     assert "hostPort" in result.stdout
 
 
+CRD_WITH_HOSTPORT_IN_SCHEMA = (
+    "  - apiVersion: apiextensions.k8s.io/v1\n"
+    "    kind: CustomResourceDefinition\n"
+    "    metadata:\n"
+    "      name: scaledjobs.keda.sh\n"
+    "    spec:\n"
+    "      group: keda.sh\n"
+    "      versions:\n"
+    "        - name: v1alpha1\n"
+    "          schema:\n"
+    "            openAPIV3Schema:\n"
+    "              type: object\n"
+    "              properties:\n"
+    "                spec:\n"
+    "                  type: object\n"
+    "                  properties:\n"
+    "                    template:\n"
+    "                      type: object\n"
+    "                      properties:\n"
+    "                        spec:\n"
+    "                          type: object\n"
+    "                          properties:\n"
+    "                            hostPort:\n"
+    "                              type: integer\n"
+)
+
+
+def test_a_crds_schema_property_named_host_port_is_not_a_real_one(tmp_path):
+    """THE BUG THIS GUARDS AGAINST (yadgarhq/platform#38): a CRD's
+    `openAPIV3Schema` NAMES a property called `hostPort` for whatever custom
+    resource it describes — a ScaledJob embeds a full PodSpec schema, so
+    `keda-scaledjobs.yaml` has one. That name is a schema DEFINITION, never a
+    real object's value, and D80 is about what ships, not what a schema
+    merely allows an adopter to set."""
+    root = tree(
+        tmp_path,
+        {"chart/values.yaml": "_render:\n" + CRD_WITH_HOSTPORT_IN_SCHEMA},
+    )
+    result = run(root)
+    assert result.returncode == 0, result.stdout
+
+
+CRD_WITH_HOSTPORT_OUTSIDE_SCHEMA = (
+    "  - apiVersion: apiextensions.k8s.io/v1\n"
+    "    kind: CustomResourceDefinition\n"
+    "    metadata:\n"
+    "      name: scaledjobs.keda.sh\n"
+    "      annotations:\n"
+    '        hostPort: "80"\n'
+    "    spec:\n"
+    "      group: keda.sh\n"
+    "      versions:\n"
+    "        - name: v1alpha1\n"
+    "          schema:\n"
+    "            openAPIV3Schema:\n"
+    "              type: object\n"
+)
+
+
+def test_a_host_port_outside_a_crds_schema_still_fails(tmp_path):
+    """THE GUARD IS NARROW: it skips exactly `spec.versions[*].schema.
+    openAPIV3Schema`, never the whole CustomResourceDefinition document. A
+    `hostPort` anywhere else in the same document — here, an annotation —
+    is still a real violation and must still be refused."""
+    root = tree(
+        tmp_path,
+        {"chart/values.yaml": "_render:\n" + CRD_WITH_HOSTPORT_OUTSIDE_SCHEMA},
+    )
+    result = run(root)
+    assert result.returncode == 1, result.stdout
+    assert "hostPort" in result.stdout
+
+
+NON_CRD_WITH_OPENAPIV3SCHEMA_KEY = (
+    "  - apiVersion: v1\n"
+    "    kind: ConfigMap\n"
+    "    metadata:\n"
+    "      name: schema-holder\n"
+    "    data:\n"
+    "      openAPIV3Schema:\n"
+    "        hostPort: 80\n"
+)
+
+
+def test_a_non_crd_with_a_key_named_openapiv3schema_still_fails(tmp_path):
+    """THE GUARD IS KEYED ON `kind` (and the `apiextensions.k8s.io` group),
+    never on the key's name alone. A document that is not a
+    CustomResourceDefinition but happens to carry a key called
+    `openAPIV3Schema` must still be walked all the way through."""
+    root = tree(
+        tmp_path,
+        {"chart/values.yaml": "_render:\n" + NON_CRD_WITH_OPENAPIV3SCHEMA_KEY},
+    )
+    result = run(root)
+    assert result.returncode == 1, result.stdout
+    assert "hostPort" in result.stdout
+
+
 def test_a_moving_tag_in_the_published_shape_is_refused(tmp_path):
     """Hard-coded rather than taken from `.image`, so D65's rewrite cannot reach
     it — which is exactly the shape that ships broken."""
