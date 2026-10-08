@@ -320,19 +320,31 @@ def test_mutation_the_stale_match_check_is_load_bearing(tmp_path):
 # --------------------------------------------------------- trivy invocation
 
 
+def fake_trivy(version="0.74.0", config_stdout='{"Results": []}', config_stderr="", seen=None):
+    """A `subprocess.run` stand-in that answers BOTH calls `run_trivy` makes:
+    `trivy version --format json` (dispatched by `args[1] == "version"`) and
+    the real `trivy config ...` scan. `seen`, if given, records the `config`
+    call's argv for the caller to inspect afterward.
+    """
+
+    def fake_run(args, capture_output, text):
+        if seen is not None:
+            seen["args"] = args
+        if args[1] == "version":
+            return subprocess.CompletedProcess(args, 0, stdout=f'{{"Version": "{version}"}}', stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout=config_stdout, stderr=config_stderr)
+
+    return fake_run
+
+
 def test_run_trivy_refuses_on_the_skipping_chart_warn(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "chart").mkdir()
-
-    def fake_run(args, capture_output, text):
-        return subprocess.CompletedProcess(
-            args,
-            0,
-            stdout='{"Results": []}',
-            stderr='WARN\t[helm scanner] Skipping chart file_path="chart" err="..."\n',
-        )
-
-    monkeypatch.setattr(trivy_gate.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        trivy_gate.subprocess,
+        "run",
+        fake_trivy(config_stderr='WARN\t[helm scanner] Skipping chart file_path="chart" err="..."\n'),
+    )
     with pytest.raises(trivy_gate.Refused, match="Skipping chart"):
         trivy_gate.run_trivy(tmp_path / "chart")
 
@@ -347,33 +359,93 @@ def test_run_trivy_refuses_on_zero_helm_results_with_helm_values(tmp_path, monke
     chart_dir = tmp_path / "chart"
     (chart_dir / "ci").mkdir(parents=True)
     (chart_dir / "ci" / "values.yaml").write_text("{}\n")
-
-    def fake_run(args, capture_output, text):
-        assert "--quiet" not in args
-        assert "--ignorefile" not in args
-        return subprocess.CompletedProcess(args, 0, stdout='{"Results": []}', stderr="")
-
-    monkeypatch.setattr(trivy_gate.subprocess, "run", fake_run)
+    monkeypatch.setattr(trivy_gate.subprocess, "run", fake_trivy())
     with pytest.raises(trivy_gate.Refused, match="zero"):
         trivy_gate.run_trivy(chart_dir)
 
 
-def test_run_trivy_never_passes_quiet_or_ignorefile(tmp_path, monkeypatch):
+def test_run_trivy_never_passes_quiet_and_always_blanks_trivys_own_files(tmp_path, monkeypatch):
     """FORBIDDEN BY CONSTRUCTION. `--quiet` hides the one WARN this gate
-    depends on; `--ignorefile` would have trivy itself apply the list this
-    gate exists to apply instead, with none of the stale-entry or
-    upstream-boundary checks above."""
+    depends on. `--config`/`--ignorefile` are ALWAYS `/dev/null`: trivy
+    auto-loads a `trivy.yaml` and a plain `.trivyignore` from the working
+    directory with no flag asking for either (measured: a `trivy.yaml` with
+    `scan: skip-dirs:` silently dropped a whole directory from a real scan;
+    a plain `.trivyignore` silently dropped a finding by ID, no path
+    required at all) -- this gate's own review record is
+    `.trivyignore.yaml`, applied by `evaluate()`, never trivy's own two
+    auto-loaded files."""
     monkeypatch.chdir(tmp_path)
     chart_dir = tmp_path / "chart"
     chart_dir.mkdir()
     seen = {}
-
-    def fake_run(args, capture_output, text):
-        seen["args"] = args
-        return subprocess.CompletedProcess(args, 0, stdout='{"Results": []}', stderr="")
-
-    monkeypatch.setattr(trivy_gate.subprocess, "run", fake_run)
+    monkeypatch.setattr(trivy_gate.subprocess, "run", fake_trivy(seen=seen))
     trivy_gate.run_trivy(chart_dir)
-    assert "--quiet" not in seen["args"]
-    assert "--ignorefile" not in seen["args"]
-    assert "--exit-code" in seen["args"] and "0" in seen["args"]
+    args = seen["args"]
+    assert "--quiet" not in args
+    assert "--exit-code" in args and "0" in args
+    assert args[args.index("--config") + 1] == "/dev/null"
+    assert args[args.index("--ignorefile") + 1] == "/dev/null"
+    assert "--skip-check-update" in args
+    assert "--skip-version-check" in args
+
+
+def test_run_trivy_refuses_the_wrong_version(tmp_path, monkeypatch):
+    """THE REASON FOR THIS CHECK, measured rather than theoretical:
+    `aquasecurity/trivy-action` with no `version:` input installs its own
+    default (0.70.0) and prepends its bin directory onto `$GITHUB_PATH` for
+    every later step -- so an install of the pinned version run AFTER that
+    action silently loses. 0.70.0 also has no `Skipping chart` WARN at all
+    (it writes a differently-worded `ERROR` instead), so running against the
+    wrong version would not just be an untested variable, it would make the
+    render-check above blind."""
+    monkeypatch.chdir(tmp_path)
+    chart_dir = tmp_path / "chart"
+    chart_dir.mkdir()
+    monkeypatch.setattr(trivy_gate.subprocess, "run", fake_trivy(version="0.70.0"))
+    with pytest.raises(trivy_gate.Refused, match="0.70.0"):
+        trivy_gate.run_trivy(chart_dir)
+
+
+def test_require_trivy_version_accepts_only_the_exact_pin():
+    trivy_gate.require_trivy_version("0.74.0")
+    with pytest.raises(trivy_gate.Refused, match="0.75.0"):
+        trivy_gate.require_trivy_version("0.75.0")
+
+
+# ------------------------------------------------- the legacy .trivyignore
+
+
+def test_load_legacy_ids_skips_comments_and_blank_lines(tmp_path):
+    path = tmp_path / ".trivyignore"
+    path.write_text("# a reviewed exception\n\nDS-0002\n  KSV-9999  \n# another\n")
+    assert trivy_gate.load_legacy_ids(path) == {"DS-0002", "KSV-9999"}
+
+
+def test_load_legacy_ids_strips_a_trailing_inline_comment(tmp_path):
+    path = tmp_path / ".trivyignore"
+    path.write_text("DS-0002 # Containerfile build stage, no USER needed\n")
+    assert trivy_gate.load_legacy_ids(path) == {"DS-0002"}
+
+
+def test_load_legacy_ids_is_empty_when_absent(tmp_path):
+    assert trivy_gate.load_legacy_ids(tmp_path / "nope") == set()
+
+
+def test_apply_legacy_ignore_drops_a_non_chart_finding_by_id():
+    findings = [trivy_gate.Finding(target="containers/rust-build/Containerfile", id="DS-0002")]
+    assert trivy_gate.apply_legacy_ignore(findings, {"DS-0002"}) == []
+
+
+def test_apply_legacy_ignore_never_drops_a_chart_finding():
+    """THE RED CASE THE REVIEW NAMED: a legacy ID on a `chart/` finding still
+    fails. The plain format carries no path, so letting it reach a chart
+    finding would make a Containerfile-shaped review silently cover a
+    same-numbered check anywhere a chart renders, estate-authored templates
+    included -- the exact hole `--ignorefile /dev/null` exists to close."""
+    chart_finding = trivy_gate.Finding(target="chart/charts/platform/charts/nats/templates/x.yaml", id="DS-0002")
+    assert trivy_gate.apply_legacy_ignore([chart_finding], {"DS-0002"}) == [chart_finding]
+
+
+def test_apply_legacy_ignore_leaves_an_uncovered_finding_alone():
+    findings = [trivy_gate.Finding(target="Containerfile", id="DS-0099")]
+    assert trivy_gate.apply_legacy_ignore(findings, {"DS-0002"}) == findings

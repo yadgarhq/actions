@@ -414,6 +414,17 @@ jobs:
       # untouched by any of that; only the chart-shaped half of what this job
       # used to attempt moves to the steps below, which render and scan a
       # chart properly instead of not at all.
+      #
+      # `version: v0.74.0` IS LOAD-BEARING, not decoration, and not merely
+      # "the version `trivy_gate.py` was measured against". With no `version:`
+      # input this action installs its OWN default — measured on a real run
+      # of this job, 0.70.0 — into its own bin directory and PREPENDS that
+      # directory onto `$GITHUB_PATH` for every later step in this job. A
+      # SEPARATE install of 0.74.0 run AFTER this step would be shadowed by
+      # this one rather than used, so `trivy` on `PATH` for every step below
+      # is whatever this `version:` names, with no second install anywhere
+      # in this job. `trivy_gate.py`'s own `require_trivy_version` refuses
+      # outright if the two ever disagree again.
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
@@ -421,6 +432,7 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: "1"
           ignore-unfixed: true
+          version: v0.74.0
 
       # ADR-0725, same step and reasoning as `precommit`'s and `portability`'s
       # copies: `trivy_gate.py` below renders the chart through trivy's own
@@ -435,19 +447,6 @@ jobs:
       - name: resolve chart dependencies
         if: needs.detect.outputs.chart == 'true'
         run: helm dependency update chart
-
-      # THE ACTION-WRAPPED trivy CANNOT TAKE THE FLAGS THIS GATE NEEDS, so the
-      # binary is installed the same way gitleaks, hadolint and actionlint are
-      # above: a pinned release tarball, not a second action. 0.74.0 is the
-      # version `trivy_gate.py`'s own module docstring measures its claims
-      # against — a bump here is a bump there too, in the same pull request.
-      - name: install trivy
-        env:
-          TRIVY_VERSION: 0.74.0
-        run: |
-          set -euo pipefail
-          curl -sSfL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin trivy
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:

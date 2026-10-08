@@ -20,18 +20,46 @@ gate reads: `chart_values_override.values_override` for `chart/ci/values.yaml`
 and `api_versions.declared_api_versions` for `chart/ci/api-versions.txt`. One
 reader each, not a second copy of either parse (ADR-0806, C-A2).
 
-WHY THE SCAN ITSELF STAYS UNFILTERED. trivy 0.74.0's own `--ignorefile` is NOT
-auto-detected for `.trivyignore.yaml`, and more importantly it would hide the
-distinction this gate exists to draw: an upstream finding this repository has
-reviewed and an estate-authored finding it has not. So the trivy invocation
-below never passes `--ignorefile` at all -- it reports EVERY HIGH/CRITICAL
-misconfiguration, and `evaluate()` is what decides, finding by finding and
-entry by entry, which ones a `.trivyignore.yaml` legitimately covers.
+WHY THE SCAN ITSELF STAYS UNFILTERED, AND WHY `--config` AND `--ignorefile`
+BOTH POINT AT `/dev/null`. `.trivyignore.yaml` is not auto-detected, but trivy
+auto-loads TWO OTHER FILES from the working directory whether asked to or
+not: a plain `.trivyignore` (bare IDs, one per line) and `trivy.yaml` (a
+`scan: skip-dirs:` entry there silently removes a whole directory from the
+scan). Measured: either file, dropped into a chart-bearing repository with no
+flag naming it at all, turned a real finding on a privileged pod green.
+Neither is what this gate's own review record is -- an ID with no path, no
+reason and no expiry -- so both are switched off entirely (`--config
+/dev/null --ignorefile /dev/null`) and the scan reports EVERY HIGH/CRITICAL
+misconfiguration with nothing trivy itself could have pre-filtered.
+`evaluate()` is what decides, finding by finding and entry by entry, which
+ones a `.trivyignore.yaml` legitimately covers.
+
+THIS REPOSITORY'S OWN `.trivyignore` STAYS HONOURED, DELIBERATELY, for
+exactly the findings it already covers and no others. `DS-0002` on
+`containers/rust-build/Containerfile` is a real, reviewed, pre-existing
+suppression (see that file) that predates this gate and has nothing to do
+with a rendered chart. `apply_legacy_ignore` re-implements just enough of
+trivy's own plain-`.trivyignore` reading to keep that working -- an ID listed
+there drops a finding ONLY when the finding's `Target` does not start with
+`chart/`. A chart finding can never be suppressed this way: the plain format
+carries no path, so an entry meant for one Containerfile line would silently
+cover a same-numbered check anywhere in the repository, chart included, if it
+were honoured there too.
 
 `--quiet` IS FORBIDDEN, not merely unused. It suppresses the `WARN [helm
-scanner] Skipping chart` line this gate's own "did it actually render"
-check depends on (measured, trivy 0.74.0: the WARN is on stderr at the default
-log level and is the only trace a chart failed to render at all).
+scanner] Skipping chart` line this gate's own "did it actually render" check
+depends on (measured, trivy 0.74.0: the WARN is on stderr at the default log
+level and is the only trace a chart failed to render at all).
+
+`--skip-check-update` AND `--skip-version-check` are set for the same reason
+every other install in this repository is pinned by exact version rather
+than "latest": the alternative is `trivy-checks`, a bundle this binary would
+otherwise fetch over the network on every run, floating independently of the
+`trivy` binary's own pin. A network hiccup or an upstream check rename is
+then a false CI failure that has nothing to do with the change under review.
+The checks embedded in the pinned 0.74.0 binary are what this gate's own
+tests and its real-repository proof were measured against (`run_trivy`
+refuses outright if the binary on `PATH` is not that exact version).
 
 THE UPSTREAM BOUNDARY IS DERIVED, NEVER A PER-REPOSITORY CONSTANT. A finding at
 `chart/charts/<X>/...` is this repository's own if `<X>` is a dependency THIS
@@ -112,8 +140,15 @@ from chart_values_override import values_override  # noqa: E402
 
 SEVERITY = "HIGH,CRITICAL"
 TRIVYIGNORE = Path(".trivyignore.yaml")
+LEGACY_TRIVYIGNORE = Path(".trivyignore")
 CHART = Path("chart")
 SKIPPING_CHART = "[helm scanner] Skipping chart"
+# The one version this gate's own tests, and its real-repository proof, were
+# measured against. `trivy-action` installs its OWN default version (0.70.0,
+# measured) and puts it on `PATH` ahead of anything installed before it ran
+# -- pinning `version:` on that step is the actual fix; this is the belt that
+# catches the day someone removes the pin instead of the suspenders.
+TRIVY_VERSION = "0.74.0"
 
 
 class Refused(Exception):
@@ -325,12 +360,24 @@ def _entry_within_upstream(entry: Entry, root: Path = CHART) -> bool:
     """Whether every one of `entry.paths` names only upstream territory.
 
     A literal path (no wildcard) is checked exactly like a finding would be:
-    `is_upstream` on the string itself. A glob is checked on its literal
-    prefix -- the text before its first `*` -- which is enough to place the
-    two shapes this gate has ever seen: `chart/charts/platform/charts/**`
-    resolves through `platform` (estate) into its own `Chart.lock`, landing
-    past the boundary; `chart/charts/**` resolves nothing (the wildcard is the
-    very first segment) and is refused rather than guessed at.
+    `is_upstream` on the string itself, minus its last segment (the probe is
+    a directory, not a file). A glob is checked the same way on its literal
+    prefix -- the text before its first `*`, rounded down to the last
+    complete segment.
+
+    BOTH SHAPES THIS GATE HAS EVER SEEN ARE REFUSED, not accepted, and that
+    is FAIL-SAFE rather than a gap: `chart/charts/**`'s prefix rounds down to
+    `chart/charts`, which names no dependency at all and refuses; even
+    `chart/charts/platform/charts/**` -- the textually correct, narrower
+    boundary for the parent repository -- rounds its prefix down to
+    `chart/charts/platform/charts`, a bare `charts` segment with no name
+    after it for `is_upstream` to look up, so IT refuses too. This function
+    only accepts a glob whose literal prefix survives all the way down to a
+    real file (a `paths` entry this estate's own reviewed files always
+    write, per `chart#33`) -- a glob that stops at a directory boundary is
+    refused rather than guessed at, which is the conservative direction: an
+    entry too narrow to exercise is loud and harmless, never a silent extra
+    ignore.
     """
     for pattern in entry.paths:
         literal_prefix = pattern.split("*", 1)[0]
@@ -429,6 +476,10 @@ def helm_result_count(report: dict) -> int:
     return sum(1 for r in report.get("Results") or [] if r.get("Type") == "helm")
 
 
+def finding_count(report: dict) -> int:
+    return sum(len(r.get("Misconfigurations") or []) for r in report.get("Results") or [])
+
+
 def scan_args(chart_dir: Path = CHART) -> list[str]:
     """`--helm-values`/`--helm-api-versions` for `chart_dir`, read off the same
     two declarations every other shared gate reads (ADR-0806, C-A2) -- never a
@@ -443,13 +494,78 @@ def scan_args(chart_dir: Path = CHART) -> list[str]:
     return args
 
 
-def run_trivy(chart_dir: Path = CHART) -> dict:
-    """The one unfiltered scan this gate evaluates. Fails loud, before any
-    ignore-list logic runs, on either shape of "this did not actually
-    render": the WARN trivy itself writes, or -- belt and suspenders, in case
-    a future trivy changes that WARN's wording -- a `--helm-values` scan that
-    somehow produced not one `helm`-typed result.
+def installed_trivy_version() -> str:
+    proc = subprocess.run(["trivy", "version", "--format", "json"], capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise Refused(f"`trivy version` exited {proc.returncode}: {proc.stderr.strip()}")
+    try:
+        version = json.loads(proc.stdout)["Version"]
+    except (json.JSONDecodeError, KeyError) as exc:
+        raise Refused(f"`trivy version --format json` did not report a Version: {exc}") from exc
+    if not isinstance(version, str):
+        raise Refused(f"`trivy version --format json` reported a non-string Version: {version!r}")
+    return version
+
+
+def require_trivy_version(actual: str, expected: str = TRIVY_VERSION) -> None:
+    """Refuse before scanning anything if `actual` is not the exact pinned
+    version. NEEDED BECAUSE THE PIN CAN SILENTLY LOSE: measured,
+    `aquasecurity/trivy-action` with no `version:` input installs its OWN
+    default (0.70.0) into its own bin directory and PREPENDS that onto
+    `$GITHUB_PATH` for every later step in the job -- so a separate install of
+    the right version, run AFTER that step, is shadowed rather than used. The
+    version matters beyond cosmetics: 0.70.0 has no `Skipping chart` WARN at
+    all (it writes `ERROR Failed to render Chart files` instead), so this
+    gate's own render-check would silently stop checking what it claims to.
     """
+    if actual != expected:
+        raise Refused(
+            f"trivy on PATH reports version {actual!r}, not the pinned "
+            f"{expected!r}. If this is CI: `aquasecurity/trivy-action` "
+            f"installs its own default version and puts it on PATH ahead of "
+            f"anything installed before it ran -- pin `version:` on that "
+            f"step itself, do not install a second copy after it."
+        )
+
+
+def load_legacy_ids(path: Path = LEGACY_TRIVYIGNORE) -> set[str]:
+    """Every bare ID in a plain, pre-existing `.trivyignore` -- the format
+    trivy itself auto-loads from the working directory, which this gate now
+    refuses with `--ignorefile /dev/null` (see the module docstring for why).
+    `#` starts a comment anywhere on a line; a blank line is skipped. `set()`
+    if `path` is absent.
+    """
+    if not path.is_file():
+        return set()
+    ids: set[str] = set()
+    for line in path.read_text().splitlines():
+        entry = line.split("#", 1)[0].strip()
+        if entry:
+            ids.add(entry)
+    return ids
+
+
+def apply_legacy_ignore(findings: list[Finding], legacy_ids: set[str]) -> list[Finding]:
+    """Drop a finding whose `id` is in `legacy_ids` -- ONLY when its `Target`
+    does not start with `chart/`. The plain format carries no path at all,
+    so letting it reach a chart finding would make a review written for one
+    Containerfile line silently cover a same-numbered check anywhere a chart
+    renders, estate-authored templates included -- the exact hole closing
+    `--ignorefile` opened in the first place.
+    """
+    return [f for f in findings if not (f.id in legacy_ids and not f.target.startswith("chart/"))]
+
+
+def run_trivy(chart_dir: Path = CHART) -> dict:
+    """The one unfiltered scan this gate evaluates. Refuses before scanning
+    anything if the installed trivy is not the pinned version. Fails loud,
+    before any ignore-list logic runs, on either shape of "this did not
+    actually render": the WARN trivy itself writes, or -- belt and
+    suspenders, in case a future trivy changes that WARN's wording -- a
+    `--helm-values` scan that somehow produced not one `helm`-typed result.
+    """
+    version = installed_trivy_version()
+    require_trivy_version(version)
     args = [
         "trivy",
         "config",
@@ -459,6 +575,23 @@ def run_trivy(chart_dir: Path = CHART) -> dict:
         "0",
         "--severity",
         SEVERITY,
+        # NEITHER trivy's OWN config NOR its OWN ignore file is let anywhere
+        # near this scan -- both are auto-loaded from the working directory
+        # with NO flag asking for them, and either one can silently drop a
+        # real finding (measured: a `trivy.yaml` with `scan: skip-dirs:` and
+        # a plain `.trivyignore` each did, independently). `/dev/null` is a
+        # valid empty value for both flags, present or absent in this
+        # directory makes no difference.
+        "--config",
+        "/dev/null",
+        "--ignorefile",
+        "/dev/null",
+        # The rego check bundle `trivy-checks` floats independently of the
+        # `trivy` binary's own pin and is fetched over the network by
+        # default; skip both the fetch and its own update notice so this
+        # scan is reproducible from the binary alone.
+        "--skip-check-update",
+        "--skip-version-check",
         *scan_args(chart_dir),
         ".",
     ]
@@ -484,6 +617,10 @@ def run_trivy(chart_dir: Path = CHART) -> dict:
             "chart did not render -- check `helm dependency update chart` ran, "
             "and that chart/ci/values.yaml still names a real key."
         )
+    print(
+        f"trivy {version}: {helm_result_count(report)} helm-typed result(s), "
+        f"{finding_count(report)} HIGH/CRITICAL misconfiguration(s)."
+    )
     return report
 
 
@@ -510,7 +647,7 @@ def main() -> int:
     try:
         report = run_trivy()
         entries = load_entries(TRIVYIGNORE)
-        findings = findings_from_report(report)
+        findings = apply_legacy_ignore(findings_from_report(report), load_legacy_ids())
         verdict = evaluate(findings, entries, datetime.date.today())
     except (Refused, DeclarationError) as exc:
         print(f"::error::{exc}", file=sys.stderr)
