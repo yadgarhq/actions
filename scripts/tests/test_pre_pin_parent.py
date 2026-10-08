@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -355,6 +356,54 @@ def test_the_job_installs_the_same_helm_pin_as_every_other_chart_job():
 def test_passed_gates_the_new_job():
     needs = workflow_jobs()["passed"]["needs"]
     assert "pre_pin_parent" in needs
+
+
+def test_every_staged_cp_target_is_importable_with_nothing_else_on_the_path(tmp_path):
+    """THE REAL BUG THIS CAUGHT (measured on `yadgarhq/actions` pull request
+    110, run 37739798664): `parent_pin.py` imports `next_version`, which
+    imports `pr_body`; the staging step copied `pre_pin_parent.py`,
+    `api_versions.py`, `chart_values_override.py` and `parent_pin.py` alone,
+    so the staged copy failed on `ModuleNotFoundError: No module named
+    'next_version'` on every repository OTHER than `yadgarhq/actions` itself
+    (whose own checkout still carries the whole tree next to the script).
+
+    This reproduces the staging step for real: every `cp "$src"
+    "$RUNNER_TEMP/<name>"` line in the job's own `run:` block is read back,
+    each source file is copied to a FRESH, OTHERWISE EMPTY directory under
+    its staged name, and `import pre_pin_parent` is attempted with ONLY that
+    directory on `sys.path` -- no `scripts/` fallback, the same isolation a
+    consumer repository's checkout gives the real staging step.
+    """
+    steps = workflow_jobs()["pre_pin_parent"]["steps"]
+    stage_step = next(s for s in steps if s.get("name") == "stage the gate, then restore the tree")
+    copies = re.findall(r'cp "\$\((?:dirname "\$src"\))?/?([A-Za-z0-9_./]+)" "\$RUNNER_TEMP/([A-Za-z0-9_.]+)"', stage_step["run"])
+    # The literal shell is `cp "$src" ...` and `cp "$api_versions_reader" ...`
+    # (a variable, not a path) for most lines; read the variable DEFINITIONS
+    # instead, which is what the real step actually resolves to a path.
+    assigned = dict(re.findall(r'^(\w+)="\$\(dirname "\$src"\)/([A-Za-z0-9_.]+)"', stage_step["run"], re.MULTILINE))
+    staged_names = re.findall(r'cp "\$(\w+)" "\$RUNNER_TEMP/([A-Za-z0-9_.]+)"', stage_step["run"])
+    assert staged_names, "no `cp` lines found in the staging step; did its name change?"
+
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    for var, dest_name in staged_names:
+        if var == "src":
+            source_name = "pre_pin_parent.py"
+        else:
+            assert var in assigned, f"{var!r} is cp'd but never assigned from `$(dirname \"$src\")/...`"
+            source_name = assigned[var]
+        source = Path(__file__).resolve().parents[1] / source_name
+        assert source.is_file(), f"{source} (staged as {dest_name}) does not exist"
+        (staged / dest_name).write_text(source.read_text())
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import pre_pin_parent"],
+        cwd=str(staged),
+        env={"PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_ci_verdict_can_evaluate_the_real_condition():

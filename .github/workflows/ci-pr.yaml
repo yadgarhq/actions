@@ -1527,11 +1527,19 @@ jobs:
           # Staged alongside every module it imports, from the SAME checkout:
           # ADR-0806's API-version reader, C-A2's values-override reader, and
           # the parent's own pin reader (`parent_pin.py`, published by #82 —
-          # this is its first caller outside a release).
+          # this is its first caller outside a release). `parent_pin.py`
+          # itself imports `next_version`, `pr_body` and `repin` at module
+          # level — the release-time machinery it reuses rather than
+          # reimplements (its own docstring: "EVERY RULE STILL LIVES IN
+          # `parent_pin`") — so the WHOLE import chain is staged, measured by
+          # running the staged copy rather than assumed from the source tree.
           api_versions_reader="$(dirname "$src")/api_versions.py"
           values_reader="$(dirname "$src")/chart_values_override.py"
           pin_reader="$(dirname "$src")/parent_pin.py"
-          for file in "$src" "$api_versions_reader" "$values_reader" "$pin_reader"; do
+          next_version="$(dirname "$src")/next_version.py"
+          pr_body="$(dirname "$src")/pr_body.py"
+          repin="$(dirname "$src")/repin.py"
+          for file in "$src" "$api_versions_reader" "$values_reader" "$pin_reader" "$next_version" "$pr_body" "$repin"; do
             if [ ! -f "$file" ]; then
               echo "::error::the pre-pin-parent gate or one of the gate's readers is missing at $file"
               exit 1
@@ -1541,6 +1549,9 @@ jobs:
           cp "$api_versions_reader" "$RUNNER_TEMP/api_versions.py"
           cp "$values_reader" "$RUNNER_TEMP/chart_values_override.py"
           cp "$pin_reader" "$RUNNER_TEMP/parent_pin.py"
+          cp "$next_version" "$RUNNER_TEMP/next_version.py"
+          cp "$pr_body" "$RUNNER_TEMP/pr_body.py"
+          cp "$repin" "$RUNNER_TEMP/repin.py"
           # DELETED BEFORE THE GATE RUNS, the same reasoning as the
           # `portability` and `service_immutable` copies: the gate reads
           # `chart/` and `.pre-pin-parent/chart/` in THIS workspace, and a
