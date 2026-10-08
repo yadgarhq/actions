@@ -12,7 +12,7 @@
 #
 # It runs with the repository under review as the working directory, and reads
 # `D80_REPO` from the environment. Nothing else is passed in.
-import os, re, subprocess, sys, tempfile, pathlib
+import copy, os, re, subprocess, sys, tempfile, pathlib
 import yaml
 
 # ADR-0806. The shared reader of a chart's declared operator API versions, beside
@@ -84,6 +84,37 @@ CRD_KINDS = {
     ),
     "config.gateway.envoyproxy.io": ("PRODUCT", "Envoy Gateway's own extension API."),
 }
+
+
+def strip_crd_schemas(doc):
+    """A CustomResourceDefinition's `openAPIV3Schema` NAMES a property for
+    whatever custom resource it describes -- it is a schema DEFINITION, never
+    a real object's value. `keda-scaledjobs.yaml` names one `hostPort`
+    because a ScaledJob embeds a full PodSpec schema (yadgarhq/platform#38);
+    that name is not a host port this chart binds to, and the walk below must
+    not confuse the two.
+
+    Return a copy of `doc` with `spec.versions[*].schema.openAPIV3Schema`
+    (v1) and `spec.validation.openAPIV3Schema` (v1beta1) removed, but ONLY
+    when `doc` actually IS a CustomResourceDefinition
+    (`apiextensions.k8s.io`). Every other kind, and every other path inside a
+    CRD, reaches the walk unchanged -- a `hostPort` in `metadata.annotations`
+    or `spec.names` still fails, the way a real one must.
+    """
+    av = str(doc.get("apiVersion", ""))
+    group = av.split("/")[0] if "/" in av else ""
+    if group != "apiextensions.k8s.io" or doc.get("kind") != "CustomResourceDefinition":
+        return doc
+    doc = copy.deepcopy(doc)
+    spec = doc.get("spec")
+    if isinstance(spec, dict):
+        for version in spec.get("versions") or []:
+            if isinstance(version, dict) and isinstance(version.get("schema"), dict):
+                version["schema"].pop("openAPIV3Schema", None)
+        validation = spec.get("validation")
+        if isinstance(validation, dict):
+            validation.pop("openAPIV3Schema", None)
+    return doc
 
 
 def classify(group):
@@ -410,7 +441,10 @@ if have_chart:
                     walk(v, f"{path}[{i}]")
 
         for d in rel_docs:
-            walk(d, f"{d.get('kind','?')}/{(d.get('metadata') or {}).get('name','?')}")
+            walk(
+                strip_crd_schemas(d),
+                f"{d.get('kind','?')}/{(d.get('metadata') or {}).get('name','?')}",
+            )
         if bad:
             problems.extend(bad)
             w("Findings are listed as errors below.")
