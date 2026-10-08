@@ -12,9 +12,10 @@ B6: a bare render refuses at `task`'s KEDA check, and each of the four entries
 below is individually required on helm v3.18.4.
 
 ONE DECLARATION PER CHART REPOSITORY, READ BY EVERY SHARED GATE THAT RENDERS THE
-CHART OFFLINE: the `helm-lint` hook, `d80_portability.py` and
-`service_immutable.py`. One reader rather than a flag list per gate, so the
-gates cannot drift apart on what the chart is rendered against.
+CHART OFFLINE: the `helm-lint` hook, `d80_portability.py`,
+`service_immutable.py` and `trivy_gate.py` (ledger 1150). One reader rather
+than a flag list per gate, so the gates cannot drift apart on what the chart
+is rendered against.
 
 THE FILE is `chart/ci/api-versions.txt` — `ci/` because helm's own convention
 already uses that directory for "what this chart is exercised under", and inside

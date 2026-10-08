@@ -8,10 +8,11 @@ with NO values file refuses that chart's lint AND its render the day such a
 key lands -- the gate would go red for a contract it was never told about.
 
 ONE DECLARATION PER CHART REPOSITORY, READ BY EVERY SHARED GATE THAT RENDERS OR
-LINTS THE CHART OFFLINE: the `helm-lint` hook, `d80_portability.py` and
-`service_immutable.py`. This is the same shape ADR-0806 already put behind
-`api_versions.py` for a chart's declared operator API versions, so the three
-gates cannot drift apart on what values the chart is rendered against either.
+LINTS THE CHART OFFLINE: the `helm-lint` hook, `d80_portability.py`,
+`service_immutable.py` and `trivy_gate.py` (ledger 1150). This is the same
+shape ADR-0806 already put behind `api_versions.py` for a chart's declared
+operator API versions, so the four gates cannot drift apart on what values
+the chart is rendered against either.
 
 THE FILE is `chart/ci/values.yaml`, beside `chart/ci/api-versions.txt` in the
 same directory for the same reason: `ci/` is the chart-testing (`ct`)
