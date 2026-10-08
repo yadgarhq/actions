@@ -55,6 +55,7 @@ GATED = [
     "proto",
     "portability",
     "service_immutable",
+    "pre_pin_parent",
 ]
 
 
@@ -753,7 +754,7 @@ def test_the_release_deployment_gate_is_the_reference_shape():
 # ---------------------------------------------------------------------------
 #
 # THE BYPASS THIS BLOCK EXISTS FOR, in one sentence: a job fails, the author
-# edits the description, the head sha does not move, seven jobs skip, and the
+# edits the description, the head sha does not move, eight jobs skip, and the
 # `ci / passed` those skips produce SUPERSEDES the red one — GitHub gates on the
 # latest check run for a context, the ruleset on `main` requires exactly that
 # context with `required_approving_review_count: 0` and `bypass_actors: []`, so
@@ -813,11 +814,12 @@ SHORT_CIRCUITED = [
     "proto",
     "portability",
     "service_immutable",
+    "pre_pin_parent",
 ]
 
 
 def edited_needs(text_edit="true", **override):
-    """The `toJSON(needs)` a text-only edit produces: seven skips and two runs.
+    """The `toJSON(needs)` a text-only edit produces: eight skips and two runs.
 
     `detect` and `template` execute — `template` is the job that re-reads the
     edited body, which is the entire point of the short-circuit — and everything
@@ -1167,7 +1169,7 @@ def test_the_685_bypass_against_the_predicate_it_replaced(capsys):
 # THE MUTATION THIS BLOCK EXISTS FOR fails OPEN, which is why it is here rather
 # than filed as a nicety. Delete the `[ "$BASE_CHANGED" = false ]` conjunct from
 # the `detect` step below and every other test in this file stays green — the
-# gate would then read `text_edit=true` on a BASE RETARGET, seven jobs would
+# gate would then read `text_edit=true` on a BASE RETARGET, eight jobs would
 # skip, and the standing verdict carried forward would belong to a pull request
 # that proposed a different diff. GitHub fires `edited` for a changed title, a
 # changed body AND a changed base branch, and only the last one alters what the

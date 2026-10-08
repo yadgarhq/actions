@@ -1421,6 +1421,154 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
 
+  # C-A3. K-3's closed-schema order rule enforces ITSELF — a required key a
+  # closed schema does not yet declare refuses the module's own render before
+  # anybody can pin it. K-8's three-step order (expand, fixture, contract)
+  # does not: `parent_bump.py` pins every release into `yadgarhq/chart` main
+  # WITH NO PR CI, so a contract released before its parent fixture breaks
+  # main's own renders the moment it lands, and the first anybody sees it is a
+  # red `yadgarhq/chart` with no pull request to point at. ADR-0835(b) put the
+  # same shape in `yadgarhq/platform`'s own PR CI for a different automated
+  # pin (the Argo sync-timeout floor, cut by the same `parent_bump.py`): a
+  # guard in the CONSUMER's CI that asserts what the pin is about to do, so
+  # the failure lands before the pin runs rather than after. This is that
+  # shape, generalised from one hard-coded constant to every chart key.
+  #
+  # SKIPPED ON `yadgarhq/chart` ITSELF (the job's own `if:`), because nothing
+  # is vendored into the parent there — it IS the parent. Every other
+  # condition below matches `portability`'s and `service_immutable`'s shape
+  # exactly, for `ci_verdict.py`'s sake: `github.event_name` and
+  # `github.repository` are both in that gate's native whitelist, so no change
+  # to it is needed for this job's `if:` to be evaluable (verified in
+  # `test_ci_verdict_can_evaluate_the_real_condition`).
+  #
+  # A REPOSITORY WITH NO `chart/` AT ALL, OR ONE `yadgarhq/chart` HAS NOT
+  # ONBOARDED YET, is not excluded by this job's `if:` either — the same
+  # choice `portability` and `service_immutable` already made, so that every
+  # repository pays the same small unconditional cost (checkout, setup-helm)
+  # and the script itself narrates the no-op, visibly, rather than a step
+  # silently vanishing from the job list.
+  pre_pin_parent:
+    needs: detect
+    if: >-
+      github.event_name != 'push' && needs.detect.outputs.text_edit != 'true'
+      && github.repository != 'yadgarhq/chart'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+
+      # THE PARENT, AT `main` — never a tag, because the question this job
+      # asks is "would the NEXT pin break main", and the next pin lands on top
+      # of whatever main carries right now. `persist-credentials: false`, the
+      # same as every other checkout in this file: this job never writes to
+      # `yadgarhq/chart`, only renders a local copy of it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: yadgarhq/chart
+          ref: main
+          path: .pre-pin-parent
+
+      # The same two pins `precommit`, `portability` and `service_immutable`
+      # use — the action's SHA and the helm version — rather than a fourth
+      # pair to keep in step with them (`test_helm_pin_agrees.py`).
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.18.4
+
+      # ADR-0725: resolves the PARENT's own dependencies — the nine real
+      # published pins, including this chart's own real published version —
+      # which is what populates `.pre-pin-parent/chart/charts/` for
+      # `pre_pin_parent.py` to then overwrite ONE entry of. A literal step
+      # rather than a call inside the staged script, so
+      # `chart_dependencies_resolved.py`'s static gate (it greps `run:` text,
+      # never a script's own subprocess argv) can see it.
+      - name: resolve the parent chart's own dependencies
+        if: needs.detect.outputs.chart == 'true'
+        working-directory: .pre-pin-parent
+        run: helm dependency update chart
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x"
+      # Rendered manifests are parsed rather than grepped, for the reason the
+      # `portability` job states. Pinned to the 6.0.3 every other chart job
+      # already uses.
+      - name: install PyYAML
+        run: pip install --disable-pip-version-check "pyyaml==6.0.3"
+
+      # THE SECOND CHECKOUT AND `@main`: same mechanism and reasoning as the
+      # `portability` and `service_immutable` copies — `ci-pr.yaml` is a
+      # reusable workflow, so nothing from `yadgarhq/actions` is on a
+      # consumer's runner, and a change to this shared workflow is reviewed
+      # against the version IN the pull request, never the copy already on
+      # `main` (`ci-self.yaml`).
+      - if: github.repository != 'yadgarhq/actions'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: yadgarhq/actions
+          ref: main
+          path: .ci-actions
+
+      - name: stage the gate, then restore the tree
+        env:
+          UNDER_REVIEW: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$UNDER_REVIEW" = "yadgarhq/actions" ]; then
+            src=scripts/pre_pin_parent.py
+          else
+            src=.ci-actions/scripts/pre_pin_parent.py
+          fi
+          # Staged alongside every module it imports, from the SAME checkout:
+          # ADR-0806's API-version reader, C-A2's values-override reader, and
+          # the parent's own pin reader (`parent_pin.py`, published by #82 —
+          # this is its first caller outside a release).
+          api_versions_reader="$(dirname "$src")/api_versions.py"
+          values_reader="$(dirname "$src")/chart_values_override.py"
+          pin_reader="$(dirname "$src")/parent_pin.py"
+          for file in "$src" "$api_versions_reader" "$values_reader" "$pin_reader"; do
+            if [ ! -f "$file" ]; then
+              echo "::error::the pre-pin-parent gate or one of the gate's readers is missing at $file"
+              exit 1
+            fi
+          done
+          cp "$src" "$RUNNER_TEMP/pre_pin_parent.py"
+          cp "$api_versions_reader" "$RUNNER_TEMP/api_versions.py"
+          cp "$values_reader" "$RUNNER_TEMP/chart_values_override.py"
+          cp "$pin_reader" "$RUNNER_TEMP/parent_pin.py"
+          # DELETED BEFORE THE GATE RUNS, the same reasoning as the
+          # `portability` and `service_immutable` copies: the gate reads
+          # `chart/` and `.pre-pin-parent/chart/` in THIS workspace, and a
+          # second repository sitting inside it belongs in neither.
+          rm -rf .ci-actions
+          echo "pre-pin-parent gate staged from \`$src\`." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: this chart would still render and lint in yadgarhq/chart main, pinned at its own version
+        env:
+          PYTHONPATH: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          # THE SUMMARY IS WRITTEN ON THE FAILING PATH TOO, the same reasoning
+          # the `service_immutable` copy gives: this gate's whole value is the
+          # K-8 order explanation in its refusal, so that text has to reach
+          # the place a reviewer looks.
+          rc=0
+          python3 "$RUNNER_TEMP/pre_pin_parent.py" >"$RUNNER_TEMP/pre_pin_parent.txt" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/pre_pin_parent.txt"
+          {
+            echo "## Pre-pin parent gate (C-A3)"
+            echo ""
+            echo '```'
+            cat "$RUNNER_TEMP/pre_pin_parent.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
   # PHASE 3 OF VERSIONING: derive the next version AND cut the tag for it.
   #
   # The squash-merge decision already did the hard half — the pull request body
@@ -1813,6 +1961,7 @@ jobs:
         proto,
         portability,
         service_immutable,
+        pre_pin_parent,
       ]
     runs-on: ubuntu-latest
     steps:

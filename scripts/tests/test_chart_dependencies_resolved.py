@@ -291,12 +291,14 @@ def test_the_finding_names_every_site(tmp_path):
 def test_this_repository_resolves_before_every_helm_install(tmp_path):
     """LEDGER 725's OWN QUESTION, asked of the real tree rather than a fixture.
 
-    All four real sites are named, so this fails if a helm-installing job
+    All five real sites are named, so this fails if a helm-installing job
     moves somewhere this gate does not read, or if its resolution step is
-    ever deleted without another taking its place.
+    ever deleted without another taking its place. `pre_pin_parent` (C-A3) is
+    the newest: it resolves the VENDORED PARENT's own dependencies, never the
+    local `chart/`, which is exactly the site the job's own comment explains.
     """
     result = run(REPO)
     assert result.returncode == 0, result.stdout
     assert "resolving a chart's dependencies first" in result.stdout
-    for job_id in ("precommit", "portability", "service_immutable", "chart"):
+    for job_id in ("precommit", "portability", "service_immutable", "chart", "pre_pin_parent"):
         assert f"job `{job_id}`" in result.stdout
