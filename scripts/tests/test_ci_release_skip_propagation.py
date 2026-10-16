@@ -52,12 +52,14 @@ THE GENERALISED FORM, past this one site: `suspect_jobs()` scans every job in
 the real file's `needs:` graph and flags one whose `if:` has no override AND
 whose needs are only satisfied by crossing an INDIRECT ancestor — a job not in
 its own direct `needs:` list — that can independently skip on a tree fact
-(a `needs.detect.outputs.*` comparison). `deployment` needs `[detect, image]`
-and reads `needs.image.result` directly, so `image` skipping is exactly what
-its own condition is FOR; it is not flagged. `parent`, before this fix, needed
-only `[detect, chart]` yet was reachable from `image` only through `chart` — an
-ancestor absent from its own `needs:` — and IS flagged. The distinction is what
-keeps the check from crying wolf on `deployment`'s deliberate, correct skip.
+(a `needs.detect.outputs.*` comparison). A job that needs `[detect, image]`
+and reads `needs.image.result` directly — the retired `deployment` job's shape,
+kept as a synthetic control since ledger 675 stage 7 deleted that job — skips
+with `image` because that is exactly what its own condition is FOR; it is not
+flagged. `parent`, before this fix, needed only `[detect, chart]` yet was
+reachable from `image` only through `chart` — an ancestor absent from its own
+`needs:` — and IS flagged. The distinction is what keeps the check from crying
+wolf on a deliberate, correct skip.
 
 Run: python3 -m pytest scripts/tests/ -q
 """
@@ -220,7 +222,7 @@ def suspect_jobs(jobs):
     Flagged: no override in its own `if:`, AND its needs graph reaches a job
     that can independently skip (`can_independently_skip`) ONLY through an
     INDIRECT ancestor — one absent from its own direct `needs:` list. That
-    second clause is what spares `deployment`: it needs `image` DIRECTLY and
+    second clause is what spares a job that needs `image` DIRECTLY and
     reads `needs.image.result` itself, which is the condition doing exactly
     what it is for, not a job blindsided by a hop it never named.
     """
@@ -240,11 +242,19 @@ def test_no_job_in_the_real_file_carries_this_defect_shape():
     assert suspect_jobs(real_jobs()) == []
 
 
-def test_deployment_is_not_a_false_positive():
-    """The control for the generalised check: `deployment` needs `image`
-    DIRECTLY and legitimately skips with it. A check that flagged it would be
-    too broad to trust."""
+def test_a_direct_image_dependant_is_not_a_false_positive():
+    """The control for the generalised check: a job that needs `image`
+    DIRECTLY legitimately skips with it. A check that flagged it would be too
+    broad to trust. The subject used to be the real `deployment` job; ledger
+    675 stage 7 deleted it, so its exact `needs:` and `if:` are injected here
+    rather than the control being dropped."""
     jobs = real_jobs()
+    assert "deployment" not in jobs
+    jobs["deployment"] = {
+        "needs": ["detect", "image"],
+        "if": "needs.detect.outputs.chart == 'true' && needs.image.result == 'success'",
+        "steps": [],
+    }
     assert "image" in direct_needs(jobs, "deployment")
     assert not has_override(jobs["deployment"]["if"])
     assert suspect_jobs(jobs) == []

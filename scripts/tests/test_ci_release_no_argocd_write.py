@@ -4,18 +4,25 @@ Contents API `PUT` under `repos/${OWNER}/argocd/contents/versions/...` — so
 Argo CD would roll the new image. Nothing in `yadgarhq/argocd` ever read that
 file: the `yadgar-modules` ApplicationSet it fed generates zero Applications
 (ADR-0786). The write, and the App token minted only to make it
-(`repositories: argocd`), are retired. The `estate` dispatch — a different
-mint, a different step — is untouched and still runs.
+(`repositories: argocd`), are retired.
+
+LEDGER 1487 (ledger 675 stage 7). The rest of that job — an App token scoped to
+`repositories: estate` (step `estate_app`) and a `repository_dispatch` of type
+`module-rolled` to `yadgarhq/estate` (step `estate_dispatch`) — is retired too,
+and the `deployment` job with it. Since ADR-0786 a module release moves nothing
+in the cluster; only an argocd pin PR does, and the settled-state gate judges
+that. Every `module-rolled` smoke run was red with no verdict (ledger 1376).
 
 EVERY CHECK HERE IS PAIRED WITH A MUTATION, for the reason `test_no_test_skips.py`
 gives: a gate that only ever sees conforming input certifies the fixture, not the
 gate. `_with_argocd_write_restored` below reinserts the deleted step's shape —
 not a verbatim copy, but one that carries the properties the checks key on — and
-every `test_mutation_*` function asserts its own check goes red against it. Two
+every `test_mutation_*` function asserts its own check goes red against it.
+`_with_estate_dispatch_restored` does the same for the estate steps. Two
 further mutations probe the checks' OWN edges rather than the deleted step's
 shape: a `repositories:` value can be a single comma-separated string, not only
 newline-separated, so a scope check that only splits on `\n` would pass a mint
-scoped to `estate,argocd`; and `contents/versions/` is its own tell in a `run:`
+scoped to `chart,argocd`; and `contents/versions/` is its own tell in a `run:`
 block, independent of `/argocd/` and `versions/<`/`versions/${`.
 
 Run: python3 -m pytest scripts/tests/ -q
@@ -98,18 +105,39 @@ def test_versions_pinned_is_never_mentioned():
     assert "versions_pinned" not in real_text()
 
 
-def estate_steps_gated_only_on_cred(jobs):
-    steps = {s.get("id"): s for s in jobs["deployment"]["steps"] if s.get("id")}
-    for step_id in ("estate_app", "estate_dispatch"):
-        if step_id not in steps:
+def mint_steps(jobs):
+    for job in jobs.values():
+        for step in job.get("steps", []):
+            if "create-github-app-token" in str(step.get("uses", "")):
+                yield step
+
+
+def nothing_asks_estate_for_a_verdict(jobs):
+    """No mint scoped to `estate`, no `run:` block that dispatches to it or
+    names `module-rolled`, and no step left under either retired id."""
+    for step in mint_steps(jobs):
+        if "estate" in repositories_of(step):
             return False
-        if steps[step_id].get("if") != "steps.cred.outputs.configured == 'true'":
+    for _job_id, _step_name, run in run_blocks(jobs):
+        if "/estate/dispatches" in run or "module-rolled" in run:
             return False
+    for job in jobs.values():
+        for step in job.get("steps", []):
+            if step.get("id") in ("estate_app", "estate_dispatch"):
+                return False
     return True
 
 
-def test_estate_app_and_estate_dispatch_still_exist_gated_only_on_cred():
-    assert estate_steps_gated_only_on_cred(real_jobs())
+def test_nothing_asks_estate_for_a_verdict():
+    jobs = real_jobs()
+    # NOT VACUOUS: the scan must see the one mint that remains (`parent`'s,
+    # scoped to `chart`). A file that parsed into no steps would otherwise pass.
+    assert [repositories_of(s) for s in mint_steps(jobs)] == [["chart"]]
+    assert nothing_asks_estate_for_a_verdict(jobs)
+
+
+def test_the_deployment_job_is_gone():
+    assert "deployment" not in real_jobs()
 
 
 # ---------------------------------------------------------------------------
@@ -141,9 +169,9 @@ def _with_argocd_write_restored(jobs):
         ),
     }
     cred_index = next(
-        i for i, s in enumerate(jobs["deployment"]["steps"]) if s.get("id") == "cred"
+        i for i, s in enumerate(jobs["parent"]["steps"]) if s.get("id") == "cred"
     )
-    jobs["deployment"]["steps"][cred_index + 1 : cred_index + 1] = [mint, write]
+    jobs["parent"]["steps"][cred_index + 1 : cred_index + 1] = [mint, write]
     return jobs
 
 
@@ -171,7 +199,7 @@ def test_mutation_a_contents_versions_path_reddens_without_the_other_two_tells()
     run = sneaky_write["run"]
     assert "/argocd/" not in run
     assert "versions/<" not in run and "versions/${" not in run
-    jobs["deployment"]["steps"].append(sneaky_write)
+    jobs["parent"]["steps"].append(sneaky_write)
     assert not no_run_block_names_the_argocd_api_or_a_versions_write(jobs)
 
 
@@ -179,11 +207,11 @@ def test_mutation_a_comma_scoped_mint_including_argocd_reddens_too():
     """The scope check must not be fooled by a list spelled as one string.
     `actions/create-github-app-token` accepts `repositories:` as a single
     comma-separated value as well as newline-separated, so a NEW mint scoped
-    to `estate,argocd` must be caught exactly like a mint scoped to `argocd`
+    to `chart,argocd` must be caught exactly like a mint scoped to `argocd`
     alone."""
     jobs = copy.deepcopy(real_jobs())
     new_mint = {
-        "name": "a hypothetical mint widened past estate",
+        "name": "a hypothetical mint widened past chart",
         "id": "widened_app",
         "if": "steps.cred.outputs.configured == 'true'",
         "uses": "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1",
@@ -191,10 +219,64 @@ def test_mutation_a_comma_scoped_mint_including_argocd_reddens_too():
             "client-id": "${{ secrets.RELEASE_APP_CLIENT_ID }}",
             "private-key": "${{ secrets.RELEASE_APP_PRIVATE_KEY }}",
             "owner": "${{ github.repository_owner }}",
-            "repositories": "estate,argocd",
+            "repositories": "chart,argocd",
             "permission-contents": "write",
         },
     }
-    jobs["deployment"]["steps"].append(new_mint)
+    jobs["parent"]["steps"].append(new_mint)
     assert "argocd" in repositories_of(new_mint)
     assert not no_step_mints_a_token_scoped_to_argocd(jobs)
+
+
+# ---------------------------------------------------------------------------
+# Mutation: reinsert the retired estate steps, confirm the check above reds.
+# ---------------------------------------------------------------------------
+
+
+def _with_estate_dispatch_restored(jobs):
+    jobs = copy.deepcopy(jobs)
+    jobs["deployment"] = {
+        "needs": ["detect", "image"],
+        "if": "needs.detect.outputs.chart == 'true' && needs.image.result == 'success'",
+        "runs-on": "ubuntu-latest",
+        "steps": [
+            {
+                "name": "mint a token that can ask estate for a verdict and nothing else",
+                "id": "estate_app",
+                "uses": "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1",
+                "with": {"owner": "${{ github.repository_owner }}", "repositories": "estate"},
+            },
+            {
+                "name": "ask estate for a verdict on this roll",
+                "id": "estate_dispatch",
+                "run": (
+                    "jq -n '{event_type:\"module-rolled\"}' |\n"
+                    'gh api -X POST "repos/${OWNER}/estate/dispatches" --input -\n'
+                ),
+            },
+        ],
+    }
+    return jobs
+
+
+def test_mutation_restoring_the_estate_dispatch_reddens_the_check():
+    assert not nothing_asks_estate_for_a_verdict(_with_estate_dispatch_restored(real_jobs()))
+
+
+def _bare(step):
+    return {k: v for k, v in step.items() if k not in ("id",)}
+
+
+def test_mutation_each_estate_tell_reddens_on_its_own():
+    """Each of the three tells is independent: an estate mint under a new id, a
+    dispatch under a new id, or a step that keeps an old id with new content."""
+    restored = _with_estate_dispatch_restored({})["deployment"]["steps"]
+    mint, dispatch = restored
+    for extra in (
+        _bare(mint),
+        _bare(dispatch),
+        {"name": "renamed", "id": "estate_dispatch", "run": "true\n"},
+    ):
+        jobs = copy.deepcopy(real_jobs())
+        jobs["parent"]["steps"].append(extra)
+        assert not nothing_asks_estate_for_a_verdict(jobs), extra
