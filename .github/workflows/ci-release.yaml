@@ -12,12 +12,14 @@ on:
           here so every caller can pass `github.ref_name` unchanged.
         type: string
         required: true
-    # BOTH OPTIONAL, and that is what keeps the `deployment` job below INERT.
-    # A reusable workflow cannot see a caller's secrets unless the caller passes
-    # them, so a repository that has not been wired up hands over two empty
-    # strings, the job notices and reports, and the release is exactly what it
-    # was before. Same shape `ci-pr.yaml` uses for the release tag, and the same
-    # reason: this ships into every repository before the thing behind it exists.
+    # BOTH OPTIONAL, because only the `parent` job below reads them and only a
+    # repository that publishes a chart reaches it. A reusable workflow cannot
+    # see a caller's secrets unless the caller passes them, so a repository with
+    # no chart passes nothing and loses nothing. A chart-carrying repository
+    # that passes nothing hands over two empty strings, and `parent`'s `cred`
+    # step reds the release and names the repair. (This said the secrets kept a
+    # `deployment` job INERT. That job asked `yadgarhq/estate` for a verdict on
+    # every release and is retired: ledger 675 stage 7, ledger 1487.)
     #
     # The App is the one ADR-0527 already mints per run for the tag. It is not a
     # second credential and there is no new key to hold — what is new is the
@@ -181,8 +183,7 @@ jobs:
       # rather than a check. The last fails SILENTLY, and that is what this
       # step is for: an empty digest publishes a chart carrying
       # `image.digest: ""` and NO TAG AT ALL, because the same `yq` expression
-      # deletes `image.tag`. (A fifth value, sent to `estate` in the dispatch
-      # payload further down, matches nothing yet — see the note there.)
+      # deletes `image.tag`.
       #
       # AT THE PRODUCER RATHER THAN AT EACH CONSUMER. Here this step protects
       # all four, and the gating already carries the failure downstream:
@@ -610,15 +611,15 @@ jobs:
   # narrower than it looks. Dispatch would need a new workflow in `chart`, it runs
   # only the DEFAULT-BRANCH copy of that workflow, and it answers 204 whether or
   # not any workflow matched the event — so its exit status is a check that cannot
-  # fail, and confirming it means watching for a run to appear, which the `estate`
-  # step below spends a hundred lines doing. A direct write, retried and confirmed
-  # by its own response, avoids all of that.
+  # fail, and confirming it means watching for a run to appear, which the retired
+  # `estate` dispatch step spent a hundred lines doing (ledger 675 stage 7). A
+  # direct write, retried and confirmed by its own response, avoids all of that.
   #
-  # NOT GATED ON `image`, AND THAT IS THE WHOLE REASON THIS IS NOT A STEP IN
-  # `deployment`. That job requires `needs.image.result == 'success'`, and
-  # `yadgarhq/config` is a parent module with NO `Containerfile` — it released
-  # five times on the day this was written. A step there would have skipped every
-  # one of them, silently, for the one module whose shape differs.
+  # NOT GATED ON `image`, AND THAT IS WHY THIS IS ITS OWN JOB. A job requiring
+  # `needs.image.result == 'success'` — the retired `deployment` job's gate —
+  # would skip `yadgarhq/config`, a parent module with NO `Containerfile` that
+  # released five times on the day this was written. Every one of them would
+  # have skipped, silently, for the one module whose shape differs.
   #
   # `needs.chart.result == 'success'` IS THE GATE, NOT BELT AND BRACES — and
   # that stopped being true the moment the `always()` below was added. Before
@@ -655,10 +656,14 @@ jobs:
   #      describing — nothing here gates a NINTH repository, or one of these
   #      eight regressing, omitting them — and its red-not-quiet behaviour is
   #      why the step exists rather than a condition on this list.
-  #   2. `yadgarhq/chart` carries no `main` ruleset today — measured, it has none
-  #      at all and `protected: false` — so this write lands. The day that
-  #      ruleset arrives the release App has to be a bypass actor on it, exactly
-  #      as app id 4814165 already is on `yadgarhq/argocd`.
+  #   2. The release App can push to `yadgarhq/chart`'s `main` past its
+  #      ruleset — TRUE AS OF 2026-10-16, measured live. chart's `main`
+  #      ruleset (active, created 2026-09-23) requires a pull request and
+  #      `ci / passed`, and lists app id 4814165, the release App, as an
+  #      `always` bypass actor. That bypass is why this direct write lands;
+  #      remove it and every release reds here. By contrast all three rulesets
+  #      on `yadgarhq/argocd` carry `bypass_actors: []` since A-U6, so argocd
+  #      is no precedent for this.
   #
   # `always()` IS LOAD-BEARING HERE FOR THE SAME REASON IT IS ON `chart`, one
   # hop further down the graph. MEASURED, via the API rather than the UI, on
@@ -692,8 +697,10 @@ jobs:
       always() && needs.chart.result == 'success'
       && github.repository != 'yadgarhq/chart'
     runs-on: ubuntu-latest
-    # THE SAME BOUND AND THE SAME ARITHMETIC AS `deployment`. The worst path here
-    # is three write attempts with 5s and 10s backoff plus three tag attempts with
+    # A BOUND, BECAUSE THIS JOB RUNS PAST THE POINT OF NO RETURN: the tag is cut
+    # and the chart is published, so a wedged read would hold a runner for
+    # GitHub's 360-minute default on a release that already shipped. The worst
+    # path here is three write attempts with 5s and 10s backoff plus three tag attempts with
     # the same, one token mint and about a dozen `gh api` reads — under two
     # minutes, and nothing polls. Ten leaves five times that as headroom while
     # cutting a wedged read short by a factor of thirty-six.
@@ -710,9 +717,9 @@ jobs:
       # cannot be delivered is a failure rather than a skip. By the time this job
       # runs the module chart is published and pullable, and ADR-0722 makes the
       # parent the only thing an adopter installs — so a published chart the parent
-      # will never pin is exactly that shape. The `deployment` job's italic note
-      # was written when no caller passed these secrets at all; seven of eight
-      # module repositories pass them now.
+      # will never pin is exactly that shape. A quiet note in the summary, which
+      # is what the retired `deployment` job wrote for the same missing secrets,
+      # is too quiet for this one.
       - name: is the release App configured here
         id: cred
         env:
@@ -742,11 +749,9 @@ jobs:
           echo "::error::the parent chart was not re-pinned: no release App is configured for this repository. See the parent job in yadgarhq/actions."
           exit 1
 
-      # SCOPED TO `chart`, AND IT IS ITS OWN MINT RATHER THAN A SHARED ONE.
-      # The `deployment` job below mints its own token scoped to `repositories:
-      # estate` for the same reason: one token unable to do the other's job.
-      # Two mints cost one extra API call each and keep every token narrower
-      # than the App's own organisation-wide grant.
+      # SCOPED TO `chart`, AND NOTHING ELSE. A token minted here can write to the
+      # parent chart and to no other repository, which keeps it narrower than
+      # the App's own organisation-wide grant.
       #
       # `repositories:` ALONE DOES NOTHING — the action makes it conditional on
       # `owner:`, so the two travel together or the default quietly scopes the
@@ -854,354 +859,3 @@ jobs:
             dir=.ci-actions/scripts
           fi
           python3 "$dir/example_published.py"
-
-  # THIS JOB ASKS `yadgarhq/estate` FOR A VERDICT ON EVERY RELEASE THAT HAS A
-  # RELEASE APP CONFIGURED, by sending it a `module-rolled` dispatch. It used
-  # to also write the released version into `yadgarhq/argocd` so Argo CD would
-  # roll the new image; ADR-0848 (ledger 1270) retired that write, because
-  # nothing in `yadgarhq/argocd` read it — the `yadgar-modules` ApplicationSet
-  # it fed generates zero Applications (ADR-0786).
-  #
-  # THE `cred` STEP BELOW IS THE OFF SWITCH: a repository whose `release:` job
-  # does not pass the two secrets gets a named, non-red skip here. All eight
-  # chart-bearing repositories pass them as of 2026-09-19 (see the `parent`
-  # job).
-  deployment:
-    needs: [detect, image]
-    # A repository with no `chart/` has no module for `estate` to roll-check,
-    # and `needs.image.result == 'success'` keeps this job from asking about a
-    # release whose image never published.
-    if: needs.detect.outputs.chart == 'true' && needs.image.result == 'success'
-    runs-on: ubuntu-latest
-    # A BOUND, BECAUSE THIS JOB RUNS PAST THE POINT OF NO RETURN. No job in this
-    # file sets one, so every job here inherits GitHub's 360-minute default.
-    # That is merely wasteful for a job that can be re-run freely, and it is not
-    # tolerable for this one: by the time these steps run the tag is cut and the
-    # image is pushed, and the steps below still make several `gh api` calls,
-    # one of which polls. A wedged read would hold a runner for six hours on a
-    # release that already shipped.
-    #
-    # TEN, and the arithmetic is the argument rather than a round number. The
-    # worst path here is the estate poll at 150s, plus one token mint and the
-    # reads around it — under three minutes. Ten leaves more than twice that as
-    # headroom, so raising the poll window again does not quietly arrive at the
-    # ceiling, while still cutting a hung job short by a factor of thirty-six.
-    timeout-minutes: 10
-    steps:
-      # THE OFF SWITCH, and it has to be a step output rather than a condition on
-      # the secret: the `secrets` context is not available in a step-level `if:`.
-      - name: is the release App configured here
-        id: cred
-        env:
-          CLIENT_ID: ${{ secrets.RELEASE_APP_CLIENT_ID }}
-          APP_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-          # BOTH OR NEITHER. An id without a key fails inside the minting action
-          # instead of here, which is a red job in place of a skipped step.
-          if [ -n "$CLIENT_ID" ] && [ -n "$APP_KEY" ]; then
-            echo "configured=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "configured=false" >> "$GITHUB_OUTPUT"
-            {
-              echo "_No release App is configured here, so \`yadgarhq/estate\`"
-              echo "was not asked for a verdict on this release. See the"
-              echo "\`deployment\` job in \`yadgarhq/actions\`._"
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      # ASKING THE ESTATE FOR A VERDICT, and this is the second half of a
-      # trigger whose first half has been waiting since the suite was written.
-      # `yadgarhq/estate`'s `smoke.yaml` fires on `repository_dispatch` type
-      # `module-rolled`; nothing in the organisation sent that event, so the
-      # behavioural contract suite had never executed once. This is the sender.
-      #
-      # A TOKEN SCOPED TO `estate` AND NOTHING ELSE. The App holds
-      # `contents: write` and `actions: write` organisation-wide, and minting a
-      # token scoped only to `repositories: estate` keeps this dispatch unable
-      # to write anywhere else — the same discipline the `parent` job's own
-      # mint applies to `chart`. Same action at the SAME pinned SHA — two pins
-      # for one action in one file would be a smell of its own.
-      #
-      # `contents: write` IS WHAT THE ENDPOINT ASKS FOR, read from GitHub's
-      # fine-grained permission reference rather than assumed: `POST
-      # /repos/{owner}/{repo}/dispatches` is listed under Contents at `write`.
-      # `actions: read` is for the verification below, which reads a run list.
-      # The App — `yadgarhq-bot`, app id 4814165 — holds `contents: write` and
-      # `actions: write` organisation-wide with `repository_selection: all`, so
-      # `estate` is already in reach. There is NO new credential, no new secret
-      # and no caller change: the chart-carrying repositories that already
-      # pass `RELEASE_APP_*` to their `release:` job need no edit, and the
-      # `workflow_call` signature above is untouched.
-      - name: mint a token that can ask estate for a verdict and nothing else
-        id: estate_app
-        if: steps.cred.outputs.configured == 'true'
-        # NOT WORTH A RED RELEASE — the argument is on the step below. A failed
-        # mint arrives there as an empty token and is reported there, so the
-        # failure has one voice rather than two.
-        continue-on-error: true
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: estate
-          permission-contents: write
-          permission-actions: read
-
-      # A STEP RATHER THAN A JOB, to share the `cred` check above and mint only
-      # the one token this dispatch needs. A separate job with `needs:` would
-      # state the same ordering at the cost of minting the credential
-      # separately.
-      #
-      # THE DISPATCH IS NOT A PROMISE THAT ANY NEW PODS ARE UP — nothing in
-      # this workflow deploys the release to the cluster. `estate`'s
-      # `await-roll` binary is the tolerance anyway, and it reads exactly the
-      # payload sent below: for the gateway it polls `server/discover` for up
-      # to ten minutes until the served version equals the dispatched tag with
-      # the leading `v` stripped; for every module but the gateway it
-      # REFUSES — the run ends red, saying the roll cannot be confirmed from
-      # the front door, and none of the nine rows execute (ledger 675 measured
-      # the old "prints a caveat and proceeds" shape as six false greens,
-      # `yadgarhq/estate#24`). Stage 3's A-04 replaces the refusal with digest
-      # parity for every module — which is why `digest` is in the payload
-      # although nothing reads it yet. So a gateway dispatch times out red
-      # unless the pin was moved within the poll window.
-      #
-      # A FAILED DISPATCH MUST NOT REDDEN THE RELEASE. By the time this step
-      # runs the tag is cut and permanent, and the image is pushed and
-      # signed — the release SUCCEEDED. Failing the job here would report a
-      # shipped release as broken and invite the one repair that is never
-      # correct: releasing again.
-      #
-      # BUT IT IS NOT ALLOWED TO BE SILENT, because a dispatch that fails
-      # quietly is this estate's most repeated defect. So the step itself FAILS
-      # — a red cross in the step list, an error annotation on the run, and a
-      # named section in the job summary — and `continue-on-error` keeps that
-      # failure out of the release's own verdict. It is the shape `estate`'s
-      # `smoke.yaml` already uses for its C-18 row, for the same reason.
-      #
-      # A 204 IS NOT EVIDENCE THAT ANYTHING LISTENED, and checking only the exit
-      # status of the POST would be a sixth check that cannot fail. The endpoint
-      # answers 204 when the event type matches no workflow, and 204 when the
-      # workflow is missing from the default branch — GitHub runs the
-      # DEFAULT-BRANCH copy of a `repository_dispatch` workflow and no other. So
-      # this step records the newest dispatch run in `estate` before the POST and
-      # waits for a NEWER one to appear. That discriminates today, with no runner
-      # installed, because a QUEUED run is still a CREATED run.
-      #
-      # NOT GATED ON THE ESTATE BEING READY, argued rather than assumed. The ARC
-      # scale set is not installed — `estate` has zero registered runners — so a
-      # dispatched run queues, and `estate`'s own README says a queued run is
-      # easy to mistake for a passing one. This side cannot fix that, and a
-      # readiness gate is a switch somebody must remember to remove, which is
-      # how the first half came to sit unused. The credential check above is
-      # already the one gate this job needs. What this side CAN do is name the
-      # created run, so the release says where the verdict will appear and one
-      # link shows whether it ever ran.
-      #
-      # THE QUERY NAMES `smoke.yaml`, AND AN EARLIER REVISION OF THIS COMMENT
-      # CLAIMED MORE FOR THAT THAN IT DELIVERS. It said the scoping stops one
-      # module confirming on another's run. It does not, and the reason is
-      # measurable: `estate` holds exactly two workflows, and `ci.yaml` triggers
-      # only on `pull_request` and `push`, so `smoke.yaml` is the ONLY workflow
-      # there a `repository_dispatch` can reach. A repository-wide query
-      # filtered by `event=repository_dispatch` is therefore SET-EQUAL to this
-      # one, and naming the workflow separates nothing.
-      #
-      # THE CROSS-MODULE COLLISION IS STILL OPEN, ON THIS SIDE. Every module
-      # POSTs the same event to the same workflow within seconds; each records
-      # the same `before`, each POSTs, and each confirms on whichever run
-      # appeared first. Module A can pass on module B's run and print B's URL
-      # into A's release summary. `estate`'s `smoke.yaml` now carries
-      # `run-name: smoke — <module> <tag> (<event>)` (`yadgarhq/estate#24`), so
-      # the runs list DOES identify the payload — this step just does not read
-      # it yet: `newest()` below still matches on "run id greater than
-      # baseline" alone, never on the title. The fix is local to this file
-      # now: match on `display_title` here, and compare whole tokens rather
-      # than substrings — `iam` is a prefix of `iam-db`, so a naive match would
-      # misattribute one module's run to the other.
-      #
-      # WHAT THE SCOPING DOES BUY, stated at its real size: it excludes a future
-      # second `repository_dispatch` workflow in `estate`, and it turns an
-      # absent `smoke.yaml` into a named 404 rather than a silent timeout. The
-      # endpoint takes the `event` filter — verified read-only against
-      # `ci-self.yaml` in this repository, where 45 runs split 16 `push` + 29
-      # `pull_request` + 0 `repository_dispatch`.
-      #
-      # IT ALSO TURNS ONE GUESSED CAUSE INTO A NAMED ONE. This URL resolves a
-      # workflow by path in the DEFAULT BRANCH, so a `smoke.yaml` that is
-      # renamed or absent there answers 404 — and that lands on the strict read
-      # below, which reports it and does not send the dispatch, instead of being
-      # one of four possibilities offered after a silent timeout.
-      #
-      # 150s, NOT 60s, AND THE WAIT COSTS THE RELEASE NOTHING. This step is
-      # `continue-on-error` inside a job whose expensive work is already done,
-      # and it exits the moment a newer run id appears, so the happy path is
-      # unchanged at about five seconds. What the longer window buys is fewer
-      # false reds — and a false red here is expensive out of proportion to the
-      # wait, because both repairs it can prompt are harmful when a run does in
-      # fact exist. The interval stays at 5s; only the count rises.
-      #
-      # AND THE TIMEOUT NO LONGER ASSERTS A CAUSE IT CANNOT KNOW. `newest()`
-      # turns every read failure into 0, and the loop ends on elapsed time, so
-      # `run_id -eq 0` is reachable three ways: no run was created, which is the
-      # real case; every confirming read failed; or an eventually-consistent
-      # read answered with a lower id. The old text opened "The run list was
-      # readable a moment ago" and listed four causes with the read failing not
-      # among them — it asserted the one thing it could not check. It is a
-      # separate function now, with a separate heading, because the summary it
-      # shared claimed NO behavioural contract ran for this roll, which is false
-      # exactly when the check is wrong.
-      - name: ask estate for a verdict on this roll
-        id: estate_dispatch
-        if: steps.cred.outputs.configured == 'true'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ steps.estate_app.outputs.token }}
-          VERSION: ${{ needs.detect.outputs.version }}
-          DIGEST: ${{ needs.image.outputs.digest }}
-          REPO: ${{ github.repository }}
-          OWNER: ${{ github.repository_owner }}
-        run: |
-          set -euo pipefail
-          module="${REPO#*/}"
-          # SCOPED TO smoke.yaml, not to the event alone. See above: every
-          # module rolling at once would otherwise confirm on each other.
-          w="actions/workflows/smoke.yaml/runs"
-          runs="repos/${OWNER}/estate/${w}?event=repository_dispatch&per_page=1"
-
-          # Sanitised rather than trusted: a partial write followed by a non-zero
-          # exit would otherwise put a non-number into a numeric comparison, and
-          # the arithmetic error would read as a missing run.
-          newest() {
-            n=$(gh api "$runs" --jq '.workflow_runs[0].id // 0' 2>/dev/null || true)
-            case "$n" in '' | *[!0-9]*) n=0 ;; esac
-            printf '%s' "$n"
-          }
-
-          fail() {
-            {
-              echo "### Released, but the estate was not asked"
-              echo ""
-              echo "\`${module} ${VERSION}\` is released, signed and pullable."
-              echo "What did not happen is the verdict: $1"
-              echo ""
-              echo "NO behavioural contract ran for this release, and none can yet:"
-              echo "nothing in this workflow deploys it. It reaches the cluster only"
-              echo "when the cluster's parent-chart pin is moved to a version that"
-              echo "carries it (the \`parent\` job above cut that version). After that"
-              echo "pin has rolled, start \`smoke\` in \`${OWNER}/estate\` by"
-              echo "\`workflow_dispatch\` naming no roll: it measures what is deployed."
-              echo "Before then, any verdict describes the PREVIOUS release."
-              echo "RELEASING AGAIN IS NOT THE REPAIR."
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::${OWNER}/estate was not asked for a verdict: $1"
-            exit 1
-          }
-
-          # NOT THE FAILURE ABOVE, and it must not borrow those words: that one
-          # knows the dispatch was never sent, this one knows only that no newer
-          # run id was READ. The reasoning is on this step; the text is written
-          # for somebody who will act on it without reading either.
-          unconfirmed() {
-            {
-              echo "### Released, but the verdict was not confirmed"
-              echo ""
-              echo "\`${module} ${VERSION}\` is released, signed and pullable."
-              echo "The dispatch was accepted, and then no new \`smoke\` run was"
-              echo "read in ${window}s. WHETHER ONE EXISTS IS NOT KNOWN FROM HERE."
-              echo ""
-              echo "The causes, in order: the event type no longer matches"
-              echo "\`smoke.yaml\`; that workflow is disabled in the Actions tab of"
-              echo "\`${OWNER}/estate\`; GitHub is behind and the run appeared after"
-              echo "this check stopped looking; or THE CONFIRMING READS THEMSELVES"
-              echo "FAILED — each one turns any error into 0, so a revoked token"
-              echo "or an Actions API blip longer than ${window}s reports exactly"
-              echo "like a missing run while a run sits queued."
-              echo ""
-              echo "SO OPEN THE ACTIONS TAB OF \`${OWNER}/estate\` FIRST. A smoke"
-              echo "run for **${module} v${VERSION}** there means this check was"
-              echo "wrong about whether a run exists. Then"
-              echo "Do not send one by hand for this release: nothing in this"
-              echo "workflow deploys it, so a run now measures the PREVIOUS release."
-              echo "Once the cluster's parent-chart pin carries it and has rolled,"
-              echo "start \`smoke\` by \`workflow_dispatch\` naming no roll."
-              echo "Either way it joins smoke's \`estate-smoke\` group, which queues"
-              echo "rather than running alongside, so a blind send while a real run"
-              echo "is already waiting risks losing a verdict rather than gaining"
-              echo "one."
-              echo ""
-              echo "Re-running is the heavier option and there is"
-              echo "no cheap form of it: this step is \`continue-on-error\`, so the"
-              echo "job concluded SUCCESS and **Re-run failed jobs** cannot reach"
-              echo "it. **Re-run all jobs** can, and that rebuilds and re-pushes"
-              echo "the image — moving \`:latest\` again and giving \`:${VERSION}\` a"
-              echo "digest nothing else is pinned to."
-              echo "For \`${module}\` it also buys nothing beyond that cost: the"
-              echo "replayed dispatch is refused or times out the same way."
-              echo "RELEASING AGAIN IS NOT THE REPAIR EITHER."
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::${OWNER}/estate: no smoke run confirmed in ${window}s, but one may exist — open the Actions tab of ${OWNER}/estate before repairing anything. See the job summary."
-            exit 1
-          }
-
-          if [ -z "${GH_TOKEN:-}" ]; then
-            fail "the estate-scoped App token could not be minted; see the step above."
-          fi
-
-          # STRICT ON THIS FIRST READ, LENIENT ON THE POLL BELOW, and the split
-          # is the difference between naming a cause and guessing one. If this
-          # token cannot list runs at all, every later read returns 0 as well
-          # and the timeout below would blame the event type or the default
-          # branch — the wrong cause, stated confidently, which is the defect
-          # this whole step exists to end. So a refusal HERE says so, and the
-          # dispatch is not sent: an event whose arrival cannot be confirmed is
-          # worse than one not sent, because it reports as sent. A blip DURING
-          # the poll is a different thing entirely — one missed sample of
-          # thirty, which the next sample covers. A blip lasting the WHOLE poll
-          # is neither, and unconfirmed() below is what says so.
-          err="$RUNNER_TEMP/estate_error.txt"
-          before=$(gh api "$runs" --jq '.workflow_runs[0].id // 0' 2>"$err") ||
-            fail "this token could not list smoke.yaml runs in ${OWNER}/estate ($(tr -d '\n' < "$err")). The dispatch was NOT sent: an arrival that cannot be confirmed would report as confirmed. Two usual causes, and the error above tells them apart: the actions: read grant on the token minted above, or — on a 404 — smoke.yaml being renamed or absent on the default branch of ${OWNER}/estate, which is the only copy this event can run."
-          case "$before" in '' | *[!0-9]*) before=0 ;; esac
-
-          # One JSON document built by jq, rather than nested bracket keys on the
-          # command line: this can only be tested by reading it, so it is written
-          # in the form that reads unambiguously.
-          if ! jq -n --arg m "$module" --arg t "v${VERSION}" --arg d "$DIGEST" \
-                 '{event_type:"module-rolled",client_payload:{module:$m,tag:$t,digest:$d}}' |
-            gh api -X POST "repos/${OWNER}/estate/dispatches" --input - >/dev/null; then
-            fail "the dispatch POST was refused."
-          fi
-
-          # The POST answered 204. Now find out whether anything listened. The
-          # count rises and the interval does not: a run that appears in five
-          # seconds is still confirmed in five seconds.
-          run_id=0
-          tries=30
-          window=$((tries * 5))
-          i=0
-          while [ "$i" -lt "$tries" ]; do
-            i=$((i + 1))
-            sleep 5
-            now=$(newest)
-            if [ "$now" -gt "$before" ]; then
-              run_id="$now"
-              break
-            fi
-          done
-
-          if [ "$run_id" -eq 0 ]; then
-            unconfirmed
-          fi
-
-          url="https://github.com/${OWNER}/estate/actions/runs/${run_id}"
-          echo "::notice::${OWNER}/estate accepted the roll: ${url}"
-          {
-            echo "### The estate was asked for a verdict"
-            echo ""
-            echo "\`${OWNER}/estate\` accepted \`module-rolled\` for"
-            echo "**${module} v${VERSION}** and created [run ${run_id}](${url})."
-            echo "Whether it finds a runner, and what it answers, shows on that run."
-          } >> "$GITHUB_STEP_SUMMARY"

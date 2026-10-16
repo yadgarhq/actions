@@ -836,7 +836,10 @@ def test_a_write_refused_three_times_names_the_ruleset():
     api.put_failures = 3
     text = refused(api)
     assert "bypass actor" in text
-    assert "argocd" in text
+    # argocd's rulesets carry `bypass_actors: []` since A-U6, so naming it as
+    # the precedent would send the operator to the wrong repository.
+    assert "argocd" not in text
+    assert "`always`" in text
 
 
 def test_a_tag_refused_for_any_other_reason_says_the_pin_is_committed():
@@ -925,13 +928,11 @@ def test_the_chart_token_is_its_own_mint_and_not_a_wider_one():
     """The separation ruling: this mint must not be able to write anywhere else.
 
     Widening it beyond `chart` would hand the token that pins the parent chart
-    write access to a repository it has no business touching. `deployment`'s
-    own mint, scoped to `estate`, makes the same call for the same reason.
+    write access to a repository it has no business touching.
     """
     mint = steps("parent")["app"]
     assert mint["with"]["repositories"] == "chart"
     assert mint["with"]["permission-contents"] == "write"
-    assert steps("deployment")["estate_app"]["with"]["repositories"] == "estate"
 
 
 def test_the_mint_is_the_same_pinned_action_as_every_other_one():
@@ -963,8 +964,8 @@ def test_a_module_release_with_no_release_app_reddens():
     """A published module chart the parent will never pin is a FAILURE, not a skip.
 
     Ledger 580's ruling on `ci-pr.yaml`'s own credential check, applied to the
-    same shape: work was done that cannot be delivered. The `deployment` job's
-    italic note is too quiet for this one, because ADR-0722 makes the parent the
+    same shape: work was done that cannot be delivered. A quiet note in the
+    summary is too quiet for this one, because ADR-0722 makes the parent the
     only thing an adopter installs.
     """
     assert cred("", "").returncode == 1
@@ -1043,9 +1044,9 @@ def test_the_job_is_bounded_so_a_wedged_read_cannot_hold_a_runner():
 def test_the_job_needs_the_chart_job_rather_than_the_image_job():
     """`yadgarhq/config` is a parent module with NO `Containerfile`.
 
-    Hanging this off the `deployment` job — which requires `needs.image.result ==
-    'success'` — would silently never bump the parent for `config`, which released
-    five times on the day this was written.
+    Hanging this off a job that requires `needs.image.result == 'success'` (the
+    retired `deployment` job's gate) would silently never bump the parent for
+    `config`, which released five times on the day this was written.
     """
     needs = workflow()["jobs"]["parent"]["needs"]
     assert "chart" in needs and "detect" in needs

@@ -40,12 +40,12 @@ consecutive tag-push runs (`v0.1.1` … `v0.1.5`) whose actor is
 `yadgarhq-bot[bot]`, each of them a successful release. ADR-0527's App is the one
 this uses, scoped to `chart` alone.
 
-A SECOND MINT RATHER THAN A WIDER FIRST ONE, decided in `ci-release.yaml` and
-recorded here because this file is what the token is for. Adding `chart` to the
-`argocd` mint would hand the token that pins the cluster's images write access to
-the chart repository, and hand this write path the power to rewrite every
-`versions/*.yaml`. The same argument the `estate` dispatch already makes for its
-own separate mint.
+A MINT OF ITS OWN, SCOPED TO `chart` ALONE, decided in `ci-release.yaml` and
+recorded here because this file is what the token is for. A token shared with any
+other write path would hand that path write access to the parent chart, and this
+one write access to wherever that path writes. (This compared itself with an
+`argocd` mint and an `estate` mint. Both are retired: ADR-0848, and ledger 675
+stage 7.)
 
 CONCURRENCY IS THE DEFECT THIS FILE IS SHAPED AROUND. Eight modules release
 independently and all eight rewrite ONE file, so a blind read-modify-write loses
@@ -72,8 +72,7 @@ separate mechanisms answer it, and they answer different halves:
 
 A RE-RUN MUST BE ABLE TO FINISH THE JOB, and that is what `recover` is for. The
 tag is cut and the module chart is published by the time this runs, so
-"release again" is not available as a repair — `ci-release.yaml` spends four
-lines forbidding it for the `argocd` write, for the same reason. The documented
+"release again" is not available as a repair: a cut tag is permanent. The documented
 repair is **Re-run failed jobs**, and it only works if a second run can tell
 "the pin is already committed and published" from "the pin is committed and the
 tag never happened". `parent_pin.pin` refuses an equal version outright and its
@@ -86,8 +85,8 @@ WHAT THIS DOES NOT CLASSIFY, said rather than asserted. A failed write is retrie
 whatever its cause, because every attempt re-reads the file first and is
 therefore safe to repeat; naming the HTTP status a stale sha produces would be a
 claim this repository cannot measure without writing to the parent chart, and a
-guessed cause stated confidently is the defect `ci-release.yaml`'s estate step
-spends a paragraph correcting. `Reference already exists` IS matched on its text,
+guessed cause stated confidently is the defect `ci-release.yaml`'s retired estate
+dispatch step spent a paragraph correcting. `Reference already exists` IS matched on its text,
 because `ci-pr.yaml` already records that string as what the live API puts on
 stderr for the tag race it handles.
 
@@ -422,9 +421,9 @@ def bump(gh, module, offered, repo):
         f"`{PATH}` in `{gh.owner}/{PARENT}` could not be written in {ATTEMPTS} "
         f"attempts; the last was refused with {error!r}. Every attempt re-read "
         "`main` first, so a lost race is not what is left — the usual "
-        f"cause is the `{BRANCH}` ruleset on `{gh.owner}/{PARENT}`, where the "
-        "release App has to be a bypass actor, exactly as it is on "
-        f"`{gh.owner}/argocd`."
+        f"cause is the `{BRANCH}` ruleset on `{gh.owner}/{PARENT}`, which "
+        "requires a pull request: check that the release App is still an "
+        "`always` bypass actor on it."
     )
 
 

@@ -736,19 +736,6 @@ def test_the_release_chart_gate_pins_the_digest_whenever_it_has_one():
     assert pin[0]["if"] == "needs.image.result == 'success'"
 
 
-def test_the_release_deployment_gate_is_the_reference_shape():
-    """Unchanged by ledger 729, and the shape `chart` was converged onto.
-
-    `deployment` writes a digest into `yadgarhq/argocd`, so it has never had a
-    legitimate no-image case: a repository with no `chart/` is not deployed by
-    the ApplicationSet at all.
-    """
-    import yaml
-
-    jobs = yaml.safe_load(CI_RELEASE.read_text(encoding="utf-8"))["jobs"]
-    assert "needs.image.result == 'success'" in jobs["deployment"]["if"]
-
-
 # ---------------------------------------------------------------------------
 # Ledger 685: what a text-only edit's skips have to be worth
 # ---------------------------------------------------------------------------
