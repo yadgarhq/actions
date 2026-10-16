@@ -1755,12 +1755,15 @@ jobs:
       # this job is what cuts the tag. HEAD-scoped it self-heals — the release is
       # delayed by one merge and the entries are picked up by the next.
       #
-      # BOTS ARE EXEMPT, and dependabot is not the load-bearing case. `yadgarhq/
-      # argocd` takes a commit per release from `ci-release.yaml`, written by the
-      # release App as `ci: <module> <version>` — one line, no sections. Without
-      # the exemption every release in the estate would redden argocd's main.
-      # Verified against argocd's history rather than assumed: those commits are
-      # authored by `yadgarhq-bot[bot]`.
+      # BOTS ARE EXEMPT, and dependabot is not the load-bearing case. The parent
+      # chart `yadgarhq/chart` takes a commit per module release from
+      # `parent_bump.py`, written by the release App as `ci: pin <module>
+      # <version> in the parent chart` — a subject plus a short prose body: no
+      # template sections and no Changelog bullet. Without the
+      # exemption every module release would redden chart's main. (`yadgarhq/
+      # argocd` took the same shape of commit from `ci-release.yaml` until
+      # ADR-0848 retired that write; its history still holds them.) Those
+      # commits are authored by `yadgarhq-bot[bot]`.
       #
       # WHAT IT CANNOT SEE, said here rather than implied away: an edit that
       # keeps the body parseable but changes what it means — `feat:` to `fix:`,

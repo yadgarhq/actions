@@ -309,8 +309,11 @@ def commit(gh, parent, changes, text):
     THE AUTHOR IS UNMEASURED, said rather than assumed. No `author` is sent, and
     GitHub documents that the commit then takes the authenticated identity — for
     an App installation token, the same `yadgarhq-bot[bot]` that `pr_body.BOT`
-    matches on the Contents API writes read off `yadgarhq/argocd`. No commit of
-    this shape exists in the estate yet to read it off.
+    matches on the Contents API writes read off the history of `yadgarhq/argocd`
+    (`ci-release.yaml` wrote them there until ADR-0848 retired that write). It
+    was then MEASURED on a commit of this shape: `yadgarhq/chart` bf1c41f, the
+    `ci: pin iam-db 0.10.2 in the parent chart` pin, is authored by
+    `yadgarhq-bot[bot] <324366854+yadgarhq-bot[bot]@users.noreply.github.com>`.
     """
     done = gh.call("api", gh.repo("git", "commits", parent), "--jq", ".tree.sha")
     if done.returncode != 0:

@@ -3,8 +3,10 @@
 
 LEDGER 735, and it has already cost an outage. Ledger 615 changed `iam`'s
 Service to `clusterIP: None`. `spec.clusterIP` is IMMUTABLE, and
-`argocd/applicationsets/modules.yaml` carries `syncOptions: [CreateNamespace=true]`
-and nothing else -- no `Replace`, no `ServerSideApply` -- so the sync failed and
+the modules ApplicationSet (`argocd/applicationsets/modules.yaml`, made inert by
+ADR-0786 and deleted under ADR-0848, argocd#66) carried `syncOptions: [CreateNamespace=true]` and nothing else, and its
+successor `argocd/applications/yadgar.yaml` carries the same option and nothing
+else -- no `Replace`, no `ServerSideApply` -- so the sync failed and
 kept failing. The Service had to be deleted by hand before Argo could recreate
 it, and roughly ninety seconds of logins failed while it did not exist. Nothing
 warned before the merge, so the next such change repeats it.
@@ -107,11 +109,11 @@ task-db -- and a check copied into six repositories is not a shared check, which
 is the lesson ledger 648 recorded when the ADR-0569 gate turned out to be five
 byte-identical copies.
 
-ONE FAITHFULNESS CAVEAT, MEASURED. The ApplicationSet injects `values:` this
-render does not see -- `autoscaling`, `sourceAddress`, `tls` and the four
-per-upstream dial blocks. None of them reaches a Service template today: the six
-`chart/templates/service.yaml` files read `.Chart.Name` and, in `gateway` alone,
-`.Values.service.port`, and the ApplicationSet sets no `service.port`. So the
+ONE FAITHFULNESS CAVEAT, MEASURED. The `yadgar` Application's `valuesObject` in
+`yadgarhq/argocd` injects values this render does not see -- values such as `autoscaling`,
+`sourceAddress`, `tls` and the per-upstream dial blocks. None of them reaches a
+Service template today: the `chart/templates/service.yaml` files read `.Chart.Name` and, in `gateway` alone,
+`.Values.service.port`, and that `valuesObject` sets no `service.port`. So the
 render is faithful for Services as of 2026-09-06. That is a measurement rather
 than a guarantee, and a value that one day reaches a Service would break it.
 
@@ -565,7 +567,7 @@ def procedure(
         f"`kubectl explain service.spec.{field}` says this field \"may not be "
         f'changed through updates unless the type field is also being changed to '
         f'ExternalName" -- and no chart here renders `spec.type`, so that escape '
-        f"clause is not available. `argocd/applicationsets/modules.yaml` syncs "
+        f"clause is not available. `argocd/applications/yadgar.yaml` syncs "
         f"with `CreateNamespace=true` alone -- no `Replace`, no "
         f"`ServerSideApply` -- so Argo CD either retries the rejection forever, "
         f"or, where the chart drops the field, leaves the live Service holding "
