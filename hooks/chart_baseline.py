@@ -17,7 +17,9 @@ answer was "a shared pre-commit gate, NOT a shared chart library", and this file
 is that gate. The library would also add a THIRD clock to a delivery path that
 already lands a chart from the module repo at HEAD and an image by digest from
 `argocd/versions/` — the plan's sharpest argument and the one a reader is most
-likely to skip.
+likely to skip. (That was the delivery path when the plan was written. ADR-0786
+replaced it with image digests pinned in the parent chart, and ADR-0848 retired
+the `versions/` writes.)
 
 WHY PUBLISHED RATHER THAN COPIED (ledger 648). The ADR-0569 gate lived as five
 md5-identical `repo: local` copies, and those five copies only ever checked the

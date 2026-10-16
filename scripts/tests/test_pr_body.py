@@ -230,10 +230,14 @@ def test_a_name_merely_containing_bot_is_not_exempt():
 
 
 def test_the_release_app_is_a_bot():
-    """`ci-release.yaml` writes a one-line commit per release into `argocd`.
+    """`parent_bump.py` writes a commit per module release into `chart`.
 
-    Verified against that repository's history rather than assumed. Without the
-    exemption every release in the estate would redden argocd's push to main.
+    It is a subject plus a short prose body: no template sections and no
+    Changelog bullet.
+
+    The same shape of commit was read off `argocd`'s history, where
+    `ci-release.yaml` wrote one per release until ADR-0848 retired that write.
+    Without the exemption every module release would redden chart's push to main.
     """
     author = "yadgarhq-bot[bot] <324366854+yadgarhq-bot[bot]@users.noreply.github.com>"
     assert pr_body.is_bot(author)

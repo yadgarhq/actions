@@ -393,8 +393,11 @@ def main():
     # THE ONE EXEMPTION, and it NAMES the author rather than reporting a bare
     # pass. A bot writes its own body and cannot be taught the template — the
     # pull-request check exempts `user.type == 'Bot'` for dependabot, and
-    # `ci-release.yaml` writes a one-line commit per release into `yadgarhq/
-    # argocd` as the release App. A skip nobody can attribute is the thing this
+    # `parent_bump.py` writes a commit per module release into the parent chart
+    # `yadgarhq/chart` as the release App: a subject plus a short prose body, with
+    # no template sections and no Changelog bullet. (`ci-release.yaml` wrote
+    # one into `yadgarhq/argocd` too until ADR-0848 retired that write.) A skip
+    # nobody can attribute is the thing this
     # gate exists to refuse, so the attribution is the output.
     if is_bot(author):
         finding = f"{subject} is bot-authored ({author}), which the template exempts."
