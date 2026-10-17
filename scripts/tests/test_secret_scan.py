@@ -156,8 +156,10 @@ def test_an_empty_range_is_refused_rather_than_passed(repo):
 # ---------------------------------------------------------------------------
 
 
-def run_script(repo, base, head):
+def run_script(repo, base, head, path=None):
     env = _git_env()
+    if path is not None:
+        env["PATH"] = path
     env["BASE_SHA"] = base
     env["HEAD_SHA"] = head
     env.pop("GITHUB_STEP_SUMMARY", None)
@@ -174,8 +176,12 @@ def test_a_committed_token_reddens_the_scan(repo):
 
     result = run_script(repo, base, head)
 
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert fake_token() not in result.stdout + result.stderr  # redacted
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    # Exit 1 alone is not proof: an uncaught exception exits 1 too, which is
+    # how this test once passed on a runner with no gitleaks at all.
+    assert "RuleID:" in output and "github-pat" in output, output
+    assert fake_token() not in output  # redacted
 
 
 def test_a_clean_range_passes(repo):
@@ -223,3 +229,19 @@ def test_a_refusal_exits_2(repo):
 
     assert result.returncode == 2
     assert "0 commits" in result.stderr
+
+
+def test_a_missing_gitleaks_is_refused_not_reported_as_a_leak(repo, tmp_path_factory):
+    """Exit 1 means "leaks found". A runner without the binary must not
+    produce that code, nor any green: it is refused with exit 2."""
+    base = git(repo, "rev-parse", "HEAD")
+    git(repo, "checkout", "-q", "-b", "feature")
+    head = commit(repo, "a.txt", "clean\n", "clean")
+    bindir = tmp_path_factory.mktemp("bin")
+    (bindir / "git").symlink_to(subprocess.run(
+        ["which", "git"], capture_output=True, text=True, check=True).stdout.strip())
+
+    result = run_script(repo, base, head, path=str(bindir))
+
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "gitleaks" in result.stderr

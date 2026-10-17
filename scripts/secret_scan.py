@@ -103,11 +103,16 @@ def main() -> int:
         with open(summary, "a", encoding="utf-8") as handle:
             handle.write(f"gitleaks: {plan.note}.\n")
 
-    result = subprocess.run(
-        ["gitleaks", "git", "--redact", "--no-banner", "--verbose",
-         "--exit-code", "1", f"--log-opts={plan.log_opts}", "."],
-        cwd=cwd, env=_env(),
-    )
+    try:
+        result = subprocess.run(
+            ["gitleaks", "git", "--redact", "--no-banner", "--verbose",
+             "--exit-code", "1", f"--log-opts={plan.log_opts}", "."],
+            cwd=cwd, env=_env(),
+        )
+    except FileNotFoundError:
+        # Not exit 1: that code means "leaks found", and a traceback exits 1.
+        print("::error::secret scan refused: gitleaks is not on PATH", file=sys.stderr)
+        return 2
     return result.returncode
 
 
