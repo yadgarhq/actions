@@ -239,10 +239,11 @@ jobs:
       # `--pre-commit --staged`, the index, and `pre-commit/action` stages
       # nothing, so it reported "no leaks found" over zero bytes on every pull
       # request. This is the scan: the commits the pull request adds,
-      # `base..head`, against the caller's own `.gitleaks.toml` and
-      # `.gitleaksignore`. `scripts/secret_scan.py` holds the range logic and
-      # refuses a scan of zero commits. Staged from a second checkout as the
-      # trivy gate is; this repository reads its own copy.
+      # `base..head`, merge resolutions included, against the BASE branch's
+      # `.gitleaks.toml` and `.gitleaksignore` (ledger 1536: a pull request
+      # cannot allowlist its own leak). `scripts/secret_scan.py` holds the
+      # logic and refuses a scan of zero commits. Staged from a second checkout
+      # as the trivy gate is; this repository reads its own copy.
       - if: github.repository != 'yadgarhq/actions'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
