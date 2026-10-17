@@ -729,3 +729,57 @@ def test_both_readers_reach_the_gate_by_name():
     """
     text = (REPO / ".github" / "workflows" / "ci-pr.yaml").read_text()
     assert text.count('python3 "$dir/pr_body.py"') == 2
+
+
+# ---------------------------------------------------------------------------
+# Ledger 1518: a bullet inside an HTML comment is the template's EXAMPLE, not an
+# entry. `sections` already dropped comments for the pull-request gate; the
+# derivation's reader, `commit_entries`, did not, so a commented `feat!:` example
+# cut a spurious minor (chart v0.24.0).
+# ---------------------------------------------------------------------------
+
+
+def test_commit_entries_ignores_a_single_line_comment_bullet():
+    lines = ["<!-- - feat!: an example -->", "- fix: the real one"]
+    entries, matches, lenient = pr_body.commit_entries(lines)
+    assert entries == ["- fix: the real one"]
+    assert pr_body.bump_for(matches) == "patch"
+    assert len(lenient) == 1
+
+
+def test_commit_entries_ignores_a_multi_line_comment_bullet():
+    lines = [
+        "## Changelog",
+        "",
+        "<!--",
+        "  One bullet per change, e.g.",
+        "  - feat!: an example",
+        "-->",
+        "- fix: the real one",
+    ]
+    entries, matches, _ = pr_body.commit_entries(lines)
+    assert entries == ["- fix: the real one"]
+    assert pr_body.bump_for(matches) == "patch"
+
+
+def test_commit_entries_still_counts_a_bullet_outside_a_comment():
+    lines = ["<!-- - feat!: an example -->", "- feat: a real feature"]
+    entries, matches, _ = pr_body.commit_entries(lines)
+    assert entries == ["- feat: a real feature"]
+    assert pr_body.bump_for(matches) == "minor"
+
+
+def test_commit_entries_ignores_everything_after_an_unterminated_comment():
+    lines = ["- fix: the real one", "<!-- never closed", "- feat!: swallowed"]
+    entries, matches, _ = pr_body.commit_entries(lines)
+    assert entries == ["- fix: the real one"]
+    assert pr_body.bump_for(matches) == "patch"
+
+
+def test_sections_drops_an_unterminated_comment_to_the_end():
+    found = pr_body.sections("## Changelog\n\n- fix: x\n<!-- open\n- feat!: y\n")
+    assert [l for l in found["Changelog"] if l.strip()] == ["- fix: x"]
+
+
+def test_strip_comments_is_non_greedy():
+    assert pr_body.strip_comments("a<!-- x -->b<!-- y -->c") == "abc"

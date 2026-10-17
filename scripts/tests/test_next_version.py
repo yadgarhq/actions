@@ -617,3 +617,14 @@ def test_head_already_released_stays_a_green_skip_in_the_workflow():
     block = steps()["g"]["run"]
     assert "exit 1" not in block
     assert "::error::" not in block
+
+
+def test_a_commented_template_example_does_not_move_the_release():
+    """Ledger 1518: chart v0.24.0 was a spurious minor from a commented `feat!`."""
+    body = (
+        "<!--\n  e.g.\n  - feat!: an example\n-->\n"
+        "- fix: the real change"
+    )
+    verdict = call(last="v1.2.3", tags=("v1.2.3",), messages=[message(body)])
+    assert verdict.nxt == "1.2.4"
+    assert verdict.entries == ["- fix: the real change"]
