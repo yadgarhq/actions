@@ -729,3 +729,90 @@ def test_both_readers_reach_the_gate_by_name():
     """
     text = (REPO / ".github" / "workflows" / "ci-pr.yaml").read_text()
     assert text.count('python3 "$dir/pr_body.py"') == 2
+
+
+# ---------------------------------------------------------------------------
+# Ledger 1518: a bullet inside an HTML comment is the template's EXAMPLE, not an
+# entry. `sections` already dropped comments for the pull-request gate; the
+# derivation's reader, `commit_entries`, did not, so a commented `feat!:` example
+# cut a spurious minor (chart v0.24.0).
+# ---------------------------------------------------------------------------
+
+
+def test_commit_entries_ignores_a_single_line_comment_bullet():
+    lines = ["<!-- - feat!: an example -->", "- fix: the real one"]
+    entries, matches, lenient = pr_body.commit_entries(lines)
+    assert entries == ["- fix: the real one"]
+    assert pr_body.bump_for(matches) == "patch"
+    assert len(lenient) == 1
+
+
+def test_commit_entries_ignores_a_multi_line_comment_bullet():
+    lines = [
+        "## Changelog",
+        "",
+        "<!--",
+        "  One bullet per change, e.g.",
+        "  - feat!: an example",
+        "-->",
+        "- fix: the real one",
+    ]
+    entries, matches, _ = pr_body.commit_entries(lines)
+    assert entries == ["- fix: the real one"]
+    assert pr_body.bump_for(matches) == "patch"
+
+
+def test_commit_entries_still_counts_a_bullet_outside_a_comment():
+    lines = ["<!-- - feat!: an example -->", "- feat: a real feature"]
+    entries, matches, _ = pr_body.commit_entries(lines)
+    assert entries == ["- feat: a real feature"]
+    assert pr_body.bump_for(matches) == "minor"
+
+
+def test_a_comment_opener_in_a_code_span_does_not_drop_a_later_feat_bang():
+    """An unterminated opener must NOT swallow the rest: the bump would under-report."""
+    lines = ["- fix: strip `<!--` openers", "- feat!: drop v1"]
+    entries, matches, _ = pr_body.commit_entries(lines)
+    assert entries == ["- fix: strip `<!--` openers", "- feat!: drop v1"]
+    assert pr_body.bump_for(matches) == "major"
+    problems, bump, count = pr_body.review(
+        "## What\n\nx\n\n## Why\n\nx\n\n## Verification\n\nx\n\n"
+        "## Risk\n\nx\n\n## Changelog\n\n"
+        "- fix: strip `<!--` openers\n- feat!: drop v1\n",
+        False,
+    )
+    assert (problems, bump, count) == ([], "major", 2)
+
+
+def test_sections_keeps_later_headings_after_an_unterminated_opener():
+    found = pr_body.sections("## A\n\n```\n<!--\n```\n\n## B\n\ntext\n")
+    assert "B" in found
+
+
+def test_strip_comments_leaves_an_unterminated_opener_alone():
+    assert pr_body.strip_comments("a <!-- b") == "a <!-- b"
+
+
+def test_review_judges_wrapping_over_the_comment_stripped_text():
+    """Ledger 687: `review` and `commit_entries` must feed `looks_wrapped` alike."""
+    long_comment = "<!-- " + "x" * 100 + " -->"
+    body = (
+        "subject\n" + long_comment + "\n## What\n\nx\n\n## Why\n\nx\n\n"
+        "## Changelog\n\n- fix: a\n\n## Verification\n\nx\n\n## Risk\n\nx\n"
+    )
+    stripped = pr_body.strip_comments(body)
+    assert pr_body.looks_wrapped(pr_body.body_lines(stripped)) != pr_body.looks_wrapped(
+        pr_body.body_lines(body)
+    )
+    seen = []
+    real = pr_body.looks_wrapped
+    pr_body.looks_wrapped = lambda lines, *a, **k: seen.append(list(lines)) or real(lines, *a, **k)
+    try:
+        pr_body.review(body, True)
+    finally:
+        pr_body.looks_wrapped = real
+    assert all(long_comment not in "\n".join(l) for l in seen)
+
+
+def test_strip_comments_is_non_greedy():
+    assert pr_body.strip_comments("a<!-- x -->b<!-- y -->c") == "abc"

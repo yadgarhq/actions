@@ -135,6 +135,21 @@ def is_wrap_continuation(previous, line, width=WRAP):
     return len(previous) + 1 + len(words[0]) > width
 
 
+# AN HTML COMMENT, TERMINATED ONLY. The template's guidance and its example
+# bullets sit inside comments, and a `- feat!:` example there is not an entry.
+# Ledger 1518: `commit_entries` read every line of the squash commit message,
+# comments included, so a commented example cut a spurious minor (`chart`
+# v0.24.0). An UNTERMINATED opener is deliberately NOT stripped to the end of the
+# text: a code span such as `<!--` in a bullet would then swallow every later
+# bullet, and a `feat!` lost that way under-bumps the release with no error.
+COMMENT = re.compile(r"<!--.*?-->", re.S)
+
+
+def strip_comments(text):
+    """`text` with every terminated HTML comment removed."""
+    return COMMENT.sub("", text or "")
+
+
 def body_lines(message):
     """A commit message's lines, the squash SUBJECT dropped.
 
@@ -191,6 +206,9 @@ def commit_entries(lines):
     touched carries whole bullets on single lines, and joining into those would
     append text the author deliberately put on a line of its own.
     """
+    # LEDGER 1518: comments go BEFORE anything is judged, wrappedness included,
+    # so a long commented line cannot colour `looks_wrapped` either.
+    lines = strip_comments("\n".join(lines)).splitlines()
     absorb = looks_wrapped(lines)
     entries, matches, lenient = [], [], []
     previous, open_entry = None, False
@@ -244,7 +262,7 @@ def sections(text):
     required section starts a new section, so that section collects nothing and
     reads as empty. Sub-structure belongs in bold lead-ins.
     """
-    stripped = re.sub(r"<!--.*?-->", "", text or "", flags=re.S)
+    stripped = strip_comments(text)
     found, current = {}, None
     for line in stripped.splitlines():
         heading = re.match(r"^\s*#{1,6}\s+(.+?)\s*$", line)
@@ -368,7 +386,7 @@ def review(text, wrapped):
         # is true, the squash SUBJECT dropped by `body_lines` — see its
         # docstring. `text` carries no subject at all in the unwrapped case
         # (a pull request body), so `body_lines` is never reached there.
-        absorb = wrapped and looks_wrapped(body_lines(text or ""))
+        absorb = wrapped and looks_wrapped(body_lines(strip_comments(text)))
         bad, lenient = changelog_entries(lines, wrapped, absorb=absorb)
         _, strict = changelog_entries(lines, wrapped)
         if bad:
