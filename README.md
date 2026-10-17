@@ -76,11 +76,11 @@ a `run:` block is a shell injection — the exact class `zizmor` audits for.
 
 ## Security scanning
 
-| Where               | What                                                                                                                                                                                 |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| every PR            | `gitleaks` (full history), `zizmor` (workflow audit), `trivy fs` (deps, secrets), `trivy config` on the rendered chart (misconfig, ledger 1150), `cargo-deny` (advisories, licences) |
-| every release       | `trivy image` on the published digest, plus an SBOM                                                                                                                                  |
-| base images, weekly | the same, scanned hardest — a CVE there is a CVE in sixty-one images                                                                                                                 |
+| Where               | What                                                                                                                                                                                                                       |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| every PR            | `gitleaks` (the commits the PR adds, `base..head`; ledger 1532), `zizmor` (workflow audit), `trivy fs` (deps, secrets), `trivy config` on the rendered chart (misconfig, ledger 1150), `cargo-deny` (advisories, licences) |
+| every release       | `trivy image` on the published digest, plus an SBOM                                                                                                                                                                        |
+| base images, weekly | the same, scanned hardest — a CVE there is a CVE in sixty-one images                                                                                                                                                       |
 
 **The image scan targets the digest that was just pushed**, not the source tree.
 The filesystem scan on a PR catches dependency problems early; only the artifact
