@@ -135,17 +135,18 @@ def is_wrap_continuation(previous, line, width=WRAP):
     return len(previous) + 1 + len(words[0]) > width
 
 
-# AN HTML COMMENT, and an UNTERMINATED one runs to the end of the text. The
-# template's own guidance and its example bullets sit inside comments, and a
-# `- feat!:` example there is not an entry. Ledger 1518: `commit_entries` read
-# every line of the squash commit message, comments included, so a commented
-# example cut a spurious minor (`chart` v0.24.0). GitHub renders an unclosed
-# `<!--` as swallowing the rest of the document, so this does too.
-COMMENT = re.compile(r"<!--.*?(?:-->|\Z)", re.S)
+# AN HTML COMMENT, TERMINATED ONLY. The template's guidance and its example
+# bullets sit inside comments, and a `- feat!:` example there is not an entry.
+# Ledger 1518: `commit_entries` read every line of the squash commit message,
+# comments included, so a commented example cut a spurious minor (`chart`
+# v0.24.0). An UNTERMINATED opener is deliberately NOT stripped to the end of the
+# text: a code span such as `<!--` in a bullet would then swallow every later
+# bullet, and a `feat!` lost that way under-bumps the release with no error.
+COMMENT = re.compile(r"<!--.*?-->", re.S)
 
 
 def strip_comments(text):
-    """`text` with every HTML comment removed, an unterminated one included."""
+    """`text` with every terminated HTML comment removed."""
     return COMMENT.sub("", text or "")
 
 
@@ -385,7 +386,7 @@ def review(text, wrapped):
         # is true, the squash SUBJECT dropped by `body_lines` — see its
         # docstring. `text` carries no subject at all in the unwrapped case
         # (a pull request body), so `body_lines` is never reached there.
-        absorb = wrapped and looks_wrapped(body_lines(text or ""))
+        absorb = wrapped and looks_wrapped(body_lines(strip_comments(text)))
         bad, lenient = changelog_entries(lines, wrapped, absorb=absorb)
         _, strict = changelog_entries(lines, wrapped)
         if bad:

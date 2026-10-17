@@ -769,16 +769,49 @@ def test_commit_entries_still_counts_a_bullet_outside_a_comment():
     assert pr_body.bump_for(matches) == "minor"
 
 
-def test_commit_entries_ignores_everything_after_an_unterminated_comment():
-    lines = ["- fix: the real one", "<!-- never closed", "- feat!: swallowed"]
+def test_a_comment_opener_in_a_code_span_does_not_drop_a_later_feat_bang():
+    """An unterminated opener must NOT swallow the rest: the bump would under-report."""
+    lines = ["- fix: strip `<!--` openers", "- feat!: drop v1"]
     entries, matches, _ = pr_body.commit_entries(lines)
-    assert entries == ["- fix: the real one"]
-    assert pr_body.bump_for(matches) == "patch"
+    assert entries == ["- fix: strip `<!--` openers", "- feat!: drop v1"]
+    assert pr_body.bump_for(matches) == "major"
+    problems, bump, count = pr_body.review(
+        "## What\n\nx\n\n## Why\n\nx\n\n## Verification\n\nx\n\n"
+        "## Risk\n\nx\n\n## Changelog\n\n"
+        "- fix: strip `<!--` openers\n- feat!: drop v1\n",
+        False,
+    )
+    assert (problems, bump, count) == ([], "major", 2)
 
 
-def test_sections_drops_an_unterminated_comment_to_the_end():
-    found = pr_body.sections("## Changelog\n\n- fix: x\n<!-- open\n- feat!: y\n")
-    assert [l for l in found["Changelog"] if l.strip()] == ["- fix: x"]
+def test_sections_keeps_later_headings_after_an_unterminated_opener():
+    found = pr_body.sections("## A\n\n```\n<!--\n```\n\n## B\n\ntext\n")
+    assert "B" in found
+
+
+def test_strip_comments_leaves_an_unterminated_opener_alone():
+    assert pr_body.strip_comments("a <!-- b") == "a <!-- b"
+
+
+def test_review_judges_wrapping_over_the_comment_stripped_text():
+    """Ledger 687: `review` and `commit_entries` must feed `looks_wrapped` alike."""
+    long_comment = "<!-- " + "x" * 100 + " -->"
+    body = (
+        "subject\n" + long_comment + "\n## What\n\nx\n\n## Why\n\nx\n\n"
+        "## Changelog\n\n- fix: a\n\n## Verification\n\nx\n\n## Risk\n\nx\n"
+    )
+    stripped = pr_body.strip_comments(body)
+    assert pr_body.looks_wrapped(pr_body.body_lines(stripped)) != pr_body.looks_wrapped(
+        pr_body.body_lines(body)
+    )
+    seen = []
+    real = pr_body.looks_wrapped
+    pr_body.looks_wrapped = lambda lines, *a, **k: seen.append(list(lines)) or real(lines, *a, **k)
+    try:
+        pr_body.review(body, True)
+    finally:
+        pr_body.looks_wrapped = real
+    assert all(long_comment not in "\n".join(l) for l in seen)
 
 
 def test_strip_comments_is_non_greedy():
