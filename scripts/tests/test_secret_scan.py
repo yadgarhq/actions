@@ -424,3 +424,56 @@ def test_no_base_ignores_the_heads_config_and_ignore_file(repo):
                   f"{leak}:config.env:github-pat:1\n", "ignore it")
 
     assert_red(run_script(repo, "", head))
+
+
+# ---------------------------------------------------------------------------
+# The base config itself must not reach back into the pull request's tree.
+# ---------------------------------------------------------------------------
+
+
+def base_with_config(repo, config):
+    commit(repo, ".gitleaks.toml", config, "base config")
+    base = git(repo, "rev-parse", "HEAD")
+    git(repo, "checkout", "-q", "-b", "feature")
+    head = commit(repo, "config.env", leak_line(), "leak")
+    return base, head
+
+
+@pytest.mark.parametrize("path", [".gitleaks-extra.toml", "/etc/gitleaks.toml"])
+def test_a_base_config_with_extend_path_is_refused(repo, path):
+    """gitleaks resolves `[extend] path` against the process cwd — the pull
+    request's working tree — so the PR could rewrite the extended file."""
+    base, head = base_with_config(repo, f'[extend]\npath = "{path}"\n')
+    # The attack: the pull request supplies the extended file, rules off.
+    head = commit(repo, ".gitleaks-extra.toml", NEUTER, "extended file, no rules")
+
+    result = run_script(repo, base, head)
+
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "[extend] path" in result.stderr
+
+
+def test_a_base_config_with_only_use_default_scans_normally(repo):
+    base, head = base_with_config(repo, "[extend]\nuseDefault = true\n")
+
+    assert_red(run_script(repo, base, head))
+
+
+def test_a_base_config_that_is_not_toml_is_refused(repo):
+    base, head = base_with_config(repo, "this is = = not toml\n")
+
+    result = run_script(repo, base, head)
+
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert ".gitleaks.toml" in result.stderr
+
+
+def test_a_config_gitleaks_cannot_load_exits_2_not_1(repo):
+    """Valid TOML that gitleaks refuses (FTL, exit 1 — the leaks-found
+    code) must not read as a finding, nor as a pass."""
+    base, head = base_with_config(repo, '[[rules]]\nid = "x"\n')
+
+    result = run_script(repo, base, head)
+
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "could not load its config" in result.stderr

@@ -43,6 +43,8 @@ CONFIG RESOLUTION, in full and in this order — nothing else is consulted:
      `--config`; `git show BASE:.gitleaksignore` if present, else an empty
      file, always passed as `--gitleaks-ignore-path`.
   2. no usable base: the `useDefault` file and an empty ignore file.
+  A base config with `[extend] path` is refused (gitleaks resolves that path
+  against the pull request's working tree); `[extend] useDefault` is allowed.
   `GITLEAKS_*` variables are stripped from gitleaks' environment, and the scan
   source is the git directory, so neither gitleaks' environment lookup nor its
   implicit `<source>/.gitleaks.toml` / `.gitleaksignore` discovery can reach a
@@ -54,6 +56,9 @@ IT NEVER PASSES HAVING SCANNED NOTHING, which is the defect being fixed:
     history of head is scanned instead, and the summary says so
   - a range of zero commits -> refused, exit 2
   - no gitleaks binary -> refused, exit 2 (exit 1 means "leaks found")
+  - a base config that is not TOML, sets `[extend] path`, or that gitleaks
+    cannot load (an FTL line, which gitleaks reports as exit 1) -> refused,
+    exit 2
 
 Output is always redacted. Environment: BASE_SHA, HEAD_SHA; GITHUB_STEP_SUMMARY
 when present.
@@ -62,9 +67,11 @@ when present.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -147,7 +154,29 @@ def stage_config(cwd: Path, trusted: str, into: Path) -> tuple[Path, Path]:
             shown = _git(cwd, "show", f"{trusted}:{name}")
             if shown.returncode == 0:
                 target.write_text(shown.stdout, encoding="utf-8")
+        check_config(config.read_text(encoding="utf-8"))
     return config, ignore
+
+
+def check_config(text: str) -> None:
+    """Refuse a base config that is not TOML or that names `[extend] path`.
+
+    gitleaks 8.30.1 resolves `[extend] path` against the process cwd, which is
+    the pull request's working tree, so a base config extending a relative
+    file would let the pull request rewrite that file and switch its own scan
+    off. An absolute path is refused too: one rule, no judgement about which
+    paths a pull request can reach. `[extend] useDefault` alone is allowed.
+    """
+    try:
+        parsed = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise Refused(f"the base branch's .gitleaks.toml is not valid TOML: {exc}") from exc
+    extend = parsed.get("extend")
+    if isinstance(extend, dict) and "path" in extend:
+        raise Refused(
+            "the base branch's .gitleaks.toml sets [extend] path; gitleaks resolves it "
+            "against the pull request's working tree, so the pull request could rewrite "
+            "it. Inline the extended rules, or use [extend] useDefault = true only")
 
 
 def main() -> int:
@@ -174,20 +203,37 @@ def main() -> int:
         return 2
 
     with tempfile.TemporaryDirectory() as tmp:
-        config, ignore = stage_config(cwd, plan.trusted, Path(tmp))
+        try:
+            config, ignore = stage_config(cwd, plan.trusted, Path(tmp))
+        except Refused as exc:
+            print(f"::error::secret scan refused: {exc}", file=sys.stderr)
+            return 2
         try:
             result = subprocess.run(
                 ["gitleaks", "git", "--redact", "--no-banner", "--verbose",
                  "--exit-code", "1", "--ignore-gitleaks-allow",
                  f"--config={config}", f"--gitleaks-ignore-path={ignore}",
                  f"--log-opts={plan.log_opts}", gitdir],
-                cwd=cwd, env=_env(),
+                cwd=cwd, env=_env(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True,
             )
         except FileNotFoundError:
             # Not exit 1: that code means "leaks found", and a traceback exits 1.
             print("::error::secret scan refused: gitleaks is not on PATH", file=sys.stderr)
             return 2
+    print(result.stdout, end="")
+    # gitleaks exits 1 on a config it cannot load (an FTL line), the same code
+    # as "leaks found". Neither is true then, so refuse rather than report.
+    if result.returncode == 1 and " FTL " in _plain(result.stdout):
+        print("::error::secret scan refused: gitleaks could not load its config "
+              "(FTL above); nothing was scanned", file=sys.stderr)
+        return 2
     return result.returncode
+
+
+def _plain(text: str) -> str:
+    """`text` without ANSI colour codes, which gitleaks wraps its levels in."""
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
 
 if __name__ == "__main__":
