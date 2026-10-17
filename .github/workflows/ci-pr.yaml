@@ -235,6 +235,38 @@ jobs:
           curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
             | sudo tar -xz -C /usr/local/bin gitleaks
 
+      # LEDGER 1532. THE gitleaks HOOK SCANS NOTHING HERE: its entry is
+      # `--pre-commit --staged`, the index, and `pre-commit/action` stages
+      # nothing, so it reported "no leaks found" over zero bytes on every pull
+      # request. This is the scan: the commits the pull request adds,
+      # `base..head`, merge resolutions included, against the BASE branch's
+      # `.gitleaks.toml` and `.gitleaksignore` (ledger 1536: a pull request
+      # cannot allowlist its own leak). `scripts/secret_scan.py` holds the
+      # logic and refuses a scan of zero commits. Staged from a second checkout
+      # as the trivy gate is; this repository reads its own copy.
+      - if: github.repository != 'yadgarhq/actions'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: yadgarhq/actions
+          ref: main
+          path: .ci-actions
+
+      - name: scan the commits this pull request adds for secrets
+        env:
+          UNDER_REVIEW: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          src=scripts/secret_scan.py
+          if [ "$UNDER_REVIEW" != "yadgarhq/actions" ]; then
+            src=.ci-actions/scripts/secret_scan.py
+          fi
+          cp "$src" "$RUNNER_TEMP/secret_scan.py"
+          rm -rf .ci-actions
+          python3 "$RUNNER_TEMP/secret_scan.py"
+
       - name: install hadolint
         env:
           HADOLINT_VERSION: 2.14.0

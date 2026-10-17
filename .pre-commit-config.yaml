@@ -35,6 +35,8 @@ repos:
 
   - repo: local
     hooks:
+      # Local-only, as the published copy: CI's secret scan is
+      # `scripts/secret_scan.py` in ci-pr.yaml (ledger 1532).
       - id: gitleaks
         name: Detect secrets and credentials
         language: system

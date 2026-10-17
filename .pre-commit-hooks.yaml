@@ -88,6 +88,15 @@
 # Force-pushing does not scrub GitHub history — PR refs pin every commit and are
 # never collected — so a credential that lands in a repository means deleting and
 # recreating it. Prevention is the only cheap point on that timeline.
+#
+# A LOCAL-ONLY GUARD (ledger 1532). `--staged` scans the index, which is the
+# commit being made on a developer's machine and EMPTY on a CI runner, where
+# `pre-commit run --all-files` stages nothing: there this hook passes having
+# scanned zero bytes. CI's scan is a separate step in `ci-pr.yaml`'s precommit
+# job, `scripts/secret_scan.py`, over the commits the pull request adds. The
+# entry stays staged rather than detecting CI, because a hook cannot see the
+# pull request's base and a history scan here would re-scan old commits on
+# every local commit.
 - id: gitleaks
   name: Detect secrets and credentials
   language: system
