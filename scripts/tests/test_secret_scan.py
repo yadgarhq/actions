@@ -167,8 +167,9 @@ def test_an_empty_range_is_refused_rather_than_passed(repo):
 # ---------------------------------------------------------------------------
 
 
-def run_script(repo, base, head, path=None):
+def run_script(repo, base, head, path=None, extra_env=None):
     env = _git_env()
+    env.update(extra_env or {})
     if path is not None:
         env["PATH"] = path
     env["BASE_SHA"] = base
@@ -387,3 +388,39 @@ def test_an_inline_gitleaks_allow_comment_is_ignored(repo):
                   f"TOKEN={fake_token()}  # gitleaks" + ":allow\n", "leak")
 
     assert_red(run_script(repo, base, head))
+
+
+NEUTER = "[extend]\nuseDefault = false\n"  # no rules at all
+
+
+def test_a_pull_requests_gitleaks_toml_with_no_rules_does_not_neuter_the_scan(repo):
+    """Implicit discovery: gitleaks reads `<source>/.gitleaks.toml` when no
+    config is given. A PR-tree file switching the defaults off must not apply."""
+    base = git(repo, "rev-parse", "HEAD")
+    git(repo, "checkout", "-q", "-b", "feature")
+    commit(repo, ".gitleaks.toml", NEUTER, "no rules")
+    head = commit(repo, "config.env", leak_line(), "leak")
+
+    assert_red(run_script(repo, base, head))
+
+
+@pytest.mark.parametrize("variable", ["GITLEAKS_CONFIG", "GITLEAKS_CONFIG_TOML"])
+def test_a_gitleaks_config_in_the_environment_is_not_honoured(repo, tmp_path_factory, variable):
+    base = git(repo, "rev-parse", "HEAD")
+    git(repo, "checkout", "-q", "-b", "feature")
+    head = commit(repo, "config.env", leak_line(), "leak")
+    neuter = tmp_path_factory.mktemp("cfg") / "neuter.toml"
+    neuter.write_text(NEUTER, encoding="utf-8")
+    value = str(neuter) if variable == "GITLEAKS_CONFIG" else NEUTER
+
+    assert_red(run_script(repo, base, head, extra_env={variable: value}))
+
+
+def test_no_base_ignores_the_heads_config_and_ignore_file(repo):
+    """The fallback has no trusted tree: defaults, no ignore file."""
+    leak = commit(repo, "config.env", leak_line(), "leak")
+    commit(repo, ".gitleaks.toml", NEUTER, "no rules")
+    head = commit(repo, ".gitleaksignore",
+                  f"{leak}:config.env:github-pat:1\n", "ignore it")
+
+    assert_red(run_script(repo, "", head))

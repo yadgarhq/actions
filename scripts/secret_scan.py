@@ -37,6 +37,17 @@ the original re-runs. When there is no usable base (the whole-history fallback
 below) there is no trusted tree at all, so defaults apply and no ignore file is
 read: fail closed.
 
+CONFIG RESOLUTION, in full and in this order — nothing else is consulted:
+  1. base usable: `git show BASE:.gitleaks.toml` if present, else a file holding
+     `[extend] useDefault = true` (gitleaks' built-in rules), always passed as
+     `--config`; `git show BASE:.gitleaksignore` if present, else an empty
+     file, always passed as `--gitleaks-ignore-path`.
+  2. no usable base: the `useDefault` file and an empty ignore file.
+  `GITLEAKS_*` variables are stripped from gitleaks' environment, and the scan
+  source is the git directory, so neither gitleaks' environment lookup nor its
+  implicit `<source>/.gitleaks.toml` / `.gitleaksignore` discovery can reach a
+  file the pull request controls.
+
 IT NEVER PASSES HAVING SCANNED NOTHING, which is the defect being fixed:
   - no head, or a head this clone does not hold  -> refused, exit 2
   - no base, an all-zero base, or a base this clone does not hold -> the whole
@@ -81,7 +92,11 @@ class Plan:
 def _env() -> dict[str, str]:
     # `GIT_*` stripped so a `GIT_DIR` inherited from an outer `git commit` (the
     # pytest-scripts hook) cannot point git at the wrong repository.
-    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    # `GITLEAKS_*` stripped too (`GITLEAKS_CONFIG`, `GITLEAKS_CONFIG_TOML`):
+    # `--config` already outranks them, and stripping keeps that true if the
+    # precedence ever changes.
+    return {k: v for k, v in os.environ.items()
+            if not k.startswith("GIT_") and not k.startswith("GITLEAKS_")}
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
