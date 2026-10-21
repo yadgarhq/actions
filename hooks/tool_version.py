@@ -6,8 +6,8 @@ LEDGER 1756 S3, ADR-0983. Usage, as a `language: script` hook entry:
     hooks/tool_version.py <tool> [-- <command> <args>...]
 
 `<tool>` is one of gitleaks, hadolint, actionlint, cargo-deny. The wrapper asks
-that tool for its version, compares it with `versions.yaml`, and refuses on any
-difference. When the versions agree it replaces itself with `<command>` and every
+that tool for its version and refuses unless it is the tool's `version` in
+`versions.yaml` or one of its `accept` entries. When the version is accepted it replaces itself with `<command>` and every
 argument after it, so the filenames pre-commit appends reach the tool. With no
 `--`, it only checks (`hooks/actionlint.sh` uses it that way).
 
@@ -18,14 +18,29 @@ repository at the consumer's `rev`, so that file is the pin at the consumer's
 entry runs from the consumer's tree and cannot find the clone, which is why the
 four hooks are scripts.
 
-WHY THIS CAN TURN A CONSUMER RED, AND WHY THAT IS RIGHT. CI installs each tool
-from `versions.yaml` at the commit of `yadgarhq/actions` that is running
-(ADR-0981); this checks the `rev` the consumer pins. ADR-0983 keeps the two equal:
-a hook-asserted version moves on `main` only after every consumer has adopted a
-`rev` that accepts it. A refusal here means a developer's binary, or a staged
-bump, is out of step, and a green tick would otherwise mean two things.
+TWO COMMITS, AND `accept` IS WHAT LETS THEM DIFFER. CI installs each tool's
+`version` from `versions.yaml` at the commit of `yadgarhq/actions` that is
+running, which for a consumer calling `ci-pr.yaml@main` is `main` (ADR-0981).
+This hook checks the file at the `rev` the consumer pins. The two commits
+differ whenever a consumer is behind. Without `accept`, the first bump of any
+of these tools on `main` would red every consumer not yet on a `rev` with the
+new `version`, which is the red ADR-0983 exists to prevent. So a bump is two
+steps (the header of `versions.yaml` carries the rule):
 
-EXACT EQUALITY, AND ONE MEASURED SHAPE PER TOOL. The version line of each tool,
+  1. accept: a release adds the new version to the tool's `accept`, and the
+     ADR-0982 fan-out lands that `rev` in every consumer. CI still installs
+     the old `version`, which every `rev` accepts.
+  2. move: only then does `main` change `version` to the new one and delete
+     it from `accept`. CI installs the new version, which every adopted `rev`
+     accepts.
+
+A refusal here means the developer's binary, or a consumer's `rev`, is out of
+step with that rule.
+
+NOT ENFORCED HERE, deferred to S5/S6: refusing step 2 while a consumer is still
+behind. That needs the fan-out's adoption report, which does not exist yet.
+
+EXACT EQUALITY with an accepted version, AND ONE MEASURED SHAPE PER TOOL. The version line of each tool,
 measured on the release artefacts at the pinned versions:
 
     gitleaks version       8.30.1
@@ -33,8 +48,10 @@ measured on the release artefacts at the pinned versions:
     actionlint -version    1.7.12            (first of three lines)
     cargo deny --version   cargo-deny 0.20.2
 
-Any other shape is refused with the raw output, rather than guessed at: a
-`-no-git` suffix or a `v` prefix is a build this pin did not measure.
+Any other shape is refused with the raw output, rather than guessed at: a `v`
+prefix or a `-dirty` suffix is a build this pin did not measure. One exception:
+hadolint built from a source tarball (no git metadata) prints a literal
+`-no-git` after its version, and that suffix alone is tolerated for hadolint.
 
 `cargo deny`, NOT `cargo-deny`. The hook runs `cargo deny`, and cargo resolves
 that subcommand from `$CARGO_HOME/bin` before `$PATH`. Asking `cargo-deny` on
@@ -75,7 +92,7 @@ TOOLS = {
     ),
     "hadolint": (
         ["hadolint", "--version"],
-        re.compile(rf"^Haskell Dockerfile Linter {DOTTED}$"),
+        re.compile(rf"^Haskell Dockerfile Linter {DOTTED}(?:-no-git)?$"),
         "https://github.com/hadolint/hadolint/releases/tag/v{version}",
     ),
     "actionlint": (
@@ -107,15 +124,18 @@ def how_to_install(tool, expected):
     return "Install it: " + TOOLS[tool][2].format(version=expected)
 
 
-def expected_version(tool):
+def expected_versions(tool):
+    """(the pinned `version`, the further versions under `accept`)."""
+    path = ROOT / "versions.yaml"
     try:
-        outputs = tool_versions.read(ROOT / "versions.yaml")
+        outputs = tool_versions.read(path)
+        extra = tool_versions.accepted(path)
     except tool_versions.ReadError as error:
         raise Refused(f"cannot read the pinned {tool} version: {error}") from error
     key = tool.replace("-", "_")
     if key not in outputs:
-        raise Refused(f"{ROOT / 'versions.yaml'} pins no version for {tool}")
-    return outputs[key]
+        raise Refused(f"{path} pins no version for {tool}")
+    return outputs[key], extra.get(tool, ())
 
 
 def missing(binary, tool, expected):
@@ -155,15 +175,19 @@ def installed_version(tool, expected):
 
 
 def check(tool):
-    expected = expected_version(tool)
+    expected, accept = expected_versions(tool)
     found = installed_version(tool, expected)
-    if found != expected:
-        raise Refused(
-            f"{tool} is {found}, expected {expected}.\n"
-            f"{where_the_pin_comes_from(tool, expected)}\n"
-            f"{how_to_install(tool, expected)}\n"
-            "CI installs the same version, from versions.yaml (ADR-0981, ADR-0983)."
-        )
+    if found == expected or found in accept:
+        return
+    also = f" (this rev also accepts {', '.join(accept)})" if accept else ""
+    raise Refused(
+        f"{tool} is {found}, expected {expected}{also}.\n"
+        f"{where_the_pin_comes_from(tool, expected)}\n"
+        f"{how_to_install(tool, expected)}\n"
+        "CI installs `version` from versions.yaml at the yadgarhq/actions commit it "
+        "runs, usually main, which may be newer than this rev; a version moves on "
+        "main only after every repository's rev accepts it (ADR-0981, ADR-0983)."
+    )
 
 
 def main(argv):

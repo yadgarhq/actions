@@ -86,8 +86,8 @@
 #
 # VERSION-ASSERTED (ledger 1756 S3, ADR-0983), like gitleaks, hadolint and
 # actionlint below: `hooks/tool_version.py` refuses a binary whose version is
-# not the one `versions.yaml` pins at the `rev` a repository uses, and a
-# missing one. That is why these four are `language: script` rather than
+# neither the `version` nor an `accept` entry in `versions.yaml` at the `rev` a
+# repository uses, and a missing one. `versions.yaml` says how a bump moves. That is why these four are `language: script` rather than
 # `system`: a script runs from pre-commit's clone of this repository at that
 # `rev`, so `versions.yaml` sits beside it. A system entry cannot see the clone.
 - id: cargo-deny

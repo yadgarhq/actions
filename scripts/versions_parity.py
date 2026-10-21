@@ -14,7 +14,8 @@ pin; `stable` and `3.x` are refused as floating. Sites outside the workflows
 (gate scripts, hook definitions, Containerfiles) stay literals and must equal
 the canonical value. For the tools in `SHA256_REQUIRED`, `versions.yaml` must
 carry a 64-hex `sha256`; `scripts/tests/test_tool_installs.py` proves the
-install steps check it.
+install steps check it. Only the tools in `HOOK_ASSERTED` may carry `accept`
+(ADR-0983); a site is still judged against `version`, never against `accept`.
 
 `versions.yaml` at the repository root is the canonical list. Each tool in it has
 a `version` and a `sites` count: the number of places this repository pins it
@@ -85,6 +86,9 @@ READ_IN_WORKFLOWS = {
 # These are downloaded as artefacts; `versions.yaml` carries their sha256.
 SHA256_REQUIRED = ("gitleaks", "hadolint", "actionlint", "cargo-deny")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
+# `hooks/tool_version.py` asserts these, and reads their `accept` list
+# (ledger 1756 S3, ADR-0983). `accept` on any other tool is a promise nothing keeps.
+HOOK_ASSERTED = ("gitleaks", "hadolint", "actionlint", "cargo-deny")
 
 
 def env(key):
@@ -292,6 +296,11 @@ def check(root):
                 "64 lowercase hex characters from the upstream checksum file"
             )
     for name, entry in tools.items():
+        if isinstance(entry, dict) and "accept" in entry and name not in HOOK_ASSERTED:
+            problems.append(
+                f"{MANIFEST}: {name} carries `accept`, but no hook asserts {name}; only "
+                f"{', '.join(HOOK_ASSERTED)} may list extra accepted versions"
+            )
         if isinstance(entry, dict) and "unpinned" in entry:
             problems.append(
                 f"{MANIFEST}: {name} carries `unpinned`; there is no allowance for an "

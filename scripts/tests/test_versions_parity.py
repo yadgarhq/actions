@@ -410,3 +410,15 @@ def test_a_version_copied_into_the_hook_wrapper_is_a_new_site_and_refused(tree, 
     path.write_text(path.read_text() + f'\n{key}: "{want}"\n')
     problems = versions_parity.check(tree)
     assert any(tool in p and "sites" in p for p in problems), problems
+
+
+def test_accept_on_a_hook_asserted_tool_passes_the_gate(tree):
+    rewrite(tree, "versions.yaml", 'gitleaks: { version: "8.30.1", sites: 2,', 'gitleaks: { version: "8.30.1", sites: 2, accept: ["8.31.0"],')
+    assert versions_parity.check(tree) == []
+
+
+def test_accept_on_a_tool_no_hook_asserts_is_refused(tree):
+    """Only a hook reads `accept`; on any other tool it would be a promise nothing keeps."""
+    rewrite(tree, "versions.yaml", 'helm: { version: "3.18.4", sites: 6 }', 'helm: { version: "3.18.4", sites: 6, accept: ["3.19.0"] }')
+    problems = versions_parity.check(tree)
+    assert any("helm" in p and "accept" in p for p in problems), problems

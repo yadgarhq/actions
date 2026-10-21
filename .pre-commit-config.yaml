@@ -37,10 +37,12 @@ repos:
     hooks:
       # Local-only, as the published copy: CI's secret scan is
       # `scripts/secret_scan.py` in ci-pr.yaml (ledger 1532).
+      # The published entry (.pre-commit-hooks.yaml), so this repository's
+      # own commits get the same version check (ledger 1756 S3).
       - id: gitleaks
         name: Detect secrets and credentials
-        language: system
-        entry: gitleaks git --pre-commit --staged --verbose
+        language: script
+        entry: hooks/tool_version.py gitleaks -- gitleaks git --pre-commit --staged --verbose
         pass_filenames: false
       # Workflows reaching every repository deserve a linter. actionlint catches
       # the expression and context errors that otherwise surface as a failed run

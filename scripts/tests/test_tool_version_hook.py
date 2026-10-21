@@ -55,10 +55,13 @@ REAL_OUTPUT = {
 }
 
 
-def versions_yaml(versions):
+def versions_yaml(versions, accept=None):
     lines = ["tools:"]
     for name, version in versions.items():
-        lines.append(f'  {name}: {{ version: "{version}", sites: 1, sha256: "{SHA}" }}')
+        extra = ""
+        if accept and name in accept:
+            extra = ", accept: [" + ", ".join(f'"{v}"' for v in accept[name]) + "]"
+        lines.append(f'  {name}: {{ version: "{version}", sites: 1, sha256: "{SHA}"{extra} }}')
     return "\n".join(lines) + "\n"
 
 
@@ -229,7 +232,9 @@ def test_a_near_miss_is_not_a_match(clone, tool, near_miss):
         ("gitleaks", ""),
         ("gitleaks", "v8.30.1\n"),
         ("gitleaks", "gitleaks version 8.30.1\n"),
-        ("hadolint", "Haskell Dockerfile Linter 2.14.0-no-git\n"),
+        ("hadolint", "Haskell Dockerfile Linter 2.14.0-dirty\n"),
+        ("hadolint", "Haskell Dockerfile Linter 2.14.0-no-git-no-git\n"),
+        ("gitleaks", "8.30.1-no-git\n"),
         ("hadolint", "2.14.0\n"),
         ("actionlint", "\n1.7.12\n"),
         ("actionlint", "actionlint 1.7.12\n"),
@@ -416,3 +421,71 @@ def test_actionlint_sh_still_prints_the_bare_entry_sentence_when_absent(actionli
     result = run_actionlint_sh(actionlint_clone)
     assert result.returncode == 1
     assert "Executable `actionlint` not found" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# ADR-0983 step 1, "accept": a rev also accepts the versions under `accept`.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("tool", sorted(PINNED))
+def test_a_version_listed_under_accept_passes(clone, tool):
+    nxt = {"gitleaks": "8.31.0", "hadolint": "2.15.0", "actionlint": "1.7.13", "cargo-deny": "0.21.0"}[tool]
+    (clone / "actions" / "versions.yaml").write_text(versions_yaml(PINNED, {tool: [nxt]}))
+    shaped = REAL_OUTPUT[tool].replace(PINNED[tool], nxt, 1)
+    install_real(clone, tool, stdout=shaped)
+    result = run(clone, tool)
+    assert result.returncode == 0, result.stderr
+    # The pinned version itself still passes beside it.
+    install_real(clone, tool)
+    assert run(clone, tool).returncode == 0
+
+
+def test_a_version_neither_pinned_nor_accepted_is_refused_naming_both(clone):
+    (clone / "actions" / "versions.yaml").write_text(versions_yaml(PINNED, {"gitleaks": ["8.31.0"]}))
+    install_real(clone, "gitleaks", stdout="8.29.0\n")
+    result = run(clone, "gitleaks")
+    assert result.returncode == 1
+    assert "8.30.1" in result.stderr and "8.31.0" in result.stderr and "8.29.0" in result.stderr
+
+
+@pytest.mark.parametrize("near_miss", ["8.31.00\n", "8.31\n", "8.31.0.1\n"])
+def test_a_near_miss_of_an_accepted_version_is_refused(clone, near_miss):
+    (clone / "actions" / "versions.yaml").write_text(versions_yaml(PINNED, {"gitleaks": ["8.31.0"]}))
+    install_real(clone, "gitleaks", stdout=near_miss)
+    assert run(clone, "gitleaks").returncode == 1
+
+
+def test_a_malformed_accept_is_refused_by_the_hook(clone):
+    (clone / "actions" / "versions.yaml").write_text(versions_yaml(PINNED, {"gitleaks": ["8.30.1"]}))
+    install_real(clone, "gitleaks")
+    result = run(clone, "gitleaks")
+    assert result.returncode == 1
+    assert "accept" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# hadolint built from a source tarball prints a literal `-no-git` suffix.
+# ---------------------------------------------------------------------------
+
+
+def test_hadolint_with_a_literal_no_git_suffix_is_read_as_its_version(clone):
+    install_real(clone, "hadolint", stdout="Haskell Dockerfile Linter 2.14.0-no-git\n")
+    assert run(clone, "hadolint").returncode == 0
+    install_real(clone, "hadolint", stdout="Haskell Dockerfile Linter 2.12.0-no-git\n")
+    result = run(clone, "hadolint")
+    assert result.returncode == 1 and "2.12.0" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# This repository's own gitleaks hook goes through the same wrapper.
+# ---------------------------------------------------------------------------
+
+
+def test_the_local_gitleaks_hook_matches_the_published_one():
+    config = yaml.safe_load((REPO / ".pre-commit-config.yaml").read_text())
+    local = [h for r in config["repos"] if r["repo"] == "local" for h in r["hooks"]]
+    gitleaks = next(h for h in local if h["id"] == "gitleaks")
+    published = published_hooks()["gitleaks"]
+    assert gitleaks["language"] == published["language"] == "script"
+    assert gitleaks["entry"] == published["entry"]

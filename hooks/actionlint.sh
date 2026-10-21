@@ -80,9 +80,9 @@ if ! command -v actionlint >/dev/null 2>&1; then
   exit 1
 fi
 
-# LEDGER 1756 S3, ADR-0983: the version must be the one versions.yaml pins at
-# the `rev` of yadgarhq/actions this repository uses, which is the checkout
-# this file sits in. hooks/tool_version.py says why, and refuses with the
+# LEDGER 1756 S3, ADR-0983: the version must be one versions.yaml pins or
+# accepts at the `rev` of yadgarhq/actions this repository uses, which is the
+# checkout this file sits in. hooks/tool_version.py says why, and refuses with the
 # expected and found versions. It runs BEFORE the probe, so a wrong version is
 # named as that rather than as a probe failure.
 python3 "${BASH_SOURCE[0]%/*}/tool_version.py" actionlint || exit 1
