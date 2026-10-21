@@ -1,0 +1,189 @@
+# Every yadgarhq repo carries pre-commit (D59). Hook failure is signal, not
+# obstacle: fix the cause and re-stage. Never --no-verify.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: check-yaml
+        # Helm templates are Go templates that HAPPEN to look like YAML —
+        # `{{- toYaml ... }}` is a syntax error to any real parser. Excluding
+        # them is not lowering the bar: `helm lint` and `helm template` are the
+        # checks that actually apply, and they run in CI.
+        exclude: ^chart/templates/
+      - id: check-toml
+
+  # Shared, from yadgarhq/actions (D62). IMMUTABLE rev: pre-commit caches a rev
+  # at first install and never re-resolves it, so a moving tag would silently
+  # freeze each machine at whatever it meant the day it first ran.
+  - repo: https://github.com/yadgarhq/actions
+    # THE REV MOVES FROM v1.20.1 TO v1.22.0 FOR THE `chart-baseline` ID BELOW,
+    # and the whole block comes with it because pre-commit resolves one rev per
+    # repository entry. `git diff --stat v1.20.1 v1.22.0 -- hooks/
+    # .pre-commit-hooks.yaml` is 1901 insertions and 0 deletions, touching only
+    # the new `hooks/chart_baseline.py` and the two manifest entries that
+    # publish it — so no hook already in this block changes behaviour. A second
+    # `repo:` entry pinning the same repository at a second rev was the
+    # alternative, and it is the drift the shared manifest exists to prevent.
+    # THE REV MOVES FROM v1.22.0 TO v1.31.0 FOR TWO IDS THIS PR NEEDS TOGETHER
+    # (ledger 965, 1278, ADR-0845): `no-compiled-in-defaults` widens to the
+    # shapes C-A1 added (a `None` arm beside an env read, a bare `DEFAULT_*`
+    # name, a presence check against `Some("...")`, `EnvFilter::new`, a
+    # config-key lookup chained into `unwrap_or*`); `helm-lint` (C-A2) reads
+    # `chart/ci/values.yaml` when present and passes it to both `helm lint
+    # --strict` and `helm template`, which this PR's chart needs now that
+    # `task.tls.enabled`, `iam.tls.enabled`, `project.tls.enabled` and
+    # `credentialCache.ttlSeconds` are schema-`required` with no default.
+    #
+    # `git diff --stat v1.22.0 v1.31.0 -- hooks/ .pre-commit-hooks.yaml` also
+    # touches `boot_reads_watched.py`, `no_test_skips.py` and
+    # `observe_coverage.py` — all three IDs this block already runs — but
+    # every one of those commits (#89, #95, #96, #101) is a bugfix tightening
+    # an existing check, and this tree's full pre-commit run at the new rev is
+    # green, so none of the three changes this repository's verdict.
+    rev: v1.31.0
+    hooks:
+      - id: gitleaks
+      - id: prettier
+        exclude: ^(chart/templates/|proto/)
+      - id: hadolint
+      # Every repository here carries workflows, and until this hook was
+      # published nothing linted them. It REFUSES rather than passes when
+      # actionlint's shellcheck rule class is not running: actionlint silently
+      # disables that whole class when the binary is absent, and "Passed, having
+      # checked nothing" is the defect the guard closes.
+      - id: actionlint
+      - id: cargo-fmt
+      - id: cargo-clippy
+      # LEDGER 659, and the largest adoption in the estate: this repository was
+      # over the FILE ceiling on nine files and over the FUNCTION ceiling on five
+      # when the ids were added. It is under both now, on real seams, and the PR
+      # that did it records each one. Adopting a limit already breached would
+      # have meant starting with an exemption list, which is how a limit stops
+      # meaning anything.
+      #
+      # `cargo-clippy-complexity` was NOT clean here, unlike in the four sibling
+      # repositories that adopted before this one: four functions in
+      # `src/invalidate.rs` were over cognitive complexity 25 on the tree this
+      # branch started from. That is the case the pair exists for — a line count
+      # cannot see nesting, and cognitive complexity cannot see a 2000-line file
+      # of short functions.
+      #
+      # THE REV BUMP TO v1.18.3 IS LOAD-BEARING HERE, and in the four sibling
+      # repositories that adopted before this one it was not. v1.18.3 exempts a
+      # file NAMED `tests.rs`/`test.rs` that carries a real `#[test]`; v1.18.2
+      # measures one as production. Measured 2026-09-09 with each rev's own
+      # `hooks/complexity.py` over `git ls-files '*.rs'`:
+      #
+      #   - `src/http/tests.rs` was ALREADY 2626 lines on main, so the v1.18.2
+      #     script fails on this repository's PRE-EXISTING layout, before this
+      #     branch changes anything.
+      #   - `src/attest/tests.rs` is 1047 lines of unit tests moved out of
+      #     `src/attest.rs` by this branch, and v1.18.2 fails on that too.
+      #   - the finished tree exits 0 under v1.18.3 and 1 under v1.18.2. Those
+      #     are the script's own codes, from invoking it directly on the file
+      #     list; `complexity.py` ends `return 1 if problems else 0` and can
+      #     return nothing else. A run that pipes the list through `xargs`
+      #     reports 123, which is xargs' code for a nonzero child rather than
+      #     anything the hook said.
+      #
+      # `git diff --stat v1.18.2 v1.18.3` is `hooks/complexity.py` and its test
+      # file and nothing else, so no other hook in this block changes behaviour.
+      - id: complexity
+      - id: cargo-clippy-complexity
+      - id: cargo-deny
+      - id: observe-coverage
+      - id: helm-lint
+      # ADR-0569's gate (ledger 648), now shared instead of the byte-identical
+      # copy this repository carried at scripts/no_compiled_in_defaults.sh.
+      # Publishing let the sweep run against repositories the copy never
+      # covered; converting this repository's OWN reference changes no verdict
+      # here (see PR body).
+      - id: no-compiled-in-defaults
+      # LEDGER 658. Adopted though it checks nothing today: the largest `run:`
+      # block outside yadgarhq/actions is 303 bytes against an 8000-byte limit,
+      # and this repository measures 0. It is a tripwire for a block someone
+      # writes later, not a fix for anything present now.
+      - id: run-block-size
+      # LEDGER 734, adopting ledger 726's gate: a file read at boot is marked
+      # ADR-0523-WATCHED naming a src/rotate.rs material, or ADR-0523-UNWATCHED
+      # with a reason. This repository had never run it before this PR.
+      - id: boot-reads-watched
+      - id: no-test-skips
+      # LEDGER 511, and this repository now adopts BOTH halves ADR-0685 split
+      # that gate into. `chart-baseline` asserts the three fields that are
+      # properties of the chart's own pod spec: the grace period against
+      # ADR-0601's floor, a dedicated ServiceAccount with no API token, and a
+      # hostname topology spread carrying `ScheduleAnyway` so it cannot hang a
+      # roll. `chart-network-policy` asserts the fourth, that a template declares
+      # `kind: NetworkPolicy`. ADR-0577 makes a published hook inert until a
+      # repository references it, so these two lines are what enforce those four
+      # here.
+      #
+      # `chart-network-policy` IS NOW REFERENCED, AND THIS BLOCK USED TO SAY THE
+      # OPPOSITE. It read that the hook was deliberately absent and that the
+      # absence was the whole mechanism, because this repository's ingress policy
+      # lived only in `yadgarhq/deploy` as
+      # `infra/network-policies/gateway-ingress.yaml`. THAT COPY IS UNCHANGED FOR
+      # NOW and stays where ADR-0685 placed it, but not as a resting state:
+      # ADR-0774 owes an ordered train that retires it once this chart's render
+      # is proved live.
+      #
+      # WHAT CHANGED IS THAT THIS CHART NOW RENDERS ONE TOO, for an adopter, and
+      # ADR-0774 is what authorises it. That decision supersedes ADR-0685's
+      # placement clause on the operator's ruling of 2026-09-22, which postdates
+      # ADR-0685 and names this object. It does NOT argue the coupling-locality
+      # objection away: a values-supplied `from` never defeated it, and the cost
+      # is accepted with its price named. `templates/networkpolicy.yaml` carries
+      # the argument in full. ADR-0685's gate split stands and is not an
+      # exemption mechanism — this repository simply now has a chart-local policy
+      # for the half to judge.
+      #
+      # Measured on this tree at v1.22.0: chart-baseline 1 chart, 1 judged, 29
+      # assertions evaluated, 0 findings; chart-network-policy 1 chart, 1 judged,
+      # 1 assertion evaluated, 0 findings. Both halves carry floors —
+      # `MINIMUM_CHARTS`, `MINIMUM_ASSERTIONS` and a `judged == charts` check — so
+      # a half that examined nothing is red rather than green.
+      - id: chart-baseline
+      - id: chart-network-policy
+
+  # LOCAL, because it is this repository's own content assertion rather than a rule
+  # the estate shares. Until this hook the chart was covered by `helm lint --strict`
+  # and the two shared `chart-*` hooks alone — none of which asserts what the chart
+  # RENDERS — so `scripts/tests/` is this chart's first content assertion and this
+  # line is what makes it run. The Rust suites in `tests/` that read `chart/` read
+  # its VALUES as text; none of them renders the chart, and a policy's correctness
+  # is a property of the rendered object.
+  #
+  # INSIDE THE MERGE GATE. `ci-pr.yaml`'s `passed` job lists `precommit` in its
+  # `needs`, and the ruleset on `main` requires the check `ci / passed`, so a red
+  # case here blocks the merge rather than reporting beside it.
+  #
+  # `language: python` rather than `system`, so pre-commit provisions the
+  # interpreter, pytest and PyYAML. PYYAML IS FOR THE SUBJECT AS WELL AS THE SUITE:
+  # every case there parses a `helm template` render. Both pins match
+  # `yadgarhq/platform`'s and `yadgarhq/iam-db`'s copies of this block.
+  #
+  # HELM IS NOT PROVISIONED BY THIS HOOK and the suite does not skip without it — it
+  # fails, naming helm (ADR-0650). `ci-pr.yaml`'s `precommit` job installs helm
+  # v3.18.4 before it runs pre-commit, and the suite is measured on that version and
+  # on 4.3.0.
+  #
+  # `always_run` with `pass_filenames: false`, and `files:` is omitted rather than
+  # written as documentation: a hook filtered on `^scripts/` reports `Skipped`, exit
+  # 0, on a pull request that changes only `chart/values.yaml` — which is exactly the
+  # pull request whose rendered instance this suite exists to check.
+  - repo: local
+    hooks:
+      - id: pytest-scripts
+        name: pytest scripts/tests
+        language: python
+        additional_dependencies: ["pytest==9.1.1", "pyyaml==6.0.3"]
+        entry: pytest scripts/tests/ -q
+        pass_filenames: false
+        always_run: true

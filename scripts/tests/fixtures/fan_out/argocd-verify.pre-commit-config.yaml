@@ -1,0 +1,17 @@
+# argocd-verify had no pre-commit until ledger 675 stage 3 (A-U9), so
+# "actionlint via pre-commit" had nothing to run. Every file this repository
+# ships that a machine reads is a workflow, so actionlint is the one hook.
+#
+# THE SHARED HOOK FROM yadgarhq/actions, at estate's rev. IMMUTABLE rev:
+# pre-commit caches a rev at first install and never re-resolves it. The hook
+# REFUSES rather than passes when actionlint's shellcheck rule class is not
+# running (actionlint drops it silently when it cannot find shellcheck). It reads
+# `.github/actionlint.yaml` for the `argocd-verify` runner label.
+#
+# NO CI RUNS THIS. This repository has no `ci.yaml`; run it by hand before a
+# push: `pre-commit run --all-files`. Never --no-verify.
+repos:
+  - repo: https://github.com/yadgarhq/actions
+    rev: v1.20.1
+    hooks:
+      - id: actionlint

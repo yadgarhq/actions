@@ -1,0 +1,77 @@
+# Every yadgarhq repo carries pre-commit (D59). Hook failure is signal, not
+# obstacle: fix the cause and re-stage. Never --no-verify.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      # No exclusions. The services exclude `chart/templates/` because a Helm
+      # template is a Go template that only looks like YAML; there is no chart
+      # here, so every YAML in this repository is real YAML.
+      - id: check-yaml
+      - id: check-toml
+
+  # Shared, from yadgarhq/actions (D62). IMMUTABLE rev: pre-commit caches a rev
+  # at first install and never re-resolves it, so a moving tag would silently
+  # freeze each machine at whatever it meant the day it first ran.
+  - repo: https://github.com/yadgarhq/actions
+    rev: v1.20.1
+    hooks:
+      - id: gitleaks
+      - id: prettier
+      # A CONSUMER IS NOT LINTED UNTIL IT REFERENCES THE HOOK, which is why this
+      # line exists rather than being inherited. This repository has a
+      # `.github/workflows/` and nothing read it: `ci-pr.yaml` installs the
+      # `actionlint` binary unconditionally and `yadgarhq/actions` publishes the
+      # hook, but publication makes a check AVAILABLE rather than switching it on
+      # (ledger 620, ADR-0577).
+      #
+      # The hook REFUSES rather than passes when actionlint's shellcheck rule
+      # class is not running: actionlint silently disables that whole class when
+      # the binary is absent, and "Passed, having checked nothing" is the defect
+      # the guard closes rather than a state this check may report.
+      - id: actionlint
+      - id: cargo-fmt
+      - id: cargo-clippy
+      # The two complexity gates, adopted on day one rather than once something
+      # is already over the line: 500 lines a file and 120 a function, plus
+      # clippy's nesting and branching lints, which measure what a line count
+      # cannot. Starting a repository with an exemption list is how a ceiling
+      # stops meaning anything.
+      - id: complexity
+      - id: cargo-clippy-complexity
+      - id: cargo-deny
+      # KEPT, though it currently finds nothing to check: the client implements
+      # no tonic service and registers no HTTP routes, so there are no handlers
+      # here and the hook passes trivially. It stays because the day one appears
+      # is exactly the day nobody would think to add it (D67).
+      - id: observe-coverage
+      # ADR-0569's gate (ledger 648), published in v1.15.0. This repository
+      # never carried the byte-identical local copy the five service
+      # repositories did, so this is a plain new-id adoption.
+      - id: no-compiled-in-defaults
+      # LEDGER 658. Adopted though it checks nothing today: the largest `run:`
+      # block outside yadgarhq/actions is 303 bytes against an 8000-byte limit,
+      # and this repository measures 0. It is a tripwire for a block someone
+      # writes later, not a fix for anything present now.
+      - id: run-block-size
+      # LEDGER 837, and worth being plain about what it actually catches: a
+      # skip marker, an unsatisfiable `cfg`, an environment-probe guard as a
+      # test's first statement, a narrowed `cargo test`/pytest invocation, or
+      # a captured run whose exit code is thrown away. ADR-0577 again — a
+      # published hook nobody references gates nothing, and this is the
+      # reference that makes it gate this repository. The same rev bump also
+      # carries v1.19.0's `observe-coverage` tightening, which this
+      # repository's own hook run shows refuses nothing here.
+      - id: no-test-skips
+
+  # NOT `hadolint` and NOT `helm-lint`, and their absence is a fact about this
+  # repository rather than a relaxation: the first matches `types: [dockerfile]`
+  # and the second `files: ^chart/`, and this repository ships a wheel rather
+  # than an image or a chart, so both would be permanently inert. A hook that can
+  # never fire is indistinguishable from one that is broken.

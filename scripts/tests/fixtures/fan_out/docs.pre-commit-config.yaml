@@ -1,0 +1,98 @@
+# Every yadgarhq repo carries pre-commit (D59). Hook failure is signal, not
+# obstacle: fix the cause and re-stage. Never --no-verify.
+#
+# This repo is prose, so it carries the baseline plus the one gate that prose
+# needs: `adr/` is an EXPORT of the yadgar ADR ledger, and an export drifts.
+# There is still no contract to gate.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: check-yaml
+      - id: check-json
+      - id: check-toml
+
+  # Shared, from yadgarhq/actions (D62) — this was a near-identical local block
+  # in every repository until the shared definition existed.
+  # IMMUTABLE rev, unlike the @v1 the workflow caller pins. pre-commit caches a
+  # rev at first install and never re-resolves it — "mutable references are never
+  # updated after first install and are not supported" — so a moving tag here
+  # would silently freeze each machine at whatever v1 meant the day it first ran.
+  # GitHub Actions re-resolves @v1 every run; pre-commit does not. Bump with
+  # `pre-commit autoupdate`.
+
+  - repo: https://github.com/yadgarhq/actions
+    rev: v1.20.1
+    hooks:
+      - id: gitleaks
+      - id: prettier
+      # No Containerfile here yet; the hook is a no-op until one arrives, which is
+      # cheaper than remembering to add it on the day it does.
+      - id: hadolint
+      # This repository carries workflows and nothing linted them until now. The
+      # hook REFUSES rather than passes when actionlint's shellcheck rule class is
+      # not running: actionlint silently disables that whole class when the binary
+      # is absent, and "Passed, having checked nothing" is the defect it closes.
+      - id: actionlint
+      - id: no-test-skips
+
+  # THE adr/ EXPORT, WHICH IS THE ONE THING IN THIS REPOSITORY THAT DRIFTS.
+  # `adr/` is a copy of the yadgar ADR ledger, and the ledger is a local
+  # database nothing in CI can reach. It fell thirteen entries behind before
+  # anybody noticed, which is why these are hooks rather than a habit.
+  #
+  # HOOKS RATHER THAN A CI JOB, and that is the STRONGER placement here rather
+  # than the weaker one. The usual objection — a pre-commit hook protects only
+  # whoever installed it — does not apply: the shared `ci-pr.yaml` in
+  # yadgarhq/actions runs `pre-commit/action` with NO SKIP LIST, so every hook
+  # declared here also runs on every pull request. A separate job would be a
+  # second definition of clean, kept in agreement by hand; a new top-level job
+  # in ci.yaml would also report under a check name the ruleset does not
+  # require, so it would run and block nothing.
+  #
+  # WHAT IT CANNOT DO, stated so nobody reads more into a green run: `check`
+  # verifies the export is internally consistent and matches adr/LEDGER-HEAD.
+  # It cannot verify the export is CURRENT, because it cannot reach the ledger —
+  # and adr/LEDGER-HEAD is written by the export itself, so this comparison has
+  # one export run on both sides of it. That is how adr/ fell eight entries
+  # behind with this hook green throughout (ledger 744, ADR-0600).
+  #
+  # The currency assertion is `check --input <ledger dump>`, and it is
+  # deliberately NOT wired here: producing a dump means reading the ledger, and
+  # neither CI nor a bare `git commit` can. A hook that needed the ledger would
+  # be skipped exactly where it cannot run, which is ADR-0578's defect. It runs
+  # instead in the session that files an ADR. See adr/README.md.
+  #
+  # `always_run`, because the failure mode is a commit that touches NO file
+  # under adr/ while the ledger has moved. A `files:` pattern would make the
+  # gate skip exactly when it is needed.
+  - repo: local
+    hooks:
+      - id: adr-export
+        name: the adr/ export is internally consistent
+        language: system
+        entry: python3 scripts/adr_export.py check
+        pass_filenames: false
+        always_run: true
+
+      # The exporter is the generator, and a generator with no test is the
+      # defect propagating rather than the fix holding. Stdlib unittest: this
+      # repository has no Python dependency and CI installs no test runner.
+      #
+      # `always_run` with `pass_filenames: false`, and no `files:`, matching the
+      # `pytest-scripts` hook in yadgarhq/config: a hook filtered on
+      # `^scripts/` reports Skipped, exit 0, on a pull request that changes
+      # only `adr/` — which is exactly the pull request this suite exists to
+      # prove the exporter still handles correctly (ledger 839).
+      - id: adr-export-tests
+        name: adr_export unit tests
+        language: system
+        entry: python3 -m unittest discover -s scripts -t scripts -p test_*.py
+        pass_filenames: false
+        always_run: true
