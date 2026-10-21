@@ -99,13 +99,23 @@ jobs:
       # `argocd-verify`), and `GITHUB_TOKEN` sees none of those. So this one
       # token is owner-wide, and it can read repository metadata and nothing
       # else: no contents, no pull requests, no write of any kind.
+      #
+      # THE ONE ZIZMOR IGNORE, AND ADR-0987 IS ITS AUTHORITY. zizmor's
+      # `github-app` audit fails every `owner:` mint without `repositories:`,
+      # whatever the permissions, and topic enumeration of private repositories
+      # cannot be done any other way; the alternative, a consumer list held as
+      # data, is the hardcoded list ADR-0982 refuses. ADR-0987 accepts this one
+      # owner-wide token on two conditions, both pinned by
+      # `scripts/tests/test_fan_out.py`: it holds `permission-metadata: read`
+      # and nothing else (adding any permission reds the suite), and every
+      # token that reads contents or writes is scoped by `repositories:`.
       - name: mint the token that lists the repositories
         id: lister
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
+          owner: ${{ github.repository_owner }} # zizmor: ignore[github-app]
           permission-metadata: read
 
       - name: which repositories are consumers
@@ -151,6 +161,12 @@ jobs:
           fi
           if [ -z "$tag" ]; then
             tag=$(git tag -l 'v*' | python3 scripts/fan_out.py greatest)
+          fi
+          # Untrusted until this passes: strict ^vN.N.N$, before git, a path or
+          # an argument sees it. A live run also needs the tag on main.
+          python3 scripts/fan_out.py check-tag -- "$tag"
+          if [ "$LIVE" = true ]; then
+            python3 scripts/fan_out.py on-main --tag "$tag"
           fi
           git show "refs/tags/${tag}:.pre-commit-hooks.yaml" > "$RUNNER_TEMP/manifest.yaml"
           args=(run --owner "$OWNER" --tag "$tag" --repos "$RUNNER_TEMP/repos.json"

@@ -50,11 +50,13 @@ import difflib
 import json
 import os
 import re
+import html
 import subprocess
 import sys
+import urllib.parse
 from dataclasses import dataclass, field
 
-from repin import HEADING, REQUIRED, Refusal, greatest, semver
+from repin import REQUIRED, Refusal, greatest, semver
 
 ACTIONS_URL = "https://github.com/yadgarhq/actions"
 ACTIONS_REPO = "actions"
@@ -76,6 +78,23 @@ NEXT_ITEM = re.compile(r"^  - ")
 OUTSIDE_COMMENT = re.compile(r"^ {0,2}#")
 PLAIN = re.compile(r"[A-Za-z0-9^$()|/._*+?\\][A-Za-z0-9^$()|/._*+?\\-]*")
 MANIFEST_ID = re.compile(r"^- id: (\S+)\s*$", re.M)
+
+# SECURITY REVIEW (ledger 1756 S5). Everything read from a consumer, and the
+# `tag` input, is untrusted. These bound what one run can be made to do.
+#
+# A TAG IS FULLMATCHED, never `match`ed: `$` also matches before a trailing
+# newline, and `repin.semver` strips whitespace first, so `"v1.2.3\n"` and
+# `" v1.2.3"` both parsed there. Digits are capped so no tag is huge.
+TAG = re.compile(r"v[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}")
+# GitHub's own repository-name alphabet. A name outside it is never put in a URL.
+NAME = re.compile(r"[A-Za-z0-9._-]{1,100}")
+MAX_CONSUMERS = 64  # repositories (and so pull requests) one run may touch
+MAX_PAGES = 10  # x100 repositories or tags listed, then a refusal, not a loop
+MAX_BYTES = 256 * 1024  # a .pre-commit-config.yaml larger is refused unread
+MAX_LINES = 4000  # bounds every per-line pass, the LCS included
+MAX_HOOKS = 100  # bounds the LCS table: MAX_HOOKS squared cells at most
+MAX_TEMPLATE_BYTES = 64 * 1024
+GH_TIMEOUT = 60  # seconds per `gh` call; nothing here retries
 
 
 # --------------------------------------------------------------------------
@@ -192,7 +211,11 @@ def options(lines, where):
 
 def parse(text):
     """Split a config into the `yadgarhq/actions` block and what surrounds it."""
+    if len(text.encode()) > MAX_BYTES:
+        raise Refusal(f"{CONFIG} is over {MAX_BYTES} bytes; refused unread")
     lines = text.splitlines(keepends=True)
+    if len(lines) > MAX_LINES:
+        raise Refusal(f"{CONFIG} is over {MAX_LINES} lines; refused unread")
     starts = [i for i, l in enumerate(lines) if ACTIONS_URL in l and "repo:" in l]
     if len(starts) != 1 or lines[starts[0]].rstrip("\n") != REPO_LINE:
         raise Refusal(
@@ -233,6 +256,8 @@ def parse(text):
             if m.group(1) in seen:
                 raise Refusal(f"{CONFIG}: hook `{m.group(1)}` listed twice")
             seen.add(m.group(1))
+            if len(seen) > MAX_HOOKS:
+                raise Refusal(f"{CONFIG}: more than {MAX_HOOKS} hooks in the yadgarhq/actions block")
             units.append(Unit(m.group(1), pending, line, [], {}))
             pending = []
         elif not s.strip() or HOOK_COMMENT.match(s):
@@ -331,7 +356,9 @@ def drift(text, hooks):
             )
     for hook_id, want_opts in hooks:
         if hook_id in opts and opts[hook_id] != want_opts:
-            found.append(f"options differ on {hook_id}: {opts[hook_id]!r} -> {want_opts!r}")
+            # ONLY the class's value: the consumer's is untrusted text, and this
+            # sentence reaches a pull request body and the job summary.
+            found.append(f"options differ on {hook_id}: the class sets {want_opts!r}")
     return found
 
 
@@ -342,8 +369,8 @@ def drift(text, hooks):
 
 def check_tag(tag):
     """A plain `vX.Y.Z`, or a refusal. A moving `v1` would pin consumers to it."""
-    if not semver(tag):
-        raise Refusal(f"`{tag}` is not a plain vMAJOR.MINOR.PATCH tag")
+    if not isinstance(tag, str) or not TAG.fullmatch(tag):
+        raise Refusal(f"{tag!r} is not a plain vMAJOR.MINOR.PATCH tag")
     return tag
 
 
@@ -359,10 +386,55 @@ def title_for(current, tag):
 def is_live(event, dry_run, ref):
     """Writes happen on a tag push, or on a dispatch from `main` that says so."""
     if event == "push":
-        return ref.startswith("refs/tags/")
+        return ref.startswith("refs/tags/") and bool(TAG.fullmatch(ref[len("refs/tags/"):]))
     if event == "workflow_dispatch":
         return dry_run == "false" and ref == "refs/heads/main"
     return False
+
+
+def git_status(*args):
+    return subprocess.run(["git", *args], capture_output=True, timeout=GH_TIMEOUT,
+                          check=False).returncode
+
+
+def tag_on_main(tag, git=git_status):
+    """A live run adopts only a tag `main` contains.
+
+    Any repository writer can push a `v*` tag at a commit off `main`. The tag
+    is checked before git sees it, and the check is `merge-base --is-ancestor`
+    against the fetched `main`, so a tag cut anywhere else writes nothing.
+    """
+    check_tag(tag)
+    if git("merge-base", "--is-ancestor", f"refs/tags/{tag}", "refs/remotes/origin/main"):
+        raise Refusal(f"`{tag}` is not on main; a live fan-out adopts only a tag main carries")
+    return True
+
+
+def strip_comments(text):
+    """`<!-- ... -->` removed, in one linear pass (no backtracking regex)."""
+    out, i = [], 0
+    while True:
+        j = text.find("<!--", i)
+        k = text.find("-->", j + 4) if j >= 0 else -1
+        if j < 0 or k < 0:
+            out.append(text[i:])
+            return "".join(out)
+        out.append(text[i:j])
+        i = k + 3
+
+
+def headings(text):
+    """`(hashes, title)` per markdown heading, comments stripped, linear time."""
+    found = []
+    for line in strip_comments(text or "").splitlines():
+        rest = line.lstrip(" \t")
+        hashes = len(rest) - len(rest.lstrip("#"))
+        if not 1 <= hashes <= 6 or rest[hashes:hashes + 1] not in (" ", "\t"):
+            continue
+        title = rest[hashes:].strip(" \t")
+        if title:
+            found.append(("#" * hashes, title))
+    return found
 
 
 def body(template, repository, cls, current, tag, changes, deployable):
@@ -371,8 +443,9 @@ def body(template, repository, cls, current, tag, changes, deployable):
     NOTHING OUTSIDE `## Changelog` MAY LOOK LIKE A CONVENTIONAL COMMITS BULLET
     (see `repin.body`): the lists below open with a backticked phrase.
     """
-    found = [(m.group(1), m.group(2).strip())
-             for m in HEADING.finditer(re.sub(r"<!--.*?-->", "", template or "", flags=re.S))]
+    if len((template or "").encode()) > MAX_TEMPLATE_BYTES:
+        raise Refusal(f"{TEMPLATE} is over {MAX_TEMPLATE_BYTES} bytes")
+    found = headings(template)
     titles = [t for _, t in found]
     missing = [h for h in REQUIRED if h not in titles]
     if missing:
@@ -535,13 +608,30 @@ def one(client, owner, meta, cls, tag, classes, live, row):
     row.update(status="updated" if wrote else "unchanged", url=open_pr["url"])
 
 
-def consumers(repos, classes):
-    """The names the write token is scoped to: one class topic, live, not exempt."""
-    return sorted(
+def ineligible(meta, owner):
+    """Why `meta` may never be written, or None. A listing missing a key fails closed."""
+    if not NAME.fullmatch(str(meta.get("name", ""))):
+        return "error", "a repository name outside GitHub's alphabet"
+    if meta.get("owner") != owner:
+        return "error", f"owned by {meta.get('owner')!r}, not {owner}"
+    if meta.get("archived", True):
+        return "archived", ""
+    if meta.get("fork", True) or meta.get("disabled", True):
+        return "ineligible", "a fork or a disabled repository"
+    return None
+
+
+def consumers(repos, classes, owner):
+    """The names the write token is scoped to: in `owner`, live, not a fork,
+    not exempt, one class topic. More than MAX_CONSUMERS refuses the run."""
+    names = sorted(
         m["name"] for m in repos
-        if not m["archived"] and m["name"] not in classes["exempt"]
+        if ineligible(m, owner) is None and m["name"] not in classes["exempt"]
         and len(class_of(m["topics"], classes["topic_prefix"])) == 1
     )
+    if len(names) > MAX_CONSUMERS:
+        raise Refusal(f"{len(names)} consumers, over the cap of {MAX_CONSUMERS}")
+    return names
 
 
 def run(client, owner, tag, classes, live, manifest_text=None):
@@ -563,12 +653,15 @@ def run(client, owner, tag, classes, live, manifest_text=None):
         if absent:
             raise Refusal(f"class `{name}` names {absent}, which `{tag}` does not publish")
     rows = []
-    for meta in sorted(client.list_repos(owner), key=lambda m: m["name"]):
+    listed = client.list_repos(owner)
+    consumers(listed, classes, owner)  # the cap, before anything is read
+    for meta in sorted(listed, key=lambda m: str(m.get("name"))):
         row = {"repo": meta["name"], "class": "", "current": "", "target": tag,
                "status": "", "url": "", "diff": "", "note": "", "patch": "", "changes": []}
         rows.append(row)
-        if meta["archived"]:
-            row["status"] = "archived"
+        why = ineligible(meta, owner)
+        if why:
+            row.update(status=why[0], note=why[1])
             continue
         if meta["name"] in classes["exempt"]:
             row["status"] = "exempt"
@@ -588,6 +681,19 @@ def run(client, owner, tag, classes, live, manifest_text=None):
     return rows, 1 if any(r["status"] == "error" for r in rows) else 0
 
 
+def clean(text, limit=300):
+    """Consumer-derived text made inert for a markdown table cell."""
+    text = " ".join(str(text).split())
+    for bad, good in (("|", "/"), ("`", "'"), ("::", ": :"), ("<", "&lt;"), (">", "&gt;")):
+        text = text.replace(bad, good)
+    return text[:limit]
+
+
+def annotation(text):
+    """A message safe to print after `::error::` (one line, no command)."""
+    return " ".join(str(text).split()).replace("::", ": :")[:500]
+
+
 def report(rows, tag, live):
     consumers = [r for r in rows if r["status"] not in ("archived", "exempt")]
     at = [r for r in consumers if r["status"] == "adopted"]
@@ -601,21 +707,29 @@ def report(rows, tag, live):
         "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for r in rows:
-        notes = "; ".join(r["changes"]) or r["note"]
+        notes = clean("; ".join(r["changes"]) or r["note"])
         out.append(
             f"| `{r['repo']}` | {r['class'] or '—'} | {r['current'] or '—'} | {r['target']} "
             f"| {r['status']} | {r['url'] or '—'} | {r['diff'] or '—'} | {notes or '—'} |"
         )
     for r in rows:
         if r["patch"]:
+            # <pre> with every character escaped: a patch line holding ``` would
+            # otherwise close a markdown fence and inject into the summary.
             out += ["", f"<details><summary><code>{r['repo']}</code></summary>", "",
-                    "```diff", r["patch"].rstrip("\n"), "```", "", "</details>"]
+                    "<pre>", html.escape(r["patch"].rstrip("\n")), "</pre>", "",
+                    "</details>"]
     return "\n".join(out) + "\n"
 
 
 # --------------------------------------------------------------------------
 # GitHub, through `gh api`
 # --------------------------------------------------------------------------
+
+
+def q(part, safe="/"):
+    """One URL path or query part, percent-encoded."""
+    return urllib.parse.quote(str(part), safe=safe)
 
 
 class Gh:
@@ -629,67 +743,87 @@ class Gh:
         self.repos = repos
 
     def _api(self, *args, payload=None, missing_ok=False):
-        done = subprocess.run(
-            ["gh", "api", *args] + (["--input", "-"] if payload is not None else []),
-            input=json.dumps(payload) if payload is not None else None,
-            capture_output=True, text=True, check=False)
+        argv = ["gh", "api", *args] + (["--input", "-"] if payload is not None else [])
+        try:
+            done = subprocess.run(
+                argv, input=json.dumps(payload) if payload is not None else None,
+                capture_output=True, text=True, check=False, timeout=GH_TIMEOUT)
+        except subprocess.TimeoutExpired as expired:
+            raise Refusal(f"gh api timed out after {GH_TIMEOUT}s") from expired
         if done.returncode != 0:
             if missing_ok and "HTTP 404" in done.stderr:
                 return None
-            raise Refusal(f"gh api {' '.join(args)}: {done.stderr.strip()}")
+            raise Refusal(f"gh api {' '.join(args)}: {done.stderr.strip()[:300]}")
         return done.stdout
 
     def list_repos(self, owner):
         if self.repos is not None:
             return self.repos
-        out = self._api("--paginate", f"orgs/{owner}/repos?per_page=100",
-                        "--jq", ".[] | {name, archived, topics, default_branch}")
-        return [json.loads(line) for line in out.splitlines() if line.strip()]
+        found = []
+        for page in self._pages(f"orgs/{q(owner)}/repos"):
+            found += [{"name": r["name"], "archived": r["archived"],
+                       "disabled": r.get("disabled", True), "fork": r["fork"],
+                       "topics": r.get("topics", []), "default_branch": r["default_branch"],
+                       "owner": r["owner"]["login"]} for r in page]
+        return found
+
+    def _pages(self, path):
+        """Each page of a listing, MAX_PAGES at most, then a refusal."""
+        for number in range(1, MAX_PAGES + 1):
+            page = json.loads(self._api(f"{path}?per_page=100&page={number}"))
+            yield page
+            if len(page) < 100:
+                return
+        raise Refusal(f"{path} lists more than {MAX_PAGES * 100}; refused, not paged further")
 
     def read_file(self, owner, repo, path, ref):
-        out = self._api(f"repos/{owner}/{repo}/contents/{path}?ref={ref}", missing_ok=True)
+        out = self._api(f"repos/{q(owner)}/{q(repo)}/contents/{path}?ref={q(ref, '')}",
+                        missing_ok=True)
         if out is None:
             return None
         got = json.loads(out)
+        if got.get("type") != "file" or got.get("size", MAX_BYTES + 1) > MAX_BYTES:
+            raise Refusal(f"{path} is not a file of at most {MAX_BYTES} bytes")
         return base64.b64decode(got["content"]).decode(), got["sha"]
 
     def tags(self, owner, repo):
-        out = self._api("--paginate", f"repos/{owner}/{repo}/tags?per_page=100",
-                        "--jq", ".[].name")
-        return out.split()
+        return [t["name"] for page in self._pages(f"repos/{q(owner)}/{q(repo)}/tags")
+                for t in page]
 
     def branch_sha(self, owner, repo, branch):
-        out = self._api(f"repos/{owner}/{repo}/git/ref/heads/{branch}", missing_ok=True)
+        out = self._api(f"repos/{q(owner)}/{q(repo)}/git/ref/heads/{q(branch)}",
+                        missing_ok=True)
         return None if out is None else json.loads(out)["object"]["sha"]
 
     def find_prs(self, owner, repo, branch):
-        out = self._api(f"repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=all")
+        out = self._api(f"repos/{q(owner)}/{q(repo)}/pulls?head={q(owner + ':' + branch, '')}"
+                        "&state=all&per_page=10")
         return [{"number": p["number"], "state": p["state"], "merged": bool(p["merged_at"]),
                  "url": p["html_url"], "title": p["title"], "body": p["body"] or ""}
                 for p in json.loads(out)]
 
     def create_ref(self, owner, repo, branch, sha):
-        self._api("-X", "POST", f"repos/{owner}/{repo}/git/refs",
+        self._api("-X", "POST", f"repos/{q(owner)}/{q(repo)}/git/refs",
                   payload={"ref": f"refs/heads/{branch}", "sha": sha})
 
     def reset_ref(self, owner, repo, branch, sha):
         if not branch.startswith(BRANCH_PREFIX):
             raise Refusal(f"refusing to force-move `{branch}`: only {BRANCH_PREFIX}* is ours")
-        self._api("-X", "PATCH", f"repos/{owner}/{repo}/git/refs/heads/{branch}",
+        self._api("-X", "PATCH", f"repos/{q(owner)}/{q(repo)}/git/refs/heads/{q(branch)}",
                   payload={"sha": sha, "force": True})
 
     def put_file(self, owner, repo, path, branch, text, blob, message):
-        self._api("-X", "PUT", f"repos/{owner}/{repo}/contents/{path}", payload={
+        self._api("-X", "PUT", f"repos/{q(owner)}/{q(repo)}/contents/{path}", payload={
             "message": message, "branch": branch, "sha": blob,
             "content": base64.b64encode(text.encode()).decode()})
 
     def create_pr(self, owner, repo, base, branch, title, body_text):
-        out = self._api("-X", "POST", f"repos/{owner}/{repo}/pulls", payload={
+        out = self._api("-X", "POST", f"repos/{q(owner)}/{q(repo)}/pulls", payload={
             "base": base, "head": branch, "title": title, "body": body_text})
         return json.loads(out)["html_url"]
 
     def update_pr(self, owner, repo, number, title, body_text):
-        self._api("-X", "PATCH", f"repos/{owner}/{repo}/pulls/{number}",
+        self._api("-X", "PATCH", f"repos/{q(owner)}/{q(repo)}/pulls/{int(number)}",
                   payload={"title": title, "body": body_text})
 
 
@@ -718,6 +852,10 @@ def main(argv):
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("mode")
     sub.add_parser("greatest", help="the greatest plain vX.Y.Z tag on stdin")
+    check = sub.add_parser("check-tag")
+    check.add_argument("tag")
+    on_main = sub.add_parser("on-main")
+    on_main.add_argument("--tag", required=True)
     enum = sub.add_parser("enumerate")
     enum.add_argument("--owner", required=True)
     enum.add_argument("--classes", default="classes.json")
@@ -731,6 +869,15 @@ def main(argv):
     go.add_argument("--classes", default="classes.json")
     args = parser.parse_args(argv)
 
+    if args.command in ("check-tag", "on-main"):
+        try:
+            check_tag(args.tag)
+            if args.command == "on-main":
+                tag_on_main(args.tag)
+        except Refusal as refusal:
+            print(f"::error::{annotation(refusal)}", file=sys.stderr)
+            return 1
+        return 0
     if args.command == "greatest":
         tag = greatest(sys.stdin.read().split())
         if not tag:
@@ -750,7 +897,7 @@ def main(argv):
             classes = load_classes(handle.read())
         if args.command == "enumerate":
             repos = Gh().list_repos(args.owner)
-            names = consumers(repos, classes)
+            names = consumers(repos, classes, args.owner)
             if not names:
                 # An empty `repositories:` beside `owner:` mints for EVERY
                 # repository, so no consumer is a refusal, never a pass.
@@ -774,12 +921,13 @@ def main(argv):
             raise Refusal("yadgarhq/actions carries no plain vX.Y.Z tag")
         rows, code = run(client, args.owner, tag, classes, args.live, manifest)
     except Refusal as refusal:
-        print(f"::error::{refusal}", file=sys.stderr)
+        print(f"::error::{annotation(refusal)}", file=sys.stderr)
         return 1
     summary(report(rows, tag, args.live))
     for r in rows:
         if r["status"] == "error":
-            print(f"::error::{args.owner}/{r['repo']}: {r['note']}", file=sys.stderr)
+            print(f"::error::{annotation(args.owner + '/' + r['repo'] + ': ' + r['note'])}",
+                  file=sys.stderr)
     return code
 
 

@@ -267,7 +267,7 @@ def test_a_missing_hook_is_added_an_extra_dropped_and_options_rewritten():
     assert fan_out.drift(SMALL, want) == [
         "missing: actionlint",
         "extra: helm-lint",
-        "options differ on prettier: {'exclude': '^old/'} -> {'exclude': '^(a/|b/)'}",
+        "options differ on prettier: the class sets {'exclude': '^(a/|b/)'}",
     ]
 
 
@@ -297,7 +297,9 @@ def test_a_shape_the_renderer_does_not_know_is_refused(broken):
 def test_only_a_plain_semver_tag_is_a_target():
     for good in ("v1.35.0", "v10.0.12"):
         assert fan_out.check_tag(good) == good
-    for bad in ("v1", "v1.35", "1.35.0", "v1.35.0-rc1", "", "main"):
+    for bad in ("v1", "v1.35", "1.35.0", "v1.35.0-rc1", "", "main",
+                "v1.35.0\n", " v1.35.0", "v1.35.0 ", "v1.2.3;id", "v1.2.3:x",
+                "v" + "1" * 50 + ".0.0", "v1.2.3/../x", None):
         with pytest.raises(fan_out.Refusal):
             fan_out.check_tag(bad)
 
@@ -317,6 +319,10 @@ def test_the_branch_is_derived_from_the_tag_alone():
         ("workflow_dispatch", "", "refs/heads/main", False),
         ("workflow_dispatch", "False", "refs/heads/main", False),
         ("push", "", "refs/heads/main", False),
+        ("push", "", "refs/tags/v1", False),
+        ("push", "", "refs/tags/v1.35.0-rc1", False),
+        ("push", "", "refs/tags/release", False),
+        ("workflow_dispatch", "false", "refs/tags/v1.35.0", False),
         ("pull_request", "false", "refs/pull/1/merge", False),
     ],
 )
@@ -374,7 +380,8 @@ class Fake:
     def list_repos(self, owner):
         return [
             {"name": n, "archived": r.get("archived", False), "topics": r.get("topics", []),
-             "default_branch": "main"}
+             "default_branch": "main", "fork": r.get("fork", False),
+             "disabled": False, "owner": r.get("owner", owner)}
             for n, r in self.repos.items()
         ]
 
@@ -719,7 +726,8 @@ def test_two_tokens_a_metadata_only_lister_and_a_consumer_scoped_writer():
 
 
 def test_the_writer_is_scoped_to_consumers_only():
-    repos = [
+    base = {"fork": False, "disabled": False, "owner": "yadgarhq"}
+    repos = [{**base, **r} for r in [
         {"name": "actions", "archived": False, "topics": []},
         {"name": "deploy", "archived": True, "topics": ["yadgar-class-base"]},
         {"name": "docs", "archived": False, "topics": ["yadgar-class-base"]},
@@ -728,8 +736,13 @@ def test_the_writer_is_scoped_to_consumers_only():
         {"name": "stray", "archived": False, "topics": ["yadgar-deployable"]},
         {"name": "task", "archived": False,
          "topics": ["yadgar-deployable", "yadgar-class-service"]},
-    ]
-    assert fan_out.consumers(repos, CLASSES) == ["docs", "task"]
+        {"name": "forked", "archived": False, "fork": True, "topics": ["yadgar-class-base"]},
+        {"name": "off", "archived": False, "disabled": True, "topics": ["yadgar-class-base"]},
+        {"name": "foreign", "archived": False, "owner": "someone",
+         "topics": ["yadgar-class-base"]},
+        {"name": "bad name!", "archived": False, "topics": ["yadgar-class-base"]},
+    ]]
+    assert fan_out.consumers(repos, CLASSES, "yadgarhq") == ["docs", "task"]
 
 
 def test_the_greatest_command_orders_by_number_not_text():
@@ -752,3 +765,215 @@ def test_nothing_in_the_workflow_or_script_can_merge():
         assert "pr merge" not in text
         assert "/merge" not in text
         assert "auto-merge" not in text.replace("never auto-merge", "")
+
+
+# --------------------------------------------------------------------------
+# security review, ledger 1756 S5: AUTHORIZATION
+# --------------------------------------------------------------------------
+
+
+def test_a_live_tag_must_be_on_main_and_git_never_sees_a_bad_tag():
+    calls = []
+
+    def git(*args):
+        calls.append(args)
+        return 0 if args[-2] == "refs/tags/v1.35.0" else 1
+
+    assert fan_out.tag_on_main("v1.35.0", git) is True
+    assert calls == [("merge-base", "--is-ancestor", "refs/tags/v1.35.0",
+                      "refs/remotes/origin/main")]
+    with pytest.raises(fan_out.Refusal):
+        fan_out.tag_on_main("v1.36.0", git)
+    calls.clear()
+    with pytest.raises(fan_out.Refusal):
+        fan_out.tag_on_main("v1.35.0;rm -rf /", git)
+    assert calls == []
+
+
+def test_the_check_tag_command_refuses_a_tag_with_a_newline():
+    for tag, code in (("v1.35.0", 0), ("v1.35.0\nx", 1), ("--help", 1)):
+        done = subprocess.run([sys.executable, str(GATE), "check-tag", "--", tag],
+                              capture_output=True, text=True, check=False)
+        assert done.returncode == code, (tag, done.stderr)
+
+
+def test_more_consumers_than_the_cap_refuses_the_whole_run():
+    repos = [{"name": f"r{i}", "archived": False, "fork": False, "disabled": False,
+              "owner": "yadgarhq", "topics": ["yadgar-class-base"]}
+             for i in range(fan_out.MAX_CONSUMERS + 1)]
+    with pytest.raises(fan_out.Refusal):
+        fan_out.consumers(repos, CLASSES, "yadgarhq")
+
+
+def test_a_fork_or_foreign_repository_is_never_touched():
+    repos = estate()
+    repos["forked"] = {**consumer("docs"), "fork": True}
+    repos["foreign"] = {**consumer("docs"), "owner": "someone"}
+    gh = Fake(repos)
+    rows, code = fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=True)
+    got = by_repo(rows)
+    assert got["forked"]["status"] == "ineligible"
+    assert got["foreign"]["status"] == "error"
+    assert not [w for w in gh.writes if w[1] in ("forked", "foreign")]
+    assert not [r for r in gh.reads if r[0] in ("forked", "foreign")]
+
+
+def test_the_body_never_carries_a_value_read_from_the_consumer():
+    evil = "^x/ @everyone [click](https://evil.example)"
+    repos = estate()
+    text = fixture("chart").replace("exclude: ^chart/templates/", f"exclude: {json.dumps(evil)}")
+    repos["chart"]["commits"]["base"][".pre-commit-config.yaml"] = text
+    gh = Fake(repos)
+    fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=True)
+    pr = gh.repos["chart"]["prs"][0]
+    assert "evil" not in pr["body"] and "@everyone" not in pr["body"]
+    assert "evil" not in pr["title"]
+
+
+def test_report_and_annotations_neutralise_text_from_a_consumer():
+    rows = [{"repo": "x", "class": "base", "current": "", "target": "v1.35.0",
+             "status": "error", "url": "", "diff": "",
+             "note": "bad `line` | col\n::set-env name=X::y", "patch": "", "changes": []}]
+    out = fan_out.report(rows, "v1.35.0", live=False)
+    line = [l for l in out.splitlines() if l.startswith("| `x`")][0]
+    assert line.count("|") == 9
+    assert "::set-env" not in out and "`line`" not in out
+    assert "\n" not in fan_out.annotation("a\nb::c") and "::" not in fan_out.annotation("a::b")
+
+
+def test_the_lister_permission_check_fails_when_any_permission_is_added():
+    """ADR-0987: the one owner-wide token holds metadata read and NOTHING else."""
+    flow = workflow()
+    assert fan_out_lister_violations(flow) == []
+    for extra in ("permission-contents", "permission-pull-requests", "permission-administration"):
+        mutated = copy.deepcopy(flow)
+        lister = [s for s in mutated["jobs"]["fan-out"]["steps"] if s.get("id") == "lister"][0]
+        lister["with"][extra] = "read"
+        assert fan_out_lister_violations(mutated) != [], extra
+    mutated = copy.deepcopy(flow)
+    lister = [s for s in mutated["jobs"]["fan-out"]["steps"] if s.get("id") == "lister"][0]
+    lister["with"]["permission-metadata"] = "write"
+    assert fan_out_lister_violations(mutated) != []
+
+
+def fan_out_lister_violations(flow):
+    found = []
+    for job in flow["jobs"].values():
+        for step in job["steps"]:
+            w = step.get("with", {})
+            if "create-github-app-token" not in step.get("uses", ""):
+                continue
+            if "owner" in w and "repositories" not in w:
+                perms = {k: v for k, v in w.items() if k.startswith("permission-")}
+                if step.get("id") != "lister" or perms != {"permission-metadata": "read"}:
+                    found.append((step.get("id"), perms))
+    return found
+
+
+def test_exactly_one_zizmor_ignore_and_it_is_the_listers_owner_line():
+    lines = WORKFLOW.read_text().splitlines()
+    ignores = [i for i, l in enumerate(lines) if "zizmor: ignore" in l]
+    assert len(ignores) == 1
+    line = lines[ignores[0]]
+    assert line.strip().startswith("owner: ${{ github.repository_owner }}")
+    assert line.rstrip().endswith("# zizmor: ignore[github-app]")
+    window = "\n".join(lines[max(0, ignores[0] - 25):ignores[0]])
+    assert "id: lister" in window and "ADR-0987" in window
+
+
+def test_the_workflow_validates_the_tag_before_git_reads_it():
+    text = WORKFLOW.read_text()
+    assert text.index("fan_out.py check-tag") < text.index("git show \"refs/tags/")
+    assert "fan_out.py on-main" in text
+
+
+# --------------------------------------------------------------------------
+# security review, ledger 1756 S5: DENIAL OF SERVICE
+# --------------------------------------------------------------------------
+
+
+def test_an_oversized_config_is_an_error_row_not_a_hang():
+    repos = estate()
+    big = fixture("docs") + "#" * (fan_out.MAX_BYTES + 1) + "\n"
+    repos["docs"]["commits"]["base"][".pre-commit-config.yaml"] = big
+    many = fixture("proto") + "#\n" * (fan_out.MAX_LINES + 1)
+    repos["proto"]["commits"]["base"][".pre-commit-config.yaml"] = many
+    gh = Fake(repos)
+    rows, code = fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=True)
+    assert by_repo(rows)["docs"]["status"] == "error"
+    assert by_repo(rows)["proto"]["status"] == "error"
+    assert code == 1
+
+
+def test_too_many_hooks_are_refused():
+    text = SMALL.replace("      - id: gitleaks\n", "".join(
+        f"      - id: h{i}\n" for i in range(fan_out.MAX_HOOKS + 1)))
+    with pytest.raises(fan_out.Refusal):
+        fan_out.parse(text)
+
+
+def test_adversarial_templates_parse_in_linear_time():
+    import time
+    hostile = [
+        "## What\n## Why\n## Changelog\n## Verification\n## Risk\n" + "<!--" * 15000,
+        "## What\n## Why\n## Changelog\n## Verification\n## Risk\n#" + " \t" * 30000 + "x\n",
+    ]
+    for template in hostile:
+        assert len(template.encode()) <= fan_out.MAX_TEMPLATE_BYTES
+        started = time.monotonic()
+        fan_out.headings(template)
+        assert time.monotonic() - started < 0.5
+
+
+def test_headings_agree_with_the_template_reader_on_real_templates():
+    for path in sorted((FIXTURE_DIR.parent.parent.parent.parent).glob("*pull_request_template.md")):
+        text = path.read_text()
+        assert [t for _, t in fan_out.headings(text)] == list(pr_body.sections(text))
+
+
+def test_pagination_is_bounded(monkeypatch):
+    calls = []
+
+    def endless(self, *args, payload=None, missing_ok=False):
+        calls.append(args)
+        return json.dumps([{"name": f"r{len(calls)}-{i}", "archived": False, "disabled": False,
+                            "fork": False, "topics": [], "default_branch": "main",
+                            "owner": {"login": "yadgarhq"}} for i in range(100)])
+
+    monkeypatch.setattr(fan_out.Gh, "_api", endless)
+    with pytest.raises(fan_out.Refusal):
+        fan_out.Gh().list_repos("yadgarhq")
+    assert len(calls) == fan_out.MAX_PAGES
+
+
+def test_every_gh_call_carries_a_timeout(monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, "[]", "")
+
+    monkeypatch.setattr(fan_out.subprocess, "run", fake_run)
+    fan_out.Gh().find_prs("yadgarhq", "docs", "actions-adopt/v1.35.0")
+    assert 0 < seen["timeout"] <= 120
+
+
+def test_a_gh_call_that_hangs_is_a_refusal(monkeypatch):
+    def hang(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(fan_out.subprocess, "run", hang)
+    with pytest.raises(fan_out.Refusal):
+        fan_out.Gh().branch_sha("yadgarhq", "docs", "main")
+
+
+def test_path_parts_are_quoted_into_the_api_url(monkeypatch):
+    seen = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, '{"object": {"sha": "s"}}', "")
+
+    monkeypatch.setattr(fan_out.subprocess, "run", fake_run)
+    fan_out.Gh().branch_sha("yadgarhq", "docs", "a&b#c?d")
+    assert "a%26b%23c%3Fd" in seen[0][-1]
