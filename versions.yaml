@@ -1,0 +1,34 @@
+# The canonical version of every tool this repository pins.
+#
+# `scripts/versions_parity.py` (run by `scripts/tests/test_versions_parity.py`)
+# finds each PINNED tool by key pattern in the workflows, the pre-commit files, the gate
+# scripts, the hook scripts and the Containerfiles. It fails when any copy
+# differs from `version` here, or when the number of copies differs from `sites`.
+#
+# TO MOVE A PIN: change `version` here and every copy in the same pull request.
+# TO ADD OR DELETE A COPY: change `sites` in the same pull request.
+# This file does not install anything; the copies still do that.
+tools:
+  gitleaks: { version: "8.30.1", sites: 2 }
+  hadolint: { version: "2.14.0", sites: 1 }
+  actionlint: { version: "1.7.12", sites: 1 }
+  cargo-deny: { version: "0.20.2", sites: 1 }
+  zizmor: { version: "1.29.0", sites: 1 }
+  helm: { version: "3.18.4", sites: 6 }
+  # `unpinned:` is the exact set of `aquasecurity/trivy-action` steps with no
+  # `version:` input, as file -> count. They run the action default (0.70.0) and
+  # are KNOWN, not accepted: ledger 1756 step 2 pins them. A new unpinned step, or
+  # one of these gaining a version, fails the gate until this map is edited.
+  trivy:
+    version: "0.74.0"
+    sites: 2
+    unpinned:
+      .github/workflows/base-images.yaml: 1
+      .github/workflows/ci-release.yaml: 1
+      .github/workflows/estate-runner-image.yaml: 2
+  prettier: { version: "3.9.6", sites: 2 }
+  pytest: { version: "9.1.1", sites: 2 }
+  pyyaml: { version: "6.0.3", sites: 10 }
+  shellcheck-py: { version: "0.11.0.1", sites: 1 }
+  pre-commit-hooks: { version: "5.0.0", sites: 1 }
+  cargo-chef: { version: "0.1.71", sites: 1 }
