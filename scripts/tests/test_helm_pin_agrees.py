@@ -199,4 +199,6 @@ def test_this_repository_agrees_today(tmp_path):
     """LEDGER 649's OWN QUESTION, asked of the real tree rather than a fixture."""
     result = run(REPO)
     assert result.returncode == 0, result.stdout
-    assert "all pinned to v3.18.4" in result.stdout
+    # LEDGER 1756 S2b: every step reads the one `versions.yaml` output, so the
+    # steps agree as written; `versions_parity.py` holds that output to the file.
+    assert "all pinned to v${{ needs.detect.outputs.helm }}" in result.stdout

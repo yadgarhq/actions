@@ -1,31 +1,47 @@
 # The canonical version of every tool this repository pins.
 #
+# THE WORKFLOWS READ THIS FILE (ledger 1756 S2b, ADR-0981). `scripts/tool_versions.py`
+# turns it into step outputs, read at the commit of yadgarhq/actions that is
+# running, and every install step takes its version from those outputs. A
+# workflow that names a version of its own fails `scripts/versions_parity.py`.
+#
 # `scripts/versions_parity.py` (run by `scripts/tests/test_versions_parity.py`)
 # finds each PINNED tool by key pattern in the workflows, the pre-commit files, the gate
-# scripts, the hook scripts and the Containerfiles. It fails when any copy
-# differs from `version` here, or when the number of copies differs from `sites`.
+# scripts, the hook scripts and the Containerfiles. In a workflow each site must READ
+# its tool's output; anywhere else it must equal `version` here. It fails when the
+# number of sites differs from `sites`.
 #
-# TO MOVE A PIN: change `version` here and every copy in the same pull request.
-# TO ADD OR DELETE A COPY: change `sites` in the same pull request.
-# This file does not install anything; the copies still do that.
+# TO MOVE A PIN: change `version` here (and `sha256`, if present) and every literal
+# copy outside the workflows in the same pull request.
+# TO ADD OR DELETE A SITE: change `sites` in the same pull request.
+#
+# ONE LINE PER TOOL, as a flow mapping. `tool_versions.py` runs before setup-python,
+# on the standard library only, and reads that shape and no other.
+#
+# `sha256` is the sum of the linux x86_64 artefact the workflows download, taken from
+# the upstream checksum file at that version (URLs in
+# scripts/tests/test_versions_parity.py). The install step refuses any other sum.
+#
+# `rust-toolchain` is the toolchain CI installs: `stable` resolved to 1.99.1 when it was pinned
+# (2026-10-21). `rust-image` is the toolchain the build images carry. They differ
+# today; moving either is its own change.
+#
+# `python` is a minor, which `actions/setup-python` resolves to its newest patch.
+#
+# `prettier-ignore` keeps prettier from folding a long line into block style,
+# which `tool_versions.py` refuses.
+# prettier-ignore
 tools:
-  gitleaks: { version: "8.30.1", sites: 2 }
-  hadolint: { version: "2.14.0", sites: 1 }
-  actionlint: { version: "1.7.12", sites: 1 }
-  cargo-deny: { version: "0.20.2", sites: 1 }
+  gitleaks: { version: "8.30.1", sites: 2, sha256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb" }
+  hadolint: { version: "2.14.0", sites: 1, sha256: "6bf226944684f56c84dd014e8b979d27425c0148f61b3bd99bcc6f39e9dc5a47" }
+  actionlint: { version: "1.7.12", sites: 1, sha256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8" }
+  cargo-deny: { version: "0.20.2", sites: 1, sha256: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f" }
   zizmor: { version: "1.29.0", sites: 1 }
   helm: { version: "3.18.4", sites: 6 }
-  # `unpinned:` is the exact set of `aquasecurity/trivy-action` steps with no
-  # `version:` input, as file -> count. They run the action default (0.70.0) and
-  # are KNOWN, not accepted: ledger 1756 step 2 pins them. A new unpinned step, or
-  # one of these gaining a version, fails the gate until this map is edited.
-  trivy:
-    version: "0.74.0"
-    sites: 2
-    unpinned:
-      .github/workflows/base-images.yaml: 1
-      .github/workflows/ci-release.yaml: 1
-      .github/workflows/estate-runner-image.yaml: 2
+  trivy: { version: "0.74.0", sites: 6 }
+  rust-toolchain: { version: "1.99.1", sites: 3 }
+  rust-image: { version: "1.98.0", sites: 2 }
+  python: { version: "3.14", sites: 8 }
   prettier: { version: "3.9.6", sites: 2 }
   pytest: { version: "9.1.1", sites: 2 }
   pyyaml: { version: "6.0.3", sites: 10 }

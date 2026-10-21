@@ -120,11 +120,77 @@ jobs:
       chart: ${{ steps.d.outputs.chart }}
       proto: ${{ steps.d.outputs.proto }}
       text_edit: ${{ steps.e.outputs.text_edit }}
+      # LEDGER 1756 S2b (ADR-0981): every tool version a job below installs,
+      # read ONCE from `versions.yaml` at the commit of `yadgarhq/actions` this
+      # workflow runs at. A job reads `needs.detect.outputs.<tool>` and names no
+      # version of its own; `scripts/versions_parity.py` refuses a literal.
+      gitleaks: ${{ steps.versions.outputs.gitleaks }}
+      gitleaks_sha256: ${{ steps.versions.outputs.gitleaks_sha256 }}
+      hadolint: ${{ steps.versions.outputs.hadolint }}
+      hadolint_sha256: ${{ steps.versions.outputs.hadolint_sha256 }}
+      actionlint: ${{ steps.versions.outputs.actionlint }}
+      actionlint_sha256: ${{ steps.versions.outputs.actionlint_sha256 }}
+      cargo_deny: ${{ steps.versions.outputs.cargo_deny }}
+      cargo_deny_sha256: ${{ steps.versions.outputs.cargo_deny_sha256 }}
+      zizmor: ${{ steps.versions.outputs.zizmor }}
+      helm: ${{ steps.versions.outputs.helm }}
+      trivy: ${{ steps.versions.outputs.trivy }}
+      rust_toolchain: ${{ steps.versions.outputs.rust_toolchain }}
+      python: ${{ steps.versions.outputs.python }}
+      pyyaml: ${{ steps.versions.outputs.pyyaml }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ inputs.ref }}
+      # LEDGER 1756 S2b. THE TOOL VERSIONS, from `versions.yaml` at the commit
+      # this workflow file runs at (ADR-0981), never at `main` and never from
+      # the repository under review. Only two files are fetched. The reader is
+      # standard-library Python on the runner's own `python3`, because
+      # `setup-python`'s version is one of the values it reads.
+      #
+      # BEFORE `d` AND `e`, on purpose: if this read fails, no fact is set
+      # yet, so no downstream job can run with an empty version
+      # (`scripts/tests/test_versions_read_order.py`).
+      - name: the actions commit this job runs (ADR-0981)
+        id: own_sha
+        env:
+          OWN_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$OWN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::job.workflow_sha is not a 40-hex commit SHA: '${OWN_SHA}'. There is no fallback to main (ADR-0981)."
+            exit 1
+          fi
+          echo "sha=${OWN_SHA}" >> "$GITHUB_OUTPUT"
+      - if: github.repository != 'yadgarhq/actions'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: yadgarhq/actions
+          ref: ${{ steps.own_sha.outputs.sha }}
+          path: .ci-versions
+          sparse-checkout: |
+            versions.yaml
+            scripts/tool_versions.py
+          sparse-checkout-cone-mode: false
+      - name: the tool versions this run installs (versions.yaml)
+        id: versions
+        env:
+          UNDER_REVIEW: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # The repository NAME decides, never the presence of the file, so no
+          # repository under review can supply its own versions.
+          if [ "$UNDER_REVIEW" = "yadgarhq/actions" ]; then dir=.; else dir=.ci-versions; fi
+          python3 "$dir/scripts/tool_versions.py" "$dir/versions.yaml" > "$RUNNER_TEMP/versions.txt"
+          cat "$RUNNER_TEMP/versions.txt" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Tool versions (versions.yaml)"
+            sed 's/^/- /' "$RUNNER_TEMP/versions.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
+          rm -rf .ci-versions
+
       - id: d
         run: |
           set -euo pipefail
@@ -221,19 +287,30 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.x"
+          python-version: ${{ needs.detect.outputs.python }}
 
       # The binary, not gitleaks-action: the action refuses to run for an
       # organisation without a paid licence key, while gitleaks itself is MIT.
       # Only the wrapper is commercial, and the error names the org rather than
       # the action, which makes it easy to misread.
+      #
+      # LEDGER 1362: downloaded to a file and checked against the sha256 in
+      # `versions.yaml` BEFORE anything is unpacked as root. A wrong, empty or
+      # malformed sum fails the step and installs nothing. The same shape holds
+      # for hadolint, actionlint and cargo-deny below;
+      # `scripts/tests/test_tool_installs.py` runs each block to prove it.
       - name: install gitleaks
         env:
-          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_VERSION: ${{ needs.detect.outputs.gitleaks }}
+          GITLEAKS_SHA256: ${{ needs.detect.outputs.gitleaks_sha256 }}
         run: |
           set -euo pipefail
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin gitleaks
+          SHA256="$GITLEAKS_SHA256"
+          [[ "$SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::gitleaks sha256 from versions.yaml is not 64 lowercase hex: '${SHA256}'"; exit 1; }
+          file="$RUNNER_TEMP/gitleaks.tar.gz"
+          curl -sSfL -o "$file" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${SHA256}  ${file}" | sha256sum -c -
+          sudo tar -xzf "$file" -C /usr/local/bin gitleaks
 
       # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
       # the commit THIS workflow file runs at, never `main`. Read through
@@ -284,12 +361,16 @@ jobs:
 
       - name: install hadolint
         env:
-          HADOLINT_VERSION: 2.14.0
+          HADOLINT_VERSION: ${{ needs.detect.outputs.hadolint }}
+          HADOLINT_SHA256: ${{ needs.detect.outputs.hadolint_sha256 }}
         run: |
           set -euo pipefail
-          sudo curl -sSfL -o /usr/local/bin/hadolint \
-            "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-linux-x86_64"
-          sudo chmod +x /usr/local/bin/hadolint
+          SHA256="$HADOLINT_SHA256"
+          [[ "$SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::hadolint sha256 from versions.yaml is not 64 lowercase hex: '${SHA256}'"; exit 1; }
+          file="$RUNNER_TEMP/hadolint"
+          curl -sSfL -o "$file" "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-linux-x86_64"
+          echo "${SHA256}  ${file}" | sha256sum -c -
+          sudo install -m 0755 "$file" /usr/local/bin/hadolint
 
       # THE actionlint HOOK RAN NOTHING UNTIL THIS STEP EXISTED, then could not
       # FAIL until its entry was fixed, then ran in ONE REPOSITORY until the hook
@@ -311,11 +392,16 @@ jobs:
       # installs a binary that repository does not run.
       - name: install actionlint
         env:
-          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_VERSION: ${{ needs.detect.outputs.actionlint }}
+          ACTIONLINT_SHA256: ${{ needs.detect.outputs.actionlint_sha256 }}
         run: |
           set -euo pipefail
-          curl -sSfL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin actionlint
+          SHA256="$ACTIONLINT_SHA256"
+          [[ "$SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::actionlint sha256 from versions.yaml is not 64 lowercase hex: '${SHA256}'"; exit 1; }
+          file="$RUNNER_TEMP/actionlint.tar.gz"
+          curl -sSfL -o "$file" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${SHA256}  ${file}" | sha256sum -c -
+          sudo tar -xzf "$file" -C /usr/local/bin actionlint
 
       # The helm-lint hook shells out to helm, and the precommit job runs every
       # hook with no SKIP list — so the tool has to be here or the hook fails for
@@ -340,12 +426,14 @@ jobs:
       # different question from the one being asked.
       #
       # MAINTENANCE TRIGGER, named so this does not quietly rot: when Argo CD's
-      # bundled helm changes, this pin follows it. The explicit version also
+      # bundled helm changes, this pin follows it. The pin is `helm` in
+      # `versions.yaml` (ledger 1756 S2b); every helm step reads it through
+      # `detect` and names no version of its own. The explicit version also
       # removes the network from the decision — getLatestHelmVersion() is never
       # called, so neither the fetch nor its hardcoded fallback can apply.
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v3.18.4
+          version: v${{ needs.detect.outputs.helm }}
 
       # ADR-0725: a chart's dependencies are resolved before anything renders or
       # lints it, never vendored. The helm-lint hook below shells out to `helm
@@ -393,7 +481,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         if: needs.detect.outputs.rust == 'true'
         with:
-          toolchain: stable
+          toolchain: ${{ needs.detect.outputs.rust_toolchain }}
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -402,11 +490,16 @@ jobs:
       - name: install cargo-deny
         if: needs.detect.outputs.rust == 'true'
         env:
-          CARGO_DENY_VERSION: 0.20.2
+          CARGO_DENY_VERSION: ${{ needs.detect.outputs.cargo_deny }}
+          CARGO_DENY_SHA256: ${{ needs.detect.outputs.cargo_deny_sha256 }}
         run: |
           set -euo pipefail
-          curl -sSfL "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
-            | sudo tar -xz --strip-components=1 -C /usr/local/bin --wildcards '*/cargo-deny'
+          SHA256="$CARGO_DENY_SHA256"
+          [[ "$SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::cargo-deny sha256 from versions.yaml is not 64 lowercase hex: '${SHA256}'"; exit 1; }
+          file="$RUNNER_TEMP/cargo-deny.tar.gz"
+          curl -sSfL -o "$file" "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          echo "${SHA256}  ${file}" | sha256sum -c -
+          sudo tar -xzf "$file" --strip-components=1 -C /usr/local/bin --wildcards '*/cargo-deny'
 
       # No SKIP. Every hook the repository declares runs here.
       - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
@@ -425,7 +518,7 @@ jobs:
           ref: ${{ inputs.ref }}
       - name: zizmor
         env:
-          ZIZMOR_VERSION: "1.29.0"
+          ZIZMOR_VERSION: ${{ needs.detect.outputs.zizmor }}
         run: |
           set -euo pipefail
           # The policy IS the decision, written where a tool checks it. A tag
@@ -462,7 +555,8 @@ jobs:
       # used to attempt moves to the steps below, which render and scan a
       # chart properly instead of not at all.
       #
-      # `version: v0.74.0` IS LOAD-BEARING, not decoration, and not merely
+      # THE `version:` INPUT IS LOAD-BEARING (the trivy in `versions.yaml`,
+      # read by `detect`; 0.74.0 when this was written), not decoration, and not merely
       # "the version `trivy_gate.py` was measured against". With no `version:`
       # input this action installs its OWN default — measured on a real run
       # of this job, 0.70.0 — into its own bin directory and PREPENDS that
@@ -479,7 +573,7 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: "1"
           ignore-unfixed: true
-          version: v0.74.0
+          version: v${{ needs.detect.outputs.trivy }}
 
       # ADR-0725, same step and reasoning as `precommit`'s and `portability`'s
       # copies: `trivy_gate.py` below renders the chart through trivy's own
@@ -490,18 +584,20 @@ jobs:
       # no-opping.
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v3.18.4
+          version: v${{ needs.detect.outputs.helm }}
       - name: resolve chart dependencies
         if: needs.detect.outputs.chart == 'true'
         run: helm dependency update chart
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.x"
+          python-version: ${{ needs.detect.outputs.python }}
       # `trivy_gate.py` parses `.trivyignore.yaml` and each `Chart.lock` with
       # PyYAML, the same pin `portability` and `passed` already use.
       - name: install PyYAML
-        run: pip install --disable-pip-version-check "pyyaml==6.0.3"
+        env:
+          PYYAML_VERSION: ${{ needs.detect.outputs.pyyaml }}
+        run: pip install --disable-pip-version-check "pyyaml==${PYYAML_VERSION}"
 
       # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
       # the commit THIS workflow file runs at, never `main`. Read through
@@ -764,7 +860,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
-          toolchain: stable
+          toolchain: ${{ needs.detect.outputs.rust_toolchain }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
@@ -1395,7 +1491,7 @@ jobs:
       # got v4.2.4. The reasoning for v3.18.4 is above the precommit copy.
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v3.18.4
+          version: v${{ needs.detect.outputs.helm }}
       # ADR-0725, same step and same reasoning as the `precommit` copy: this
       # job's `helm_render()` calls `helm template chart` directly, and that
       # REFUSES a chart with an unresolved `dependencies:` key exactly as
@@ -1411,13 +1507,15 @@ jobs:
         run: helm dependency update chart
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.x"
+          python-version: ${{ needs.detect.outputs.python }}
       # Rendered manifests are parsed rather than grepped, so a `kind:` inside a
       # string or a comment cannot be mistaken for a resource. PyYAML is not in
       # the standard library and is not guaranteed on the runner; the version is
       # pinned for the same reason every other tool here is.
       - name: install PyYAML
-        run: pip install --disable-pip-version-check "pyyaml==6.0.3"
+        env:
+          PYYAML_VERSION: ${{ needs.detect.outputs.pyyaml }}
+        run: pip install --disable-pip-version-check "pyyaml==${PYYAML_VERSION}"
       # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
       # the commit THIS workflow file runs at, never `main`. Read through
       # `fromJSON(toJSON(job))` because actionlint types `job` strictly; checked
@@ -1558,7 +1656,7 @@ jobs:
       # catch what Argo would reject must render the chart the way Argo does.
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v3.18.4
+          version: v${{ needs.detect.outputs.helm }}
       # ADR-0725, same step and same reasoning as the `precommit` and
       # `portability` copies — this resolves the chart AT THIS CHECKOUT'S HEAD
       # ONLY. `service_immutable.py` also renders the chart as of the pull
@@ -1571,12 +1669,14 @@ jobs:
         run: helm dependency update chart
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.x"
+          python-version: ${{ needs.detect.outputs.python }}
       # Rendered manifests are parsed rather than grepped, for the reason the
       # `portability` job states. Pinned to the 6.0.3 that job and the
       # `pytest-scripts` hook already use.
       - name: install PyYAML
-        run: pip install --disable-pip-version-check "pyyaml==6.0.3"
+        env:
+          PYYAML_VERSION: ${{ needs.detect.outputs.pyyaml }}
+        run: pip install --disable-pip-version-check "pyyaml==${PYYAML_VERSION}"
 
       # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
       # the commit THIS workflow file runs at, never `main`. Read through
@@ -1717,7 +1817,7 @@ jobs:
       # pair to keep in step with them (`test_helm_pin_agrees.py`).
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v3.18.4
+          version: v${{ needs.detect.outputs.helm }}
 
       # ADR-0725: resolves the PARENT's own dependencies — the nine real
       # published pins, including this chart's own real published version —
@@ -1733,12 +1833,14 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.x"
+          python-version: ${{ needs.detect.outputs.python }}
       # Rendered manifests are parsed rather than grepped, for the reason the
       # `portability` job states. Pinned to the 6.0.3 every other chart job
       # already uses.
       - name: install PyYAML
-        run: pip install --disable-pip-version-check "pyyaml==6.0.3"
+        env:
+          PYYAML_VERSION: ${{ needs.detect.outputs.pyyaml }}
+        run: pip install --disable-pip-version-check "pyyaml==${PYYAML_VERSION}"
 
       # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
       # the commit THIS workflow file runs at, never `main`. Read through
@@ -2289,15 +2391,28 @@ jobs:
           repository: yadgarhq/actions
           ref: ${{ steps.own_sha.outputs.sha }}
           path: .ci-actions
+      # LEDGER 1756 S2b. `detect` is skipped on push and this job still runs,
+      # so it reads the python version from its own checkout at the same commit
+      # rather than from `needs.detect`.
+      - name: the python this job installs (versions.yaml)
+        id: versions
+        env:
+          UNDER_REVIEW: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$UNDER_REVIEW" = "yadgarhq/actions" ]; then dir=.; else dir=.ci-actions; fi
+          python3 "$dir/scripts/tool_versions.py" "$dir/versions.yaml" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.x"
+          python-version: ${{ steps.versions.outputs.python }}
       # The conditions are PARSED rather than grepped, so an `if:` inside a
       # comment or a folded block cannot be mistaken for one. PyYAML is not in
       # the standard library and is not guaranteed on the runner; pinned to the
       # 6.0.3 the `portability` job and the `pytest-scripts` hook already use.
       - name: install PyYAML
-        run: pip install --disable-pip-version-check "pyyaml==6.0.3"
+        env:
+          PYYAML_VERSION: ${{ steps.versions.outputs.pyyaml }}
+        run: pip install --disable-pip-version-check "pyyaml==${PYYAML_VERSION}"
 
       - name: every job did what its condition asked of it
         env:

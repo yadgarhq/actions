@@ -72,6 +72,12 @@ jobs:
         id: v
         run: echo "version=$(date -u +%Y.%m.%d)" >> "$GITHUB_OUTPUT"
 
+      # LEDGER 1756 S2b: the trivy version comes from this repository's own
+      # `versions.yaml`, at the commit this workflow runs at.
+      - name: the tool versions this job installs (versions.yaml)
+        id: versions
+        run: python3 scripts/tool_versions.py versions.yaml >> "$GITHUB_OUTPUT"
+
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -99,6 +105,7 @@ jobs:
           exit-code: "0"
           format: json
           output: base-scan.json
+          version: v${{ steps.versions.outputs.trivy }}
 
       # BUILT LOCALLY FIRST, NOT PUSHED. The first draft of this workflow pushed
       # here and scanned afterwards — reproducing, in the very file that
@@ -129,6 +136,7 @@ jobs:
           exit-code: "0"
           format: json
           output: image-scan.json
+          version: v${{ steps.versions.outputs.trivy }}
 
       # THE GATE, AND IT RUNS BEFORE ANYTHING IS PUBLISHED. Red only when our
       # layers add a finding the base did not carry.

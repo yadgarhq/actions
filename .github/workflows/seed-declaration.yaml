@@ -77,10 +77,6 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.ref }}
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.x"
-
       # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
       # the commit THIS workflow file runs at, never `main`. Read through
       # `fromJSON(toJSON(job))` because actionlint types `job` strictly; checked
@@ -123,6 +119,20 @@ jobs:
           repository: yadgarhq/actions
           ref: ${{ steps.own_sha.outputs.sha }}
           path: .ci-actions
+
+      # LEDGER 1756 S2b: the python version, from `versions.yaml` in the
+      # checkout above, at this workflow's own commit (ADR-0981).
+      - name: the tool versions this job installs (versions.yaml)
+        id: versions
+        env:
+          UNDER_REVIEW: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$UNDER_REVIEW" = "yadgarhq/actions" ]; then dir=.; else dir=.ci-actions; fi
+          python3 "$dir/scripts/tool_versions.py" "$dir/versions.yaml" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ steps.versions.outputs.python }}
 
       - name: stage the gate, then restore the tree
         id: stage

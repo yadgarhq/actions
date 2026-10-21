@@ -110,9 +110,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # LEDGER 1756 S2b: this repository's own `versions.yaml`, at the commit
+      # under test, read before setup-python because its version is in there.
+      - name: the tool versions this job installs (versions.yaml)
+        id: versions
+        run: python3 scripts/tool_versions.py versions.yaml >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.x"
+          python-version: ${{ steps.versions.outputs.python }}
       # scripts/tests/ imports nothing beyond the standard library and pytest
       # itself, but it RUNS the gates as subprocesses and `helm_pin_agrees.py`
       # parses YAML, so PyYAML has to be in the interpreter the suite spawns.
@@ -125,17 +130,26 @@ jobs:
       # ever disagree, that is a drift to fix, not a discrepancy to explain
       # away.
       - name: install pytest
-        run: pip install --disable-pip-version-check "pytest==9.1.1" "pyyaml==6.0.3"
+        env:
+          PYTEST_VERSION: ${{ steps.versions.outputs.pytest }}
+          PYYAML_VERSION: ${{ steps.versions.outputs.pyyaml }}
+        run: pip install --disable-pip-version-check "pytest==${PYTEST_VERSION}" "pyyaml==${PYYAML_VERSION}"
       # `test_secret_scan.py` runs the REAL gitleaks (ledger 1532): a stub would
-      # prove the range and not that the scan reddens. Same version as
-      # `ci-pr.yaml`'s precommit install; keep the two in step.
+      # prove the range and not that the scan reddens. Same version and the
+      # same sha256 check as `ci-pr.yaml`'s precommit install, both from
+      # `versions.yaml` (ledger 1362).
       - name: install gitleaks
         env:
-          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_VERSION: ${{ steps.versions.outputs.gitleaks }}
+          GITLEAKS_SHA256: ${{ steps.versions.outputs.gitleaks_sha256 }}
         run: |
           set -euo pipefail
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin gitleaks
+          SHA256="$GITLEAKS_SHA256"
+          [[ "$SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::gitleaks sha256 from versions.yaml is not 64 lowercase hex: '${SHA256}'"; exit 1; }
+          file="$RUNNER_TEMP/gitleaks.tar.gz"
+          curl -sSfL -o "$file" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${SHA256}  ${file}" | sha256sum -c -
+          sudo tar -xzf "$file" -C /usr/local/bin gitleaks
       - run: python3 -m pytest scripts/tests/ -q
 
   ci:

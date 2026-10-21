@@ -593,8 +593,8 @@ def test_every_condition_in_the_real_workflow_is_evaluable():
 # anger until a real tag. That is the reason to evaluate them here.
 
 
-def release_resolver(image_detected, chart_detected, image_result):
-    """The three references `ci-release.yaml`'s `chart` condition may read.
+def release_resolver(image_detected, chart_detected, image_result, detect_result="success"):
+    """The four references `ci-release.yaml`'s `chart` condition may read.
 
     LOCAL, AND REFUSES EVERYTHING ELSE. `make_resolver` refuses
     `needs.<job>.result` outright, and rightly — but that refusal is about what
@@ -608,6 +608,9 @@ def release_resolver(image_detected, chart_detected, image_result):
         "needs.detect.outputs.image": image_detected,
         "needs.detect.outputs.chart": chart_detected,
         "needs.image.result": image_result,
+        # LEDGER 1756 S2b review: `detect` also reads `versions.yaml`, and a
+        # failed `detect` must not start `chart` with an empty helm version.
+        "needs.detect.result": detect_result,
     }
 
     def resolve(ref, expr):
@@ -670,6 +673,17 @@ def test_the_release_chart_gate_never_runs_without_a_chart(detected, result, _ma
         )
         is False
     )
+
+
+@pytest.mark.parametrize("detect_result", ["failure", "cancelled", "skipped"])
+@pytest.mark.parametrize("detected,result", [("true", "success"), ("false", "skipped")])
+def test_the_release_chart_gate_never_runs_after_a_failed_detect(detected, result, detect_result):
+    """LEDGER 1756 S2b review. `chart` runs under `always()`, so a failed
+    `detect` does not skip it. With `chart=true` already set and the versions
+    read failed, it would install helm with an empty `version:`. The gate
+    requires `detect` to have succeeded."""
+    row = release_resolver(detected, "true", result, detect_result)
+    assert ci_verdict.evaluate(chart_condition(), row) is False
 
 
 def test_the_old_release_chart_gate_would_have_published_a_cancelled_image():
