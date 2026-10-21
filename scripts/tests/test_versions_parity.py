@@ -379,3 +379,34 @@ def test_a_helm_step_whose_first_key_is_name_is_still_read(tree):
 def test_pre_commit_hooks_rev_is_a_site(tree):
     rewrite(tree, ".pre-commit-config.yaml", "rev: v5.0.0", "rev: v4.6.0")
     assert any(p.startswith(".pre-commit-config.yaml:4:") and "pre-commit-hooks" in p for p in versions_parity.check(tree))
+
+
+# ---------------------------------------------------------------------------
+# S3: the hooks assert versions.yaml; they carry no copy of it.
+# ---------------------------------------------------------------------------
+
+ASSERTED = ("gitleaks", "hadolint", "actionlint", "cargo-deny")
+
+
+def test_every_hook_asserted_tool_is_pinned_with_its_download_sum():
+    """`hooks/tool_version.py` asserts these four; each must be a pinned, summed tool."""
+    tools = yaml.safe_load((REPO / "versions.yaml").read_text())["tools"]
+    for tool in ASSERTED:
+        assert tool in versions_parity.SHA256_REQUIRED, tool
+        assert re.fullmatch(r"[0-9]+(?:\.[0-9]+)+", str(tools[tool]["version"])), tool
+
+
+def test_the_hook_wrapper_names_exactly_the_asserted_tools():
+    text = (REPO / "hooks" / "tool_version.py").read_text()
+    names = set(re.findall(r'^    "([a-z-]+)": \($', text, re.MULTILINE))
+    assert names == set(ASSERTED)
+
+
+@pytest.mark.parametrize("tool,key", [("gitleaks", "GITLEAKS_VERSION"), ("cargo-deny", "CARGO_DENY_VERSION")])
+def test_a_version_copied_into_the_hook_wrapper_is_a_new_site_and_refused(tree, tool, key):
+    """The wrapper reads versions.yaml; a pin written into it is a second copy."""
+    path = tree / "hooks" / "tool_version.py"
+    want = yaml.safe_load((tree / "versions.yaml").read_text())["tools"][tool]["version"]
+    path.write_text(path.read_text() + f'\n{key}: "{want}"\n')
+    problems = versions_parity.check(tree)
+    assert any(tool in p and "sites" in p for p in problems), problems
