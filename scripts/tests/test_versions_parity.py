@@ -133,6 +133,10 @@ READ_SITES = [
     (".github/workflows/ci-pr.yaml", "python-version: ${{ needs.detect.outputs.python }}", 'python-version: "3.14"', "python"),
     (".github/workflows/ci-self.yaml", "python-version: ${{ steps.versions.outputs.python }}", 'python-version: "3.14"', "python"),
     (".github/workflows/seed-declaration.yaml", "python-version: ${{ steps.versions.outputs.python }}", 'python-version: "3.14"', "python"),
+    # Review round: the pip pins in workflow `run:` lines read too.
+    (".github/workflows/ci-pr.yaml", '"pyyaml==${PYYAML_VERSION}"', '"pyyaml==6.0.3"', "pyyaml"),
+    (".github/workflows/ci-self.yaml", '"pyyaml==${PYYAML_VERSION}"', '"pyyaml==6.0.3"', "pyyaml"),
+    (".github/workflows/ci-self.yaml", '"pytest==${PYTEST_VERSION}"', '"pytest==9.1.1"', "pytest"),
 ]
 
 
@@ -259,10 +263,27 @@ def test_a_drifted_prettier_pin_in_the_published_hook_is_caught(tree):
 
 def test_a_drifted_pyyaml_copy_is_caught_in_every_file_kind(tree):
     rewrite(tree, ".pre-commit-config.yaml", "pyyaml==6.0.3", "pyyaml==6.0.2")
-    rewrite(tree, ".github/workflows/ci-pr.yaml", "pyyaml==6.0.3", "pyyaml==6.0.1")
+    rewrite(tree, ".github/workflows/ci-pr.yaml", '"pyyaml==${PYYAML_VERSION}"', '"pyyaml==6.0.1"')
     problems = versions_parity.check(tree)
     assert any(p.startswith(".pre-commit-config.yaml:") and "pyyaml" in p for p in problems)
-    assert any(p.startswith(".github/workflows/ci-pr.yaml:") and "pyyaml" in p for p in problems)
+    assert any(p.startswith(".github/workflows/ci-pr.yaml:") and "pyyaml" in p and "hardcoded" in p for p in problems)
+
+
+@pytest.mark.parametrize(
+    "relative,env",
+    [
+        (".github/workflows/ci-pr.yaml", "PYYAML_VERSION: ${{ needs.detect.outputs.pyyaml }}"),
+        (".github/workflows/ci-pr.yaml", "PYYAML_VERSION: ${{ steps.versions.outputs.pyyaml }}"),
+        (".github/workflows/ci-self.yaml", "PYTEST_VERSION: ${{ steps.versions.outputs.pytest }}"),
+    ],
+)
+def test_a_pip_pin_read_from_the_wrong_output_is_refused(tree, relative, env):
+    key, read = env.split(": ", 1)
+    swap = {".outputs.pyyaml": ".outputs.pytest", ".outputs.pytest": ".outputs.pyyaml"}
+    wrong = next(read.replace(a, b) for a, b in swap.items() if a in read)
+    rewrite(tree, relative, env, f"{key}: {wrong}")
+    problems = versions_parity.check(tree)
+    assert any(relative in p and "it must read outputs." in p for p in problems), problems
 
 
 def test_a_pipx_zizmor_literal_is_a_site(tree):

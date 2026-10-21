@@ -92,6 +92,10 @@ def test_a_good_file_with_a_comment_and_a_sha_is_read(tmp_path):
         ('tools:\n  helm: { version: "3.18.4" }\n  helm: { version: "3.18.4" }\n', "twice"),
         ('tools:\n  helm: { version: "3.18.4", version: "3.0.0" }\n', "twice"),
         ("tools:\n", "no tools"),
+        # Review round: ASCII digits only, and no output name may collide.
+        ('tools:\n  helm: { version: "\u0663.18.4", sites: 6 }\n', "not a dotted number"),
+        (f'tools:\n  helm: {{ version: "3.18.4", sha256: "{SHA}" }}\n  helm-sha256: {{ version: "1.0" }}\n', "collides"),
+        (f'tools:\n  helm-sha256: {{ version: "1.0" }}\n  helm: {{ version: "3.18.4", sha256: "{SHA}" }}\n', "collides"),
     ],
 )
 def test_a_malformed_file_is_refused(tmp_path, body, needle):

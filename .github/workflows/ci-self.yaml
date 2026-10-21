@@ -130,7 +130,10 @@ jobs:
       # ever disagree, that is a drift to fix, not a discrepancy to explain
       # away.
       - name: install pytest
-        run: pip install --disable-pip-version-check "pytest==9.1.1" "pyyaml==6.0.3"
+        env:
+          PYTEST_VERSION: ${{ steps.versions.outputs.pytest }}
+          PYYAML_VERSION: ${{ steps.versions.outputs.pyyaml }}
+        run: pip install --disable-pip-version-check "pytest==${PYTEST_VERSION}" "pyyaml==${PYYAML_VERSION}"
       # `test_secret_scan.py` runs the REAL gitleaks (ledger 1532): a stub would
       # prove the range and not that the scan reddens. Same version and the
       # same sha256 check as `ci-pr.yaml`'s precommit install, both from

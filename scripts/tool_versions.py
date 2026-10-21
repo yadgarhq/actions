@@ -35,7 +35,7 @@ import sys
 
 ENTRY = re.compile(r"^  ([a-z0-9][a-z0-9-]*):\s*\{(.*)\}\s*(?:#.*)?$")
 PAIR = re.compile(r'^\s*([a-z0-9_]+):\s*(?:"([^"]*)"|([0-9]+))\s*$')
-VERSION = re.compile(r"^\d+(?:\.\d+)*$")
+VERSION = re.compile(r"^[0-9]+(?:\.[0-9]+)*$")  # ASCII digits only, never `\d`
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -87,7 +87,10 @@ def read(path):
             fields[key] = pair.group(2) if pair.group(2) is not None else pair.group(3)
         key = name.replace("-", "_")
         if key in outputs:
-            raise ReadError(f"{path}:{number}: {name} is listed twice")
+            raise ReadError(
+                f"{path}:{number}: {name} is listed twice, or its output `{key}` "
+                "collides with another tool's `_sha256` output"
+            )
         version = fields.get("version")
         if version is None:
             raise ReadError(f"{path}:{number}: {name} has no version")
@@ -97,6 +100,10 @@ def read(path):
         if "sha256" in fields:
             if not SHA256.match(fields["sha256"]):
                 raise ReadError(f"{path}:{number}: {name} sha256 is not 64 lowercase hex characters")
+            if f"{key}_sha256" in outputs:
+                raise ReadError(
+                    f"{path}:{number}: {name}'s output `{key}_sha256` collides with another tool"
+                )
             outputs[f"{key}_sha256"] = fields["sha256"]
     if not outputs:
         raise ReadError(f"{path}: `tools:` lists no tools")

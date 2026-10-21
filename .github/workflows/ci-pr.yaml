@@ -137,11 +137,60 @@ jobs:
       trivy: ${{ steps.versions.outputs.trivy }}
       rust_toolchain: ${{ steps.versions.outputs.rust_toolchain }}
       python: ${{ steps.versions.outputs.python }}
+      pyyaml: ${{ steps.versions.outputs.pyyaml }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ inputs.ref }}
+      # LEDGER 1756 S2b. THE TOOL VERSIONS, from `versions.yaml` at the commit
+      # this workflow file runs at (ADR-0981), never at `main` and never from
+      # the repository under review. Only two files are fetched. The reader is
+      # standard-library Python on the runner's own `python3`, because
+      # `setup-python`'s version is one of the values it reads.
+      #
+      # BEFORE `d` AND `e`, on purpose: if this read fails, no fact is set
+      # yet, so no downstream job can run with an empty version
+      # (`scripts/tests/test_versions_read_order.py`).
+      - name: the actions commit this job runs (ADR-0981)
+        id: own_sha
+        env:
+          OWN_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$OWN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::job.workflow_sha is not a 40-hex commit SHA: '${OWN_SHA}'. There is no fallback to main (ADR-0981)."
+            exit 1
+          fi
+          echo "sha=${OWN_SHA}" >> "$GITHUB_OUTPUT"
+      - if: github.repository != 'yadgarhq/actions'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: yadgarhq/actions
+          ref: ${{ steps.own_sha.outputs.sha }}
+          path: .ci-versions
+          sparse-checkout: |
+            versions.yaml
+            scripts/tool_versions.py
+          sparse-checkout-cone-mode: false
+      - name: the tool versions this run installs (versions.yaml)
+        id: versions
+        env:
+          UNDER_REVIEW: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # The repository NAME decides, never the presence of the file, so no
+          # repository under review can supply its own versions.
+          if [ "$UNDER_REVIEW" = "yadgarhq/actions" ]; then dir=.; else dir=.ci-versions; fi
+          python3 "$dir/scripts/tool_versions.py" "$dir/versions.yaml" > "$RUNNER_TEMP/versions.txt"
+          cat "$RUNNER_TEMP/versions.txt" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Tool versions (versions.yaml)"
+            sed 's/^/- /' "$RUNNER_TEMP/versions.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
+          rm -rf .ci-versions
+
       - id: d
         run: |
           set -euo pipefail
@@ -210,50 +259,6 @@ jobs:
           else
             echo "text_edit=false" >> "$GITHUB_OUTPUT"
           fi
-
-      # LEDGER 1756 S2b. THE TOOL VERSIONS, from `versions.yaml` at the commit
-      # this workflow file runs at (ADR-0981), never at `main` and never from
-      # the repository under review. Only two files are fetched. The reader is
-      # standard-library Python on the runner's own `python3`, because
-      # `setup-python`'s version is one of the values it reads.
-      - name: the actions commit this job runs (ADR-0981)
-        id: own_sha
-        env:
-          OWN_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
-        run: |
-          set -euo pipefail
-          if [[ ! "$OWN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::job.workflow_sha is not a 40-hex commit SHA: '${OWN_SHA}'. There is no fallback to main (ADR-0981)."
-            exit 1
-          fi
-          echo "sha=${OWN_SHA}" >> "$GITHUB_OUTPUT"
-      - if: github.repository != 'yadgarhq/actions'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          repository: yadgarhq/actions
-          ref: ${{ steps.own_sha.outputs.sha }}
-          path: .ci-versions
-          sparse-checkout: |
-            versions.yaml
-            scripts/tool_versions.py
-          sparse-checkout-cone-mode: false
-      - name: the tool versions this run installs (versions.yaml)
-        id: versions
-        env:
-          UNDER_REVIEW: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          # The repository NAME decides, never the presence of the file, so no
-          # repository under review can supply its own versions.
-          if [ "$UNDER_REVIEW" = "yadgarhq/actions" ]; then dir=.; else dir=.ci-versions; fi
-          python3 "$dir/scripts/tool_versions.py" "$dir/versions.yaml" > "$RUNNER_TEMP/versions.txt"
-          cat "$RUNNER_TEMP/versions.txt" >> "$GITHUB_OUTPUT"
-          {
-            echo "## Tool versions (versions.yaml)"
-            sed 's/^/- /' "$RUNNER_TEMP/versions.txt"
-          } >> "$GITHUB_STEP_SUMMARY"
-          rm -rf .ci-versions
 
   # ONE definition of "is this repository clean": the hooks. CI installs what
   # they need and runs all of them.
@@ -590,7 +595,9 @@ jobs:
       # `trivy_gate.py` parses `.trivyignore.yaml` and each `Chart.lock` with
       # PyYAML, the same pin `portability` and `passed` already use.
       - name: install PyYAML
-        run: pip install --disable-pip-version-check "pyyaml==6.0.3"
+        env:
+          PYYAML_VERSION: ${{ needs.detect.outputs.pyyaml }}
+        run: pip install --disable-pip-version-check "pyyaml==${PYYAML_VERSION}"
 
       # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
       # the commit THIS workflow file runs at, never `main`. Read through
@@ -1506,7 +1513,9 @@ jobs:
       # the standard library and is not guaranteed on the runner; the version is
       # pinned for the same reason every other tool here is.
       - name: install PyYAML
-        run: pip install --disable-pip-version-check "pyyaml==6.0.3"
+        env:
+          PYYAML_VERSION: ${{ needs.detect.outputs.pyyaml }}
+        run: pip install --disable-pip-version-check "pyyaml==${PYYAML_VERSION}"
       # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
       # the commit THIS workflow file runs at, never `main`. Read through
       # `fromJSON(toJSON(job))` because actionlint types `job` strictly; checked
@@ -1665,7 +1674,9 @@ jobs:
       # `portability` job states. Pinned to the 6.0.3 that job and the
       # `pytest-scripts` hook already use.
       - name: install PyYAML
-        run: pip install --disable-pip-version-check "pyyaml==6.0.3"
+        env:
+          PYYAML_VERSION: ${{ needs.detect.outputs.pyyaml }}
+        run: pip install --disable-pip-version-check "pyyaml==${PYYAML_VERSION}"
 
       # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
       # the commit THIS workflow file runs at, never `main`. Read through
@@ -1827,7 +1838,9 @@ jobs:
       # `portability` job states. Pinned to the 6.0.3 every other chart job
       # already uses.
       - name: install PyYAML
-        run: pip install --disable-pip-version-check "pyyaml==6.0.3"
+        env:
+          PYYAML_VERSION: ${{ needs.detect.outputs.pyyaml }}
+        run: pip install --disable-pip-version-check "pyyaml==${PYYAML_VERSION}"
 
       # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
       # the commit THIS workflow file runs at, never `main`. Read through
@@ -2397,7 +2410,9 @@ jobs:
       # the standard library and is not guaranteed on the runner; pinned to the
       # 6.0.3 the `portability` job and the `pytest-scripts` hook already use.
       - name: install PyYAML
-        run: pip install --disable-pip-version-check "pyyaml==6.0.3"
+        env:
+          PYYAML_VERSION: ${{ steps.versions.outputs.pyyaml }}
+        run: pip install --disable-pip-version-check "pyyaml==${PYYAML_VERSION}"
 
       - name: every job did what its condition asked of it
         env:

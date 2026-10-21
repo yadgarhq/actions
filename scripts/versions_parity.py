@@ -78,6 +78,9 @@ READ_IN_WORKFLOWS = {
     "trivy",
     "rust-toolchain",
     "python",
+    # The pip pins in workflow `run:` lines read through `env:` (review round).
+    "pyyaml",
+    "pytest",
 }
 # These are downloaded as artefacts; `versions.yaml` carries their sha256.
 SHA256_REQUIRED = ("gitleaks", "hadolint", "actionlint", "cargo-deny")
@@ -127,8 +130,8 @@ SCANNERS = {
     ],
     "python": [uses_input("actions/setup-python", "python-version")],
     "prettier": [("line", re.compile(rf"prettier@{VERSION}"))],
-    "pytest": [("line", re.compile(rf"\bpytest=={VERSION}"))],
-    "pyyaml": [("line", re.compile(rf"\bpyyaml=={VERSION}", re.IGNORECASE))],
+    "pytest": [("line", re.compile(rf"\bpytest=={VERSION}")), env("PYTEST_VERSION")],
+    "pyyaml": [("line", re.compile(rf"\bpyyaml=={VERSION}", re.IGNORECASE)), env("PYYAML_VERSION")],
     "shellcheck-py": [
         (
             "block",

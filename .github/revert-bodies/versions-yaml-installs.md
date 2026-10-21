@@ -16,8 +16,9 @@
   SCOPE. This reverts the whole of yadgarhq/actions#PR: the versions read in
   `detect` (ci-pr, ci-release) and in ci-self, base-images,
   estate-runner-image, repin, seed-declaration and `passed`; every install
-  step's read of that output; the sha256 checks; the trivy, rust and python
-  pins; `scripts/tool_versions.py`; the `versions.yaml` changes; and the gate
+  step's read of that output, the pip pins (`pyyaml`, `pytest`) included; the
+  sha256 checks; the trivy, rust and python pins; the `needs.detect.result`
+  guard on `ci-release`'s `chart`; `scripts/tool_versions.py`; the `versions.yaml` changes; and the gate
   and test changes. Every literal comes back as it was, including
   `toolchain: stable`, `python-version: "3.x"` and the four trivy-action
   steps with no `version:`.

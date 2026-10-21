@@ -68,7 +68,7 @@ jobs:
       # ADR-0981 / ADR-0984: `detect` reads and checks the commit THIS workflow
       # file runs at, records it once per run, fails the whole release closed if
       # it is unreadable, and reads `versions.yaml` at that commit (the sparse
-      # checkout at the end of this job).
+      # checkout before step `d`).
       - name: the actions commit this job runs (ADR-0981)
         id: own_sha
         env:
@@ -90,6 +90,40 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # LEDGER 1756 S2b. The tool versions, from `versions.yaml` at this
+      # workflow's own commit (ADR-0981). Two files only; the reader runs on the
+      # runner's own `python3`. Same steps as `ci-pr.yaml`'s `detect`.
+      #
+      # BEFORE `d`, on purpose: `chart` runs under `always()`, so a fact set
+      # before a failed read would start it with an empty helm version. It
+      # also requires `needs.detect.result == 'success'`; both are held by
+      # `scripts/tests/test_versions_read_order.py`.
+      - if: github.repository != 'yadgarhq/actions'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: yadgarhq/actions
+          ref: ${{ steps.own_sha.outputs.sha }}
+          path: .ci-versions
+          sparse-checkout: |
+            versions.yaml
+            scripts/tool_versions.py
+          sparse-checkout-cone-mode: false
+      - name: the tool versions this run installs (versions.yaml)
+        id: versions
+        env:
+          UNDER_REVIEW: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$UNDER_REVIEW" = "yadgarhq/actions" ]; then dir=.; else dir=.ci-versions; fi
+          python3 "$dir/scripts/tool_versions.py" "$dir/versions.yaml" > "$RUNNER_TEMP/versions.txt"
+          cat "$RUNNER_TEMP/versions.txt" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Tool versions (versions.yaml)"
+            sed 's/^/- /' "$RUNNER_TEMP/versions.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
+          rm -rf .ci-versions
+
       - id: d
         env:
           VERSION: ${{ inputs.version }}
@@ -128,35 +162,6 @@ jobs:
             echo "chartname=$name" >> "$GITHUB_OUTPUT"
             echo "- chart name: \`$name\`" >> "$GITHUB_STEP_SUMMARY"
           fi
-
-      # LEDGER 1756 S2b. The tool versions, from `versions.yaml` at this
-      # workflow's own commit (ADR-0981). Two files only; the reader runs on the
-      # runner's own `python3`. Same steps as `ci-pr.yaml`'s `detect`.
-      - if: github.repository != 'yadgarhq/actions'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          repository: yadgarhq/actions
-          ref: ${{ steps.own_sha.outputs.sha }}
-          path: .ci-versions
-          sparse-checkout: |
-            versions.yaml
-            scripts/tool_versions.py
-          sparse-checkout-cone-mode: false
-      - name: the tool versions this run installs (versions.yaml)
-        id: versions
-        env:
-          UNDER_REVIEW: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          if [ "$UNDER_REVIEW" = "yadgarhq/actions" ]; then dir=.; else dir=.ci-versions; fi
-          python3 "$dir/scripts/tool_versions.py" "$dir/versions.yaml" > "$RUNNER_TEMP/versions.txt"
-          cat "$RUNNER_TEMP/versions.txt" >> "$GITHUB_OUTPUT"
-          {
-            echo "## Tool versions (versions.yaml)"
-            sed 's/^/- /' "$RUNNER_TEMP/versions.txt"
-          } >> "$GITHUB_STEP_SUMMARY"
-          rm -rf .ci-versions
 
   image:
     needs: detect
@@ -421,7 +426,7 @@ jobs:
     # and leaves `!= 'true'` publishing without one. One keystroke, opposite
     # failure direction.
     if: >-
-      always() && needs.detect.outputs.chart == 'true'
+      always() && needs.detect.result == 'success' && needs.detect.outputs.chart == 'true'
       && (needs.image.result == 'success' || needs.detect.outputs.image == 'false')
     runs-on: ubuntu-latest
     steps:
