@@ -84,18 +84,40 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
+      # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
+      # the commit THIS workflow file runs at, never `main`. Read through
+      # `fromJSON(toJSON(job))` because actionlint types `job` strictly; checked
+      # here, fail-closed, before anything consumes it.
+      - name: the actions commit this job runs (ADR-0981)
+        id: own_sha
+        env:
+          OWN_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$OWN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::job.workflow_sha is not a 40-hex commit SHA: '${OWN_SHA}'. There is no fallback to main (ADR-0981)."
+            exit 1
+          fi
+          echo "sha=${OWN_SHA}" >> "$GITHUB_OUTPUT"
+      # ONCE PER RUN (ADR-0981): the commit of `yadgarhq/actions` every second
+      # checkout in this run reads, so a run can be reproduced from its summary.
+      - name: record the yadgarhq/actions commit this run executes
+        env:
+          OWN_SHA: ${{ steps.own_sha.outputs.sha }}
+        run: |
+          echo "yadgarhq/actions commit this run executes: \`${OWN_SHA}\` (ADR-0981)" >> "$GITHUB_STEP_SUMMARY"
       # THE PLANNER IS A CHECKED-IN SCRIPT staged the way the `version`,
       # `template` and `portability` jobs stage theirs, and for the same reason:
       # this is a reusable workflow, so the checkout above is the CALLING
-      # repository and nothing from `yadgarhq/actions` is on disk. `@main`
-      # because that is what every consumer pins the workflow at, so the script
-      # and the workflow that calls it move together.
+      # repository and nothing from `yadgarhq/actions` is on disk. At the
+      # workflow's own commit (ADR-0981), so the script and the workflow that
+      # calls it are one commit.
       - if: github.repository != 'yadgarhq/actions'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           repository: yadgarhq/actions
-          ref: main
+          ref: ${{ steps.own_sha.outputs.sha }}
           path: .ci-actions
 
       - name: where the planner is, and whether this repository has a manifest
