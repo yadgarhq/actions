@@ -63,7 +63,16 @@ ACTIONS_REPO = "actions"
 CONFIG = ".pre-commit-config.yaml"
 TEMPLATE = ".github/pull_request_template.md"
 MANIFEST = ".pre-commit-hooks.yaml"
-BRANCH_PREFIX = "actions-adopt/"
+# ONE FIXED BRANCH PER CONSUMER (review of actions#124). A branch per tag
+# stacked one conflicting pull request per release, against ADR-0982's
+# "exactly one". The open pull request on this branch is moved to the newest
+# tag instead.
+BRANCH = "actions-adopt"
+# The App every generated commit is authored by, and the subjects it writes.
+# A commit on BRANCH that is not both is somebody's work, and is never reset.
+BOT = "yadgarhq-bot[bot]"
+GENERATED = re.compile(r"chore\(deps\): (bump|reorder|regenerate) yadgarhq/actions hooks ")
+MAX_BRANCH_COMMITS = 50
 DEPLOYABLE = "yadgar-deployable"
 
 REPO_LINE = f"  - repo: {ACTIONS_URL}"
@@ -108,6 +117,11 @@ def load_classes(text):
     for key in ("topic_prefix", "exempt", "classes", "overrides"):
         if key not in data:
             raise Refusal(f"classes.json: missing `{key}`")
+    # FIRST-RUN SAFETY (review of actions#124). `live` arms a TAG PUSH; until a
+    # reviewed pull request sets it true, every tag runs dry. Exactly a JSON
+    # boolean: a string "false" is truthy, so anything else is refused.
+    if not isinstance(data.get("live"), bool):
+        raise Refusal("classes.json: `live` must be true or false")
     for name, cls in data["classes"].items():
         ids = [h.get("id") for h in cls.get("hooks", [])]
         if not ids or not all(isinstance(i, str) and i for i in ids):
@@ -374,27 +388,38 @@ def check_tag(tag):
     return tag
 
 
-def branch_for(tag):
-    """Derived from the content alone, so a re-run finds the same branch."""
-    return BRANCH_PREFIX + check_tag(tag)
+def title_for(current, tag, changes):
+    """The title, which also targets the tag: `target_of` reads it back."""
+    if current != tag:
+        return f"chore(deps): bump yadgarhq/actions hooks from {current} to {tag}"
+    if changes and all(c.startswith("order differs:") for c in changes):
+        return f"chore(deps): reorder yadgarhq/actions hooks ({tag})"
+    return f"chore(deps): regenerate yadgarhq/actions hooks ({tag})"
 
 
-def title_for(current, tag):
-    return f"chore(deps): bump yadgarhq/actions hooks from {current} to {tag}"
+def target_of(title):
+    """The tag a generated title moves to (its last tag), or None."""
+    found = TAG.findall((title or "")[:300])
+    return found[-1] if found else None
 
 
-def is_live(event, dry_run, ref):
-    """Writes happen on a tag push, or on a dispatch from `main` that says so."""
+def is_live(event, dry_run, ref, armed):
+    """Writes happen on a tag push once `classes.json` is armed, or on a
+    dispatch from `main` that says so (the explicit human path)."""
     if event == "push":
-        return ref.startswith("refs/tags/") and bool(TAG.fullmatch(ref[len("refs/tags/"):]))
+        return (armed and ref.startswith("refs/tags/")
+                and bool(TAG.fullmatch(ref[len("refs/tags/"):])))
     if event == "workflow_dispatch":
         return dry_run == "false" and ref == "refs/heads/main"
     return False
 
 
 def git_status(*args):
-    return subprocess.run(["git", *args], capture_output=True, timeout=GH_TIMEOUT,
-                          check=False).returncode
+    try:
+        return subprocess.run(["git", *args], capture_output=True, timeout=GH_TIMEOUT,
+                              check=False).returncode
+    except (OSError, subprocess.TimeoutExpired):
+        return 127
 
 
 def tag_on_main(tag, git=git_status):
@@ -453,10 +478,13 @@ def body(template, repository, cls, current, tag, changes, deployable):
             f"{TEMPLATE} is missing {', '.join('`## ' + m + '`' for m in missing)}, "
             "so no body built from it can pass `ci / template`"
         )
+    moved = current != tag
     compare = f"https://github.com/yadgarhq/actions/compare/{current}...{tag}"
     what = [
-        f"Moves the `yadgarhq/actions` hook block of `{repository}` from `{current}` "
-        f"to `{tag}`. The block is regenerated from the `{cls}` class (topic "
+        (f"Moves the `yadgarhq/actions` hook block of `{repository}` from `{current}` "
+         f"to `{tag}`." if moved else
+         f"Keeps the `yadgarhq/actions` hook block of `{repository}` at `{tag}`.")
+        + f" The block is regenerated from the `{cls}` class (topic "
         f"`yadgar-class-{cls}`), as `classes.json` in `yadgarhq/actions` defines it.",
         "",
     ]
@@ -490,7 +518,9 @@ def body(template, repository, cls, current, tag, changes, deployable):
         "A newer hook can red a check that passed at the old rev. That is the gate "
         "working: fix the cause, and never widen the gate to make it pass.",
         "",
-        f"Reversible: restore `rev: {current}`. A published tag never moves, so the "
+        (f"Reversible: restore `rev: {current}`. A published tag never moves, so the "
+         if moved else "Reversible: revert this pull request. A published tag never moves, so the ")
+        +
         "old rev still names the same hooks.",
         "",
         "D80: this changes developer tooling only. It renders no resource, names no "
@@ -510,14 +540,15 @@ def body(template, repository, cls, current, tag, changes, deployable):
             "ADR-0531). ADR-0983: the run's report says which consumers carry "
             f"`{tag}`.",
         ],
-        "Changelog": [f"- {title_for(current, tag)}"],
+        "Changelog": [f"- {title_for(current, tag, changes)}"],
         "Verification": [
             "`ci / passed` on this pull request runs this repository's pre-commit "
             "at the new rev; that run IS the verification. Nothing was run before "
             "the pull request was opened. A repository with no CI needs "
             "`pre-commit run --all-files` on this branch before the merge.",
             "",
-            f"The release range to read: {compare}",
+            (f"The release range to read: {compare}" if moved
+             else "The rev does not move, so there is no release range to read."),
         ],
         "Risk": risk,
     }
@@ -548,9 +579,11 @@ def one(client, owner, meta, cls, tag, classes, live, row):
     if got is None:
         raise Refusal(f"no {CONFIG} on `{base}`")
     text, blob = got
-    row["current"] = current = parse(text).rev
-    if not semver(current):
-        raise Refusal(f"its rev `{current}` is not a plain tag")
+    current = parse(text).rev
+    if not TAG.fullmatch(current):
+        # The value is untrusted and is NOT echoed: it would reach the summary.
+        raise Refusal("its yadgarhq/actions rev is not a plain vX.Y.Z tag")
+    row["current"] = current
     if semver(current) > semver(tag):
         row["status"] = "ahead"
         return
@@ -567,19 +600,26 @@ def one(client, owner, meta, cls, tag, classes, live, row):
     template = client.read_file(owner, name, TEMPLATE, base_sha)
     if template is None:
         raise Refusal(f"no {TEMPLATE}, so no body can be built for it")
-    title = title_for(current, tag)
+    title = title_for(current, tag, changes)
     text_body = body(template[0], f"{owner}/{name}", cls, current, tag, changes,
                      DEPLOYABLE in meta["topics"])
-    branch = branch_for(tag)
+    branch = BRANCH
     prs = client.find_prs(owner, name, branch)
     open_pr = next((p for p in prs if p["state"] == "open"), None)
-    if open_pr is None and any(p["merged"] for p in prs):
+    if open_pr is not None:
+        moving_to = target_of(open_pr["title"])
+        if moving_to and semver(moving_to) > semver(tag):
+            # The open pull request already proposes a newer tag; never move it down.
+            row.update(status="ahead", url=open_pr["url"])
+            return
+    for_this_tag = [p for p in prs if p["state"] != "open" and target_of(p["title"]) == tag]
+    if open_pr is None and any(p["merged"] for p in for_this_tag):
         raise Refusal(
-            f"`{branch}` already merged, yet `{base}` is not the class at {tag} "
-            "(drift came back). Fix it by hand; a merged branch name is not reused."
+            f"the adoption pull request for {tag} merged, yet `{base}` is not the class "
+            "at that tag (drift came back). Fix it by hand."
         )
-    if open_pr is None and prs:
-        row.update(status="declined", url=prs[0]["url"])
+    if open_pr is None and for_this_tag:
+        row.update(status="declined", url=for_this_tag[0]["url"])
         print(f"::warning::{owner}/{name}: the adoption pull request for {tag} was closed "
               "without merging, so it is not proposed again. Reopen it, or move the rev by hand.")
         return
@@ -595,6 +635,13 @@ def one(client, owner, meta, cls, tag, classes, live, row):
         client.create_ref(owner, name, branch, base_sha)
     if on_branch is None or on_branch[0] != new:
         if head is not None:
+            foreign = [c for c in client.branch_commits(owner, name, base_sha, head)
+                       if c["author"] != BOT or not GENERATED.match(c["message"])]
+            if foreign:
+                raise Refusal(
+                    f"`{branch}` carries {len(foreign)} commit(s) not made by the fan-out; "
+                    "refusing to reset them away. Merge or move that work, then re-run."
+                )
             client.reset_ref(owner, name, branch, base_sha)
         client.put_file(owner, name, CONFIG, branch, new, blob, title)
         wrote = True
@@ -717,7 +764,8 @@ def report(rows, tag, live):
             # <pre> with every character escaped: a patch line holding ``` would
             # otherwise close a markdown fence and inject into the summary.
             out += ["", f"<details><summary><code>{r['repo']}</code></summary>", "",
-                    "<pre>", html.escape(r["patch"].rstrip("\n")), "</pre>", "",
+                    "<pre>", html.escape(r["patch"].rstrip("\n")).replace("::", ":&#58;"),
+                    "</pre>", "",
                     "</details>"]
     return "\n".join(out) + "\n"
 
@@ -795,6 +843,15 @@ class Gh:
                         missing_ok=True)
         return None if out is None else json.loads(out)["object"]["sha"]
 
+    def branch_commits(self, owner, repo, base, head):
+        """Commits on `head` that `base` lacks, as `{author, message}`."""
+        got = json.loads(self._api(
+            f"repos/{q(owner)}/{q(repo)}/compare/{q(base, '')}...{q(head, '')}?per_page=100"))
+        if got.get("total_commits", MAX_BRANCH_COMMITS + 1) > MAX_BRANCH_COMMITS:
+            raise Refusal(f"`{BRANCH}` is over {MAX_BRANCH_COMMITS} commits ahead; refused")
+        return [{"author": (c.get("author") or {}).get("login"),
+                 "message": c["commit"]["message"]} for c in got["commits"]]
+
     def find_prs(self, owner, repo, branch):
         out = self._api(f"repos/{q(owner)}/{q(repo)}/pulls?head={q(owner + ':' + branch, '')}"
                         "&state=all&per_page=10")
@@ -807,8 +864,8 @@ class Gh:
                   payload={"ref": f"refs/heads/{branch}", "sha": sha})
 
     def reset_ref(self, owner, repo, branch, sha):
-        if not branch.startswith(BRANCH_PREFIX):
-            raise Refusal(f"refusing to force-move `{branch}`: only {BRANCH_PREFIX}* is ours")
+        if branch != BRANCH:
+            raise Refusal(f"refusing to force-move `{branch}`: only `{BRANCH}` is ours")
         self._api("-X", "PATCH", f"repos/{q(owner)}/{q(repo)}/git/refs/heads/{q(branch)}",
                   payload={"sha": sha, "force": True})
 
@@ -833,11 +890,14 @@ class Gh:
 
 
 def summary(text):
+    """The report goes to the step summary and NOWHERE ELSE (review of
+    actions#124). It carries consumer diff context, and the runner reads any
+    stdout line that starts, after leading whitespace, with `::` as a
+    workflow command."""
     path = os.environ.get("GITHUB_STEP_SUMMARY")
     if path:
         with open(path, "a", encoding="utf-8") as handle:
             handle.write(text)
-    print(text)
 
 
 def output(key, value):
@@ -850,12 +910,15 @@ def output(key, value):
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("mode")
+    mode_cmd = sub.add_parser("mode")
+    mode_cmd.add_argument("--classes", default="classes.json")
     sub.add_parser("greatest", help="the greatest plain vX.Y.Z tag on stdin")
     check = sub.add_parser("check-tag")
     check.add_argument("tag")
     on_main = sub.add_parser("on-main")
     on_main.add_argument("--tag", required=True)
+    on_main.add_argument("--report-only", action="store_true",
+                         help="dry mode: say whether the tag is on main, never fail")
     enum = sub.add_parser("enumerate")
     enum.add_argument("--owner", required=True)
     enum.add_argument("--classes", default="classes.json")
@@ -874,7 +937,11 @@ def main(argv):
             check_tag(args.tag)
             if args.command == "on-main":
                 tag_on_main(args.tag)
+                print(f"{args.tag} is on main")
         except Refusal as refusal:
+            if args.command == "on-main" and args.report_only and TAG.fullmatch(args.tag):
+                print(f"{args.tag} is not on main (report only: a live run would refuse it)")
+                return 0
             print(f"::error::{annotation(refusal)}", file=sys.stderr)
             return 1
         return 0
@@ -886,8 +953,14 @@ def main(argv):
         print(tag)
         return 0
     if args.command == "mode":
+        try:
+            with open(args.classes, encoding="utf-8") as handle:
+                armed = load_classes(handle.read())["live"]
+        except (OSError, ValueError, Refusal) as refusal:
+            print(f"::error::{annotation(refusal)}", file=sys.stderr)
+            return 1
         live = is_live(os.environ.get("EVENT", ""), os.environ.get("DRY_RUN", ""),
-                       os.environ.get("REF", ""))
+                       os.environ.get("REF", ""), armed)
         output("live", "true" if live else "false")
         print(f"live={'true' if live else 'false'}")
         return 0
@@ -924,6 +997,7 @@ def main(argv):
         print(f"::error::{annotation(refusal)}", file=sys.stderr)
         return 1
     summary(report(rows, tag, args.live))
+    print(f"{len(rows)} repositories reported to the step summary ({'live' if args.live else 'dry'}).")
     for r in rows:
         if r["status"] == "error":
             print(f"::error::{annotation(args.owner + '/' + r['repo'] + ': ' + r['note'])}",

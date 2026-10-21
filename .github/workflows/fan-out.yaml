@@ -21,9 +21,14 @@ name: fan-out
 # THE FILTER IS A PLAIN vX.Y.Z. A moving tag such as `v1` must never become a
 # consumer's pin; `fan_out.py` re-checks the tag and refuses anything else.
 #
-# DRY BY DEFAULT ON DISPATCH, AND THE TOKEN FOLLOWS THE MODE. `fan_out.py mode`
-# says `live=true` only for a tag push, or for a dispatch from `main` with
-# `dry_run` false. Anything else is a dry run: the script writes nothing, and
+# DRY BY DEFAULT, AND THE TOKEN FOLLOWS THE MODE. `fan_out.py mode` says
+# `live=true` only for a tag push WHILE `classes.json` has `"live": true`, or
+# for a dispatch from `main` with `dry_run` false (the explicit human path).
+# `live` ships false: the tag that merges this runs dry, and a reviewed pull
+# request arms it after a dry run from main; that pull request's own tag is the
+# first live run. In dry mode the on-main check runs report-only, so it is
+# exercised before it can block anything. Anything else is a dry run: the
+# script writes nothing, and
 # the token minted for it holds `contents: read` and `pull_requests: read`
 # only, so a bug in the script still cannot write. The dry run still needs a
 # token: `docs` and `argocd-verify` are private.
@@ -35,8 +40,13 @@ name: fan-out
 # and by permission to contents and pull requests (the `repin.yaml` pattern),
 # which also drops the installation's `administration: write` (plan S5).
 #
-# ROLLBACK: disable this workflow and close the open `actions-adopt/*` pull
-# requests. Consumers keep their old rev; nothing was merged.
+# ONE BRANCH PER CONSUMER, `actions-adopt`. A later tag moves its open pull
+# request forward instead of opening a second one. A commit on that branch the
+# fan-out did not make is never reset away: the row is an error instead.
+#
+# ROLLBACK: set `"live": false` in classes.json (or disable this workflow) and
+# close the open `actions-adopt` pull requests. Consumers keep their old rev;
+# nothing was merged.
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
@@ -167,6 +177,8 @@ jobs:
           python3 scripts/fan_out.py check-tag -- "$tag"
           if [ "$LIVE" = true ]; then
             python3 scripts/fan_out.py on-main --tag "$tag"
+          else
+            python3 scripts/fan_out.py on-main --tag "$tag" --report-only
           fi
           git show "refs/tags/${tag}:.pre-commit-hooks.yaml" > "$RUNNER_TEMP/manifest.yaml"
           args=(run --owner "$OWNER" --tag "$tag" --repos "$RUNNER_TEMP/repos.json"

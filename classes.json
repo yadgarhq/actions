@@ -4,8 +4,10 @@
     "A consumer's class is its ONE `yadgar-class-<name>` topic. `scripts/fan_out.py` renders a consumer's yadgarhq/actions block from this file and a tag.",
     "MEASURED, NOT CHOSEN: every list below is the hook set the class's consumers carried on 2026-10-21 (fixtures in scripts/tests/fixtures/fan_out/, each with its source commit in test_fan_out.py). S4 records what exists; this file does not decide which hooks a class should carry.",
     "ORDER is part of the class. Where consumers of one class disagreed on order, the majority wins; on a tie, the order the other rust classes share wins. Each class's `order` field says which repositories that moves.",
+    "`live` ARMS A TAG PUSH (first-run safety, review of actions#124). While it is false, a pushed tag runs the fan-out DRY; a dispatch from main with dry_run=false is the explicit human path. Set it true only in a reviewed pull request, after a dry run from main; that pull request's own tag is then the first live run.",
     "Keys on a hook other than `id` are written into the consumer's block as they are (only `exclude` is measured today). `overrides` replaces a hook's keys for one repository."
   ],
+  "live": false,
   "topic_prefix": "yadgar-class-",
   "exempt": {
     "actions": "The producer. Its own .pre-commit-config.yaml runs its hooks from local paths (`repo: local`) at the commit under test, so it pins no rev to adopt."

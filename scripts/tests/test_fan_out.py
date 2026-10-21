@@ -21,6 +21,7 @@ Run: python3 -m pytest scripts/tests/ -q
 
 import copy
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -304,15 +305,17 @@ def test_only_a_plain_semver_tag_is_a_target():
             fan_out.check_tag(bad)
 
 
-def test_the_branch_is_derived_from_the_tag_alone():
-    assert fan_out.branch_for("v1.35.0") == "actions-adopt/v1.35.0"
-    assert fan_out.branch_for("v1.35.0") == fan_out.branch_for("v1.35.0")
+def test_one_fixed_branch_per_consumer_whatever_the_tag():
+    """ADR-0982 says EXACTLY ONE adoption pull request per repository. A
+    branch per tag stacked one per release (review of actions#124)."""
+    assert fan_out.BRANCH == "actions-adopt"
 
 
 @pytest.mark.parametrize(
     "event,dry_run,ref,live",
     [
         ("push", "", "refs/tags/v1.35.0", True),
+        ("push", "true", "refs/tags/v1.35.0", True),
         ("workflow_dispatch", "true", "refs/heads/main", False),
         ("workflow_dispatch", "false", "refs/heads/main", True),
         ("workflow_dispatch", "false", "refs/heads/feat/x", False),
@@ -329,14 +332,76 @@ def test_the_branch_is_derived_from_the_tag_alone():
 def test_the_mode_is_live_only_on_a_tag_push_or_an_explicit_dispatch_from_main(
     event, dry_run, ref, live
 ):
-    assert fan_out.is_live(event, dry_run, ref) is live
+    assert fan_out.is_live(event, dry_run, ref, armed=True) is live
+
+
+@pytest.mark.parametrize(
+    "event,dry_run,ref,live",
+    [
+        ("push", "", "refs/tags/v1.35.0", False),
+        ("workflow_dispatch", "false", "refs/heads/main", True),
+        ("workflow_dispatch", "true", "refs/heads/main", False),
+    ],
+)
+def test_until_classes_json_arms_it_a_tag_push_is_dry(event, dry_run, ref, live):
+    """FIRST-RUN SAFETY (review of actions#124): the tag this merge cuts runs
+    DRY. A tag push goes live only after a reviewed PR sets `live: true`; a
+    dispatch from main with dry_run=false stays the explicit human path."""
+    assert fan_out.is_live(event, dry_run, ref, armed=False) is live
+
+
+def test_classes_json_carries_a_boolean_live_and_it_starts_false():
+    assert CLASSES["live"] is False
+
+
+@pytest.mark.parametrize("value", ["absent", "false", 0, None, "true", 1])
+def test_an_absent_or_non_boolean_live_is_refused(value):
+    data = json.loads((REPO / "classes.json").read_text())
+    if value == "absent":
+        del data["live"]
+    else:
+        data["live"] = value
+    with pytest.raises(fan_out.Refusal):
+        fan_out.load_classes(json.dumps(data))
+
+
+def mode(tmp_path, live_value, event="push", ref="refs/tags/v1.35.0", dry_run=""):
+    tmp_path = tmp_path / str(live_value)
+    tmp_path.mkdir()
+    data = json.loads((REPO / "classes.json").read_text())
+    data["live"] = live_value
+    classes = tmp_path / "classes.json"
+    classes.write_text(json.dumps(data))
+    out = tmp_path / "out"
+    env = {"EVENT": event, "DRY_RUN": dry_run, "REF": ref,
+           "GITHUB_OUTPUT": str(out), "PATH": "/usr/bin:/bin"}
+    done = subprocess.run([sys.executable, str(GATE), "mode", "--classes", str(classes)],
+                          env=env, capture_output=True, text=True, check=False)
+    return done, out.read_text() if out.exists() else ""
+
+
+def test_the_mode_command_keeps_a_tag_push_dry_until_armed(tmp_path):
+    assert mode(tmp_path, False)[1] == "live=false\n"
+    assert mode(tmp_path, True)[1] == "live=true\n"
+    done, written = mode(tmp_path, "yes")
+    assert done.returncode != 0 and written == ""
+
+
+def test_a_tag_push_with_live_false_makes_zero_writes(tmp_path):
+    _, written = mode(tmp_path, False)
+    live = written.strip() == "live=true"
+    gh = Fake(estate(), forbid_writes=True)
+    rows, code = fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=live)
+    assert (live, code) == (False, 0)
+    assert gh.writes == []
 
 
 def test_the_mode_command_writes_a_step_output(tmp_path):
     out = tmp_path / "out"
     env = {"EVENT": "workflow_dispatch", "DRY_RUN": "true", "REF": "refs/heads/main",
            "GITHUB_OUTPUT": str(out), "PATH": "/usr/bin:/bin"}
-    done = subprocess.run([sys.executable, str(GATE), "mode"], env=env,
+    done = subprocess.run([sys.executable, str(GATE), "mode", "--classes",
+                           str(REPO / "classes.json")], env=env,
                           capture_output=True, text=True, check=False)
     assert done.returncode == 0, done.stderr
     assert out.read_text() == "live=false\n"
@@ -402,6 +467,13 @@ class Fake:
     def branch_sha(self, owner, repo, branch):
         return self.repos[repo]["branches"].get(branch)
 
+    def branch_commits(self, owner, repo, base, head):
+        meta, found, sha = self.repos[repo].get("meta", {}), [], head
+        while sha != base and sha in meta:
+            found.append({"author": meta[sha]["author"], "message": meta[sha]["message"]})
+            sha = meta[sha]["parent"]
+        return found
+
     def find_prs(self, owner, repo, branch):
         return [dict(p) for p in self.repos[repo].get("prs", []) if p["head"] == branch]
 
@@ -427,6 +499,8 @@ class Fake:
         self.next_sha += 1
         sha = f"c{self.next_sha}"
         r["commits"][sha] = {**r["commits"][parent], path: text}
+        r.setdefault("meta", {})[sha] = {"parent": parent, "author": fan_out.BOT,
+                                          "message": message}
         r["branches"][branch] = sha
 
     def create_pr(self, owner, repo, base, branch, title, body):
@@ -506,10 +580,10 @@ def test_a_live_run_opens_one_pull_request_per_consumer_and_a_rerun_opens_none()
     assert [r["status"] for r in rows if r["repo"] in FIXTURES] == ["opened"] * 21
     prs = [p for r in gh.repos.values() for p in r.get("prs", [])]
     assert len(prs) == 21
-    assert {p["head"] for p in prs} == {"actions-adopt/v1.35.0"}
+    assert {p["head"] for p in prs} == {"actions-adopt"}
     for repo in FIXTURES:
         r = gh.repos[repo]
-        text = r["commits"][r["branches"]["actions-adopt/v1.35.0"]][".pre-commit-config.yaml"]
+        text = r["commits"][r["branches"]["actions-adopt"]][".pre-commit-config.yaml"]
         assert fan_out.current_rev(text) == "v1.35.0"
         assert fan_out.drift(text, hooks(repo)) == []
 
@@ -534,13 +608,13 @@ def test_a_rerun_after_main_moved_updates_the_same_branch_and_pull_request():
     kinds = [w[0] for w in gh.writes]
     assert kinds == ["reset_ref", "put_file"]
     assert len(r["prs"]) == 1
-    head = r["commits"][r["branches"]["actions-adopt/v1.35.0"]]
+    head = r["commits"][r["branches"]["actions-adopt"]]
     assert head[".pre-commit-config.yaml"].endswith("# later\n")
 
 
 def test_a_branch_left_without_a_pull_request_is_reused_not_duplicated():
     gh = Fake(estate())
-    gh.repos["argocd"]["branches"]["actions-adopt/v1.35.0"] = "base"
+    gh.repos["argocd"]["branches"]["actions-adopt"] = "base"
     rows, _ = fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=True)
     writes = [w for w in gh.writes if w[1] == "argocd"]
     assert [w[0] for w in writes] == ["reset_ref", "put_file", "create_pr"]
@@ -549,8 +623,10 @@ def test_a_branch_left_without_a_pull_request_is_reused_not_duplicated():
 
 def test_a_pull_request_closed_without_merging_is_not_reopened():
     repos = estate()
-    repos["docs"]["prs"] = [{"number": 7, "head": "actions-adopt/v1.35.0", "state": "closed",
-                             "merged": False, "url": "u", "title": "t", "body": "b"}]
+    repos["docs"]["prs"] = [{"number": 7, "head": "actions-adopt", "state": "closed",
+                             "merged": False, "url": "u", "body": "b",
+                             "title": "chore(deps): bump yadgarhq/actions hooks from "
+                                      "v1.20.1 to v1.35.0"}]
     gh = Fake(repos)
     rows, code = fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=True)
     assert by_repo(rows)["docs"]["status"] == "declined"
@@ -954,7 +1030,7 @@ def test_every_gh_call_carries_a_timeout(monkeypatch):
         return subprocess.CompletedProcess(argv, 0, "[]", "")
 
     monkeypatch.setattr(fan_out.subprocess, "run", fake_run)
-    fan_out.Gh().find_prs("yadgarhq", "docs", "actions-adopt/v1.35.0")
+    fan_out.Gh().find_prs("yadgarhq", "docs", "actions-adopt")
     assert 0 < seen["timeout"] <= 120
 
 
@@ -977,3 +1053,157 @@ def test_path_parts_are_quoted_into_the_api_url(monkeypatch):
     monkeypatch.setattr(fan_out.subprocess, "run", fake_run)
     fan_out.Gh().branch_sha("yadgarhq", "docs", "a&b#c?d")
     assert "a%26b%23c%3Fd" in seen[0][-1]
+
+
+
+# --------------------------------------------------------------------------
+# review of actions#124
+# --------------------------------------------------------------------------
+
+
+def test_two_releases_leave_exactly_one_open_pull_request_per_consumer():
+    gh = Fake(estate(), actions_tags=("v1.35.0", "v1.36.0"))
+    fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=True)
+    rows, code = fan_out.run(gh, "yadgarhq", "v1.36.0", CLASSES, live=True)
+    assert code == 0
+    for repo in FIXTURES:
+        r = gh.repos[repo]
+        prs = [p for p in r["prs"] if p["state"] == "open"]
+        assert len(prs) == 1 and len(r["prs"]) == 1, repo
+        assert prs[0]["title"].endswith("v1.36.0"), prs[0]["title"]
+        text = r["commits"][r["branches"]["actions-adopt"]][".pre-commit-config.yaml"]
+        assert fan_out.current_rev(text) == "v1.36.0"
+    assert {by_repo(rows)[r]["status"] for r in FIXTURES} == {"updated"}
+
+
+def test_an_older_tag_never_retargets_a_newer_open_pull_request_down():
+    gh = Fake(estate(), actions_tags=("v1.35.0", "v1.36.0"))
+    fan_out.run(gh, "yadgarhq", "v1.36.0", CLASSES, live=True)
+    gh.writes.clear()
+    rows, _ = fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=True)
+    assert {by_repo(rows)[r]["status"] for r in FIXTURES} == {"ahead"}
+    assert gh.writes == []
+
+
+def test_a_closed_pull_request_for_an_older_tag_does_not_block_a_newer_one():
+    repos = estate()
+    repos["docs"]["prs"] = [{"number": 7, "head": "actions-adopt", "state": "closed",
+                             "merged": False, "url": "u", "body": "b",
+                             "title": "chore(deps): bump yadgarhq/actions hooks from "
+                                      "v1.20.1 to v1.34.0"}]
+    gh = Fake(repos)
+    rows, _ = fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=True)
+    assert by_repo(rows)["docs"]["status"] == "opened"
+
+
+def test_a_human_commit_on_the_adoption_branch_is_never_reset_away():
+    gh = Fake(estate())
+    fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=True)
+    r = gh.repos["docs"]
+    head = r["branches"]["actions-adopt"]
+    r["commits"]["h1"] = {**r["commits"][head], "fix.txt": "a human fix"}
+    r["meta"]["h1"] = {"parent": head, "author": "m-agahi", "message": "fix: hand fix"}
+    r["branches"]["actions-adopt"] = "h1"
+    r["commits"]["base2"] = {**r["commits"]["base"],
+                             ".pre-commit-config.yaml": fixture("docs") + "# later\n"}
+    r["branches"]["main"] = "base2"
+    gh.writes.clear()
+    rows, code = fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=True)
+    row = by_repo(rows)["docs"]
+    assert row["status"] == "error" and "not made by" in row["note"]
+    assert not [w for w in gh.writes if w[1] == "docs"]
+    assert r["branches"]["actions-adopt"] == "h1"
+    assert code == 1
+
+
+def test_a_bot_commit_with_a_foreign_message_also_blocks_the_reset():
+    gh = Fake(estate())
+    fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=True)
+    r = gh.repos["docs"]
+    head = r["branches"]["actions-adopt"]
+    r["commits"]["h1"] = dict(r["commits"][head])
+    r["meta"]["h1"] = {"parent": head, "author": fan_out.BOT, "message": "fix: something else"}
+    r["branches"]["actions-adopt"] = "h1"
+    r["commits"]["base2"] = {**r["commits"]["base"],
+                             ".pre-commit-config.yaml": fixture("docs") + "# later\n"}
+    r["branches"]["main"] = "base2"
+    rows, _ = fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=True)
+    assert by_repo(rows)["docs"]["status"] == "error"
+
+
+INJECT = """repos:
+  - repo: local
+    hooks:
+      - id: x
+        name: x
+        language: system
+        entry: |
+          ::add-mask::v1.35.0
+          ::stop-commands::tok
+  - repo: https://github.com/yadgarhq/actions
+    rev: v1.20.1
+    hooks:
+      - id: gitleaks
+"""
+
+
+def test_consumer_text_can_never_become_a_workflow_command(tmp_path, capsys, monkeypatch):
+    """The repro from the review: a config line that, trimmed, starts with
+    `::`. The report goes ONLY to the step summary, and `::` in a patch is
+    neutralised there too."""
+    new = fan_out.render(INJECT, [("gitleaks", {})], "v1.35.0")
+    row = {"repo": "r", "class": "base", "current": "v1.20.1", "target": "v1.35.0",
+           "status": "would open", "url": "", "diff": "+1 -1", "note": "",
+           "patch": fan_out.unified(INJECT, new, "r"), "changes": []}
+    report = fan_out.report([row], "v1.35.0", False)
+    assert "::" not in report
+    summary_file = tmp_path / "summary"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_file))
+    fan_out.summary(report)
+    assert capsys.readouterr().out == ""
+    assert summary_file.read_text() == report
+
+
+def test_without_a_summary_file_nothing_is_printed(capsys, monkeypatch):
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    fan_out.summary("::add-mask::x\n")
+    assert capsys.readouterr().out == ""
+
+
+def test_an_unvalidated_rev_never_reaches_the_report():
+    repos = estate()
+    text = fixture("docs").replace("rev: v1.20.1", "rev: ::evil|`x`")
+    repos["docs"]["commits"]["base"][".pre-commit-config.yaml"] = text
+    gh = Fake(repos, forbid_writes=True)
+    rows, _ = fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=False)
+    row = by_repo(rows)["docs"]
+    assert row["status"] == "error" and row["current"] == ""
+    assert "evil" not in fan_out.report(rows, "v1.35.0", False)
+
+
+def test_an_order_only_drift_at_the_same_rev_is_titled_a_reorder():
+    assert fan_out.title_for("v1.35.0", "v1.35.0", ["order differs: a moves from after b to after c"]) \
+        == "chore(deps): reorder yadgarhq/actions hooks (v1.35.0)"
+    assert fan_out.title_for("v1.20.1", "v1.35.0", []) \
+        == "chore(deps): bump yadgarhq/actions hooks from v1.20.1 to v1.35.0"
+    assert fan_out.title_for("v1.35.0", "v1.35.0", ["missing: x"]) \
+        == "chore(deps): regenerate yadgarhq/actions hooks (v1.35.0)"
+
+
+def test_the_on_main_report_only_mode_reports_and_never_fails(tmp_path):
+    env = {"PATH": os.environ["PATH"], "GIT_DIR": str(tmp_path / "no-repo"),
+           "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "HOME": str(tmp_path)}
+    report_only = subprocess.run([sys.executable, str(GATE), "on-main", "--tag", "v1.35.0",
+                                  "--report-only"], env=env, capture_output=True, text=True,
+                                 check=False)
+    assert report_only.returncode == 0
+    assert "not on main" in report_only.stdout
+    strict = subprocess.run([sys.executable, str(GATE), "on-main", "--tag", "v1.35.0"],
+                            env=env, capture_output=True, text=True, check=False)
+    assert strict.returncode == 1
+
+
+def test_the_workflow_runs_on_main_in_dry_mode_as_report_only():
+    text = WORKFLOW.read_text()
+    assert 'on-main --tag "$tag" --report-only' in text
+    assert "--classes" not in text or "mode" in text
