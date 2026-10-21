@@ -20,10 +20,14 @@ suite takes the check's real `run:` block out of a workflow and runs that.
 
 THE WIRING THIS SUITE HOLDS, per job that checks out `yadgarhq/actions`:
 
-1. an earlier step `id: own_sha`, with no `if:`, whose `env` and `run` are
-   exactly `OWN_SHA_ENV` and `OWN_SHA_RUN` below;
+1. an earlier step `id: own_sha` whose keys are exactly `name`, `id`, `env`
+   and `run` (no `if:`, no `continue-on-error:`), and whose `env` and `run`
+   are exactly `OWN_SHA_ENV` and `OWN_SHA_RUN` below;
 2. the checkout's `ref:` is exactly `${{ steps.own_sha.outputs.sha }}`, so the
-   checkout can only consume a value the check accepted.
+   checkout can only consume a value the check accepted, and its `if:` names
+   none of `always()`, `failure()`, `!cancelled()`, which would run it after
+   the check refused, with an empty ref that `actions/checkout` reads as the
+   default branch.
 
 And per workflow that has such a checkout: exactly one step named
 `RECORD_NAME`, which writes that commit to `$GITHUB_STEP_SUMMARY`.
@@ -58,6 +62,11 @@ fi
 echo "sha=${OWN_SHA}" >> "$GITHUB_OUTPUT"
 """
 RECORD_NAME = "record the yadgarhq/actions commit this run executes"
+# The check's only keys. Any other key can weaken it: `if:` skips it,
+# `continue-on-error:` lets the job go on with an empty output.
+OWN_SHA_KEYS = {"name", "id", "env", "run"}
+# Status functions that let a step run after an earlier step failed.
+AFTER_FAILURE = ("always()", "failure()", "!cancelled()")
 
 # The workflows known to take a second checkout of this repository. The scan
 # below finds every checkout on its own; this list exists so that a workflow
@@ -133,8 +142,12 @@ def scan(text, name):
                 records += 1
             if is_own_sha_step(step):
                 problems = []
-                if _get(step, "if") is not None:
-                    problems.append("has an `if:`; the check must always run")
+                keys = {k.value for k, _v in step.value}
+                if keys != OWN_SHA_KEYS:
+                    problems.append(
+                        f"keys are not exactly {sorted(OWN_SHA_KEYS)} (got {sorted(keys)}); "
+                        "an `if:` skips the check and `continue-on-error` fails it open"
+                    )
                 if _plain(_get(step, "env")) != OWN_SHA_ENV:
                     problems.append(f"env is not exactly {OWN_SHA_ENV}")
                 if _scalar(_get(step, "run")) != OWN_SHA_RUN:
@@ -147,6 +160,14 @@ def scan(text, name):
             if not is_actions_checkout(step):
                 continue
             sites += 1
+            cond = _scalar(_get(step, "if")) or ""
+            for fn in AFTER_FAILURE:
+                if fn in cond.replace(" ", ""):
+                    violations.append(
+                        f"{name}:{_line(step)}: a checkout of {ACTIONS_REPO} runs after a failed "
+                        f"check (`{fn}` in its `if:`), where the own SHA is empty and checkout "
+                        "falls back to the default branch"
+                    )
             ref = _get(_get(step, "with"), "ref")
             if ref is None:
                 violations.append(
@@ -303,7 +324,7 @@ def test_red_conditional_check():
         "        id: own_sha\n", "        id: own_sha\n        if: github.repository != 'yadgarhq/actions'\n"
     )
     violations, _s, _r = scan(text, "fixture.yaml")
-    assert any("has an `if:`" in v for v in violations)
+    assert any("keys are not exactly" in v for v in violations)
 
 
 def test_red_wrong_env_source():
@@ -389,3 +410,41 @@ def test_check_refuses_bad_values(tmp_path):
         else:
             assert "There is no fallback to main" in proc.stdout, label
     assert not accepted, f"the check accepted: {accepted}"
+
+
+# ---------------------------------------------------------------------------
+# Fail-open shapes (review of actions#121). A `continue-on-error: true` on the
+# check leaves `steps.own_sha.outputs.sha` empty, and `actions/checkout` with
+# `ref: ''` fetches the default branch: `main`, silently. A checkout whose
+# `if:` runs after a failure (`always()`, `failure()`, `!cancelled()`) reaches
+# the same empty ref when the check refused.
+# ---------------------------------------------------------------------------
+
+
+def test_red_check_continues_on_error():
+    text = CONFORMING.replace(
+        "        id: own_sha\n", "        id: own_sha\n        continue-on-error: true\n"
+    )
+    violations, _s, _r = scan(text, "fixture.yaml")
+    assert any("keys are not exactly" in v for v in violations), violations
+    assert any("no conforming" in v for v in violations), violations
+
+
+def test_red_check_with_an_extra_key():
+    text = CONFORMING.replace(
+        "        id: own_sha\n", "        id: own_sha\n        shell: bash\n"
+    )
+    violations, _s, _r = scan(text, "fixture.yaml")
+    assert any("keys are not exactly" in v for v in violations), violations
+
+
+def test_red_checkout_runs_after_a_failure():
+    for cond in ("always()", "failure()", "!cancelled()"):
+        text = CONFORMING.replace(
+            "      - if: github.repository != 'yadgarhq/actions'\n",
+            # Inside `${{ }}`: a bare leading `!` is a YAML tag.
+            f"      - if: ${{{{ {cond} && github.repository != 'yadgarhq/actions' }}}}\n",
+        )
+        violations, _s, _r = scan(text, "fixture.yaml")
+        assert len(violations) == 1 and cond in violations[0], (cond, violations)
+        assert "runs after a failed check" in violations[0], violations

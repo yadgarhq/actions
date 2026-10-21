@@ -632,14 +632,18 @@ def verdict(conditions, results, resolve):
     # matrix smaller than the one it was handed, and saying so about the part it
     # read rather than about the run.
     #
-    # HOW THE SETS COME APART, since they are produced by two different reads of
-    # the same file. `toJSON(needs)` is built by the workflow version the CALLER
-    # resolved when the run started; the conditions are read from the checkout
-    # the gate step takes minutes later. Today every consumer pins
-    # `ci-pr.yaml@main`, so the two agree except across a merge to `main` inside
-    # that window — and the moment any consumer pins a tag instead, they diverge
-    # for as long as the pin lags. Both directions refuse here, rather than one
-    # refusing and the other passing quietly.
+    # HOW THE SETS COULD COME APART, since they are produced by two different
+    # reads of the same file. `toJSON(needs)` is built by the workflow version
+    # the CALLER resolved when the run started; the conditions are read from the
+    # checkout the gate step takes minutes later. Until ledger 1756 that
+    # checkout was `ref: main`, so the two disagreed across a merge to `main`
+    # inside that window, and would have diverged for any consumer pinning a
+    # tag. Since ledger 1756 (ADR-0981) the checkout reads the run's own commit,
+    # `job.workflow_sha`, so for every run dispatched after that change both
+    # sets come from one commit, whether the caller pins `@main` or a tag. Both
+    # directions still refuse here, as defence in depth: a gate that reads two
+    # inputs must not trust that they agree, and a disagreement must refuse
+    # rather than one direction passing quietly.
     gated = [j for j, _ in conditions]
     unreported = [j for j in gated if j not in results]
     unread = [j for j in results if j not in gated]
