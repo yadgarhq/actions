@@ -7,7 +7,7 @@
     "`live` ARMS A TAG PUSH (first-run safety, review of actions#124). While it is false, a pushed tag runs the fan-out DRY; a dispatch from main with dry_run=false is the explicit human path. Set it true only in a reviewed pull request, after a dry run from main; that pull request's own tag is then the first live run.",
     "Keys on a hook other than `id` are written into the consumer's block as they are (only `exclude` is measured today). `overrides` replaces a hook's keys for one repository."
   ],
-  "live": false,
+  "live": true,
   "topic_prefix": "yadgar-class-",
   "exempt": {
     "actions": "The producer. Its own .pre-commit-config.yaml runs its hooks from local paths (`repo: local`) at the commit under test, so it pins no rev to adopt."
