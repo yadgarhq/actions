@@ -81,13 +81,37 @@ jobs:
         with:
           python-version: "3.x"
 
+      # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
+      # the commit THIS workflow file runs at, never `main`. Read through
+      # `fromJSON(toJSON(job))` because actionlint types `job` strictly; checked
+      # here, fail-closed, before anything consumes it.
+      - name: the actions commit this job runs (ADR-0981)
+        id: own_sha
+        env:
+          OWN_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$OWN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::job.workflow_sha is not a 40-hex commit SHA: '${OWN_SHA}'. There is no fallback to main (ADR-0981)."
+            exit 1
+          fi
+          echo "sha=${OWN_SHA}" >> "$GITHUB_OUTPUT"
+      # ONCE PER RUN (ADR-0981): the commit of `yadgarhq/actions` every second
+      # checkout in this run reads, so a run can be reproduced from its summary.
+      - name: record the yadgarhq/actions commit this run executes
+        env:
+          OWN_SHA: ${{ steps.own_sha.outputs.sha }}
+        run: |
+          echo "yadgarhq/actions commit this run executes: \`${OWN_SHA}\` (ADR-0981)" >> "$GITHUB_STEP_SUMMARY"
       # A SECOND CHECKOUT, ONLY WHEN THE REPOSITORY UNDER REVIEW ISN'T
       # `yadgarhq/actions`. This is a reusable workflow: the checkout above is the
       # CALLING repository, so nothing from this repository is on disk. Same mechanism
-      # as `ci-pr.yaml`'s `portability` and `no-test-skips` jobs, at `@main` for the
-      # same reason they give: there is no way to ask which ref this workflow was
-      # called at — `github.job_workflow_ref` renders empty as an expression — and
-      # `@main` keeps the gate and the workflow that calls it moving together.
+      # as `ci-pr.yaml`'s `portability` and `no-test-skips` jobs, at the
+      # workflow's own commit for the reason they give (ADR-0981):
+      # `job.workflow_sha`, measured from a consumer, is the commit of this file
+      # as the caller resolved it, so the gate and the workflow that calls it
+      # are one commit. `github.job_workflow_ref` is an OIDC claim, not an
+      # expression. A caller that pins a tag gets that tag's scripts.
       #
       # THIS REPOSITORY IS PUBLIC (verified 2026-09-19), which is what makes the
       # checkout work for a caller outside this organisation. An adopting
@@ -97,7 +121,7 @@ jobs:
         with:
           persist-credentials: false
           repository: yadgarhq/actions
-          ref: main
+          ref: ${{ steps.own_sha.outputs.sha }}
           path: .ci-actions
 
       - name: stage the gate, then restore the tree

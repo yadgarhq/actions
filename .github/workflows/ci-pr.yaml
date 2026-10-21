@@ -235,6 +235,21 @@ jobs:
           curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
             | sudo tar -xz -C /usr/local/bin gitleaks
 
+      # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
+      # the commit THIS workflow file runs at, never `main`. Read through
+      # `fromJSON(toJSON(job))` because actionlint types `job` strictly; checked
+      # here, fail-closed, before anything consumes it.
+      - name: the actions commit this job runs (ADR-0981)
+        id: own_sha
+        env:
+          OWN_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$OWN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::job.workflow_sha is not a 40-hex commit SHA: '${OWN_SHA}'. There is no fallback to main (ADR-0981)."
+            exit 1
+          fi
+          echo "sha=${OWN_SHA}" >> "$GITHUB_OUTPUT"
       # LEDGER 1532. THE gitleaks HOOK SCANS NOTHING HERE: its entry is
       # `--pre-commit --staged`, the index, and `pre-commit/action` stages
       # nothing, so it reported "no leaks found" over zero bytes on every pull
@@ -249,7 +264,7 @@ jobs:
         with:
           persist-credentials: false
           repository: yadgarhq/actions
-          ref: main
+          ref: ${{ steps.own_sha.outputs.sha }}
           path: .ci-actions
 
       - name: scan the commits this pull request adds for secrets
@@ -488,16 +503,31 @@ jobs:
       - name: install PyYAML
         run: pip install --disable-pip-version-check "pyyaml==6.0.3"
 
+      # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
+      # the commit THIS workflow file runs at, never `main`. Read through
+      # `fromJSON(toJSON(job))` because actionlint types `job` strictly; checked
+      # here, fail-closed, before anything consumes it.
+      - name: the actions commit this job runs (ADR-0981)
+        id: own_sha
+        env:
+          OWN_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$OWN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::job.workflow_sha is not a 40-hex commit SHA: '${OWN_SHA}'. There is no fallback to main (ADR-0981)."
+            exit 1
+          fi
+          echo "sha=${OWN_SHA}" >> "$GITHUB_OUTPUT"
       # THE GATE IS A CHECKED-IN SCRIPT, staged from a second checkout exactly
       # as `portability`'s `d80_portability.py` copy is — see that job for why
-      # this is `main` and why it is a repository-name test rather than a
-      # file-presence test.
+      # this is the workflow's own commit and why it is a repository-name test
+      # rather than a file-presence test.
       - if: github.repository != 'yadgarhq/actions'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           repository: yadgarhq/actions
-          ref: main
+          ref: ${{ steps.own_sha.outputs.sha }}
           path: .ci-actions
 
       - name: stage the gate
@@ -587,16 +617,31 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.ref }}
-      # `@main` because that is what every consumer pins the workflow at, so the
-      # script and the workflow that calls it move together. There is no way to
-      # ask which ref this workflow was called at — `github.job_workflow_ref` is
-      # an OIDC claim and renders empty as an expression.
+      # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
+      # the commit THIS workflow file runs at, never `main`. Read through
+      # `fromJSON(toJSON(job))` because actionlint types `job` strictly; checked
+      # here, fail-closed, before anything consumes it.
+      - name: the actions commit this job runs (ADR-0981)
+        id: own_sha
+        env:
+          OWN_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$OWN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::job.workflow_sha is not a 40-hex commit SHA: '${OWN_SHA}'. There is no fallback to main (ADR-0981)."
+            exit 1
+          fi
+          echo "sha=${OWN_SHA}" >> "$GITHUB_OUTPUT"
+      # AT THE WORKFLOW'S OWN COMMIT (ADR-0981), so the script and the workflow
+      # that calls it are one commit. `github.job_workflow_ref` is an OIDC claim
+      # and is not an expression, but `job.workflow_sha` is: measured from a
+      # consumer, it is the commit of this file as the caller resolved it.
       - if: github.repository != 'yadgarhq/actions'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           repository: yadgarhq/actions
-          ref: main
+          ref: ${{ steps.own_sha.outputs.sha }}
           path: .ci-actions
 
       - name: the pull request body must follow the template
@@ -722,6 +767,21 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
+      # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
+      # the commit THIS workflow file runs at, never `main`. Read through
+      # `fromJSON(toJSON(job))` because actionlint types `job` strictly; checked
+      # here, fail-closed, before anything consumes it.
+      - name: the actions commit this job runs (ADR-0981)
+        id: own_sha
+        env:
+          OWN_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$OWN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::job.workflow_sha is not a 40-hex commit SHA: '${OWN_SHA}'. There is no fallback to main (ADR-0981)."
+            exit 1
+          fi
+          echo "sha=${OWN_SHA}" >> "$GITHUB_OUTPUT"
       # LEDGER 837 — THE EXECUTION AUDIT, and the layer that reads what RAN
       # rather than what the source says. `hooks/no_test_skips.py` also publishes
       # a pre-commit hook that refuses a skip MARKER; the two see different facts
@@ -747,15 +807,14 @@ jobs:
       #
       # THE SECOND CHECKOUT is what puts the gate on the runner. `ci-pr.yaml` is
       # a reusable workflow, so the checkout above is the CALLING repository and
-      # nothing from `yadgarhq/actions` is on disk. `@main` for the reason the
-      # `portability` job's copy of this step records at length: there is no way
-      # to ask which ref this workflow was called at.
+      # nothing from `yadgarhq/actions` is on disk. At the workflow's own commit,
+      # for the reason the `portability` job's copy of this step records.
       - if: github.repository != 'yadgarhq/actions'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           repository: yadgarhq/actions
-          ref: main
+          ref: ${{ steps.own_sha.outputs.sha }}
           path: .ci-actions
 
       - name: stage the execution audit, then restore the tree
@@ -1208,6 +1267,21 @@ jobs:
           echo "::error::proto/ has drifted from PROTO_VERSION. See the job summary."
           exit 1
 
+      # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
+      # the commit THIS workflow file runs at, never `main`. Read through
+      # `fromJSON(toJSON(job))` because actionlint types `job` strictly; checked
+      # here, fail-closed, before anything consumes it.
+      - name: the actions commit this job runs (ADR-0981)
+        id: own_sha
+        env:
+          OWN_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$OWN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::job.workflow_sha is not a 40-hex commit SHA: '${OWN_SHA}'. There is no fallback to main (ADR-0981)."
+            exit 1
+          fi
+          echo "sha=${OWN_SHA}" >> "$GITHUB_OUTPUT"
       # TASK 513. The step above asks "does the vendored copy match the pin"; it
       # cannot ask "is the pin still current", because the pin is its own
       # baseline. Nothing anywhere flagged that `task` sat on `v1.2.0` while
@@ -1245,14 +1319,13 @@ jobs:
       # from. When that repository already IS `yadgarhq/actions` the checkout
       # above already brought `scripts/` along; everywhere else this fetches it.
       # Same mechanism as the `template` job's `pr_body.py` checkout below, at
-      # `@main` for the same reason: that is what every consumer pins this
-      # workflow to.
+      # the workflow's own commit for the same reason (ADR-0981).
       - if: github.repository != 'yadgarhq/actions'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           repository: yadgarhq/actions
-          ref: main
+          ref: ${{ steps.own_sha.outputs.sha }}
           path: .ci-actions
 
       - name: is the proto pin still current?
@@ -1345,23 +1418,43 @@ jobs:
       # pinned for the same reason every other tool here is.
       - name: install PyYAML
         run: pip install --disable-pip-version-check "pyyaml==6.0.3"
+      # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
+      # the commit THIS workflow file runs at, never `main`. Read through
+      # `fromJSON(toJSON(job))` because actionlint types `job` strictly; checked
+      # here, fail-closed, before anything consumes it.
+      - name: the actions commit this job runs (ADR-0981)
+        id: own_sha
+        env:
+          OWN_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$OWN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::job.workflow_sha is not a 40-hex commit SHA: '${OWN_SHA}'. There is no fallback to main (ADR-0981)."
+            exit 1
+          fi
+          echo "sha=${OWN_SHA}" >> "$GITHUB_OUTPUT"
       # THE GATE IS A CHECKED-IN SCRIPT, and getting it onto the runner takes a
       # SECOND CHECKOUT in every repository but this one. `ci-pr.yaml` is a
       # reusable workflow: the checkout above is the CALLING repository, so
       # nothing from `yadgarhq/actions` is on disk.
       #
-      # WHY `main` AND NOT THE REF THIS WORKFLOW WAS CALLED AT: there is no way
-      # to ask. `github.job_workflow_ref` is documented as an OIDC token claim
-      # and renders EMPTY as an expression — actionlint says the property does
-      # not exist, and a run on this repository's own pull request confirmed it.
-      # `@main` is what every consumer pins the workflow at, so the script and
-      # the workflow that calls it move together.
+      # WHY THE WORKFLOW'S OWN COMMIT AND NOT `main` (ADR-0981). A consumer
+      # calls this file `@main`, and GitHub resolves that once, when the run
+      # starts. A checkout at `ref: main` resolves it again, later, so a push to
+      # `main` mid-run could pair this workflow with a script it was never
+      # tested against. `github.job_workflow_ref` is an OIDC token claim and is
+      # NOT an expression. `job.workflow_sha` IS one, and measured from a
+      # consumer calling a proof branch (yadgarhq/docs runs 39580752734 and
+      # 39581019673) it is the commit of this file, not the caller's. It is
+      # read as `fromJSON(toJSON(job)).workflow_sha` because actionlint 1.7.12
+      # types `job` strictly and rejects the direct form (ADR-0984), and the
+      # `own_sha` step refuses anything but 40 hex characters. No fallback.
       - if: github.repository != 'yadgarhq/actions'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           repository: yadgarhq/actions
-          ref: main
+          ref: ${{ steps.own_sha.outputs.sha }}
           path: .ci-actions
 
       - name: stage the gate, then restore the tree
@@ -1427,8 +1520,10 @@ jobs:
   # MERGING THIS JOB REDDENS IN-FLIGHT CONSUMER RUNS ONCE, and that is the merge
   # window `ci_verdict.py` already documents rather than a new defect. A run
   # dispatched before this merge built its `toJSON(needs)` from the OLD
-  # `passed.needs`, while its `passed` step re-checks out `@main` minutes later
-  # and reads a `passed.needs` that now lists this job. `ci_verdict.py` refuses
+  # `passed.needs`, while its `passed` step re-checked out `@main` minutes later
+  # and read a `passed.needs` that now listed this job. (Since ledger 1756 the
+  # `passed` step checks out the run's own commit, so that window is closed
+  # for jobs added after it.) `ci_verdict.py` refuses
   # BOTH directions of that disagreement on purpose — "no result was reported
   # for 'service_immutable'" — so any consumer pull request open across the
   # merge needs one re-run. It is a one-time cost of adding a gated job, it
@@ -1483,15 +1578,31 @@ jobs:
       - name: install PyYAML
         run: pip install --disable-pip-version-check "pyyaml==6.0.3"
 
-      # THE SECOND CHECKOUT AND `@main`: same mechanism and same reasoning as the
-      # `portability` job above — `ci-pr.yaml` is a reusable workflow, so nothing
-      # from `yadgarhq/actions` is on a consumer's runner.
+      # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
+      # the commit THIS workflow file runs at, never `main`. Read through
+      # `fromJSON(toJSON(job))` because actionlint types `job` strictly; checked
+      # here, fail-closed, before anything consumes it.
+      - name: the actions commit this job runs (ADR-0981)
+        id: own_sha
+        env:
+          OWN_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$OWN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::job.workflow_sha is not a 40-hex commit SHA: '${OWN_SHA}'. There is no fallback to main (ADR-0981)."
+            exit 1
+          fi
+          echo "sha=${OWN_SHA}" >> "$GITHUB_OUTPUT"
+      # THE SECOND CHECKOUT, AT THE WORKFLOW'S OWN COMMIT: same mechanism and
+      # same reasoning as the `portability` job above — `ci-pr.yaml` is a
+      # reusable workflow, so nothing from `yadgarhq/actions` is on a consumer's
+      # runner.
       - if: github.repository != 'yadgarhq/actions'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           repository: yadgarhq/actions
-          ref: main
+          ref: ${{ steps.own_sha.outputs.sha }}
           path: .ci-actions
 
       - name: stage the gate, then restore the tree
@@ -1629,8 +1740,23 @@ jobs:
       - name: install PyYAML
         run: pip install --disable-pip-version-check "pyyaml==6.0.3"
 
-      # THE SECOND CHECKOUT AND `@main`: same mechanism and reasoning as the
-      # `portability` and `service_immutable` copies — `ci-pr.yaml` is a
+      # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
+      # the commit THIS workflow file runs at, never `main`. Read through
+      # `fromJSON(toJSON(job))` because actionlint types `job` strictly; checked
+      # here, fail-closed, before anything consumes it.
+      - name: the actions commit this job runs (ADR-0981)
+        id: own_sha
+        env:
+          OWN_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$OWN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::job.workflow_sha is not a 40-hex commit SHA: '${OWN_SHA}'. There is no fallback to main (ADR-0981)."
+            exit 1
+          fi
+          echo "sha=${OWN_SHA}" >> "$GITHUB_OUTPUT"
+      # THE SECOND CHECKOUT, AT THE WORKFLOW'S OWN COMMIT: same mechanism and
+      # reasoning as the `portability` and `service_immutable` copies — `ci-pr.yaml` is a
       # reusable workflow, so nothing from `yadgarhq/actions` is on a
       # consumer's runner, and a change to this shared workflow is reviewed
       # against the version IN the pull request, never the copy already on
@@ -1640,7 +1766,7 @@ jobs:
         with:
           persist-credentials: false
           repository: yadgarhq/actions
-          ref: main
+          ref: ${{ steps.own_sha.outputs.sha }}
           path: .ci-actions
 
       - name: stage the gate, then restore the tree
@@ -1751,18 +1877,32 @@ jobs:
           # Needs tags and history to know what has happened since the last one.
           fetch-depth: 0
 
+      # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
+      # the commit THIS workflow file runs at, never `main`. Read through
+      # `fromJSON(toJSON(job))` because actionlint types `job` strictly; checked
+      # here, fail-closed, before anything consumes it.
+      - name: the actions commit this job runs (ADR-0981)
+        id: own_sha
+        env:
+          OWN_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$OWN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::job.workflow_sha is not a 40-hex commit SHA: '${OWN_SHA}'. There is no fallback to main (ADR-0981)."
+            exit 1
+          fi
+          echo "sha=${OWN_SHA}" >> "$GITHUB_OUTPUT"
       # THE GATE IS A CHECKED-IN SCRIPT, staged the way the `portability` job
       # stages its own and for the same reason: `ci-pr.yaml` is a reusable
       # workflow, so the checkout above is the CALLING repository and nothing
-      # from `yadgarhq/actions` is on disk. `@main` because that is what every
-      # consumer pins the workflow at, so the script and the workflow that calls
-      # it move together.
+      # from `yadgarhq/actions` is on disk. At the workflow's own commit
+      # (ADR-0981), so the script and the workflow that calls it are one commit.
       - if: github.repository != 'yadgarhq/actions'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           repository: yadgarhq/actions
-          ref: main
+          ref: ${{ steps.own_sha.outputs.sha }}
           path: .ci-actions
 
       # LEDGER 630, THE HALF THAT CANNOT BE OUTRUN. `ci / template` reads the
@@ -2111,21 +2251,43 @@ jobs:
       # THE CHECKOUTS ARE THE `portability` AND `template` JOBS', deliberately
       # unchanged from them. `ci-pr.yaml` is a reusable workflow, so nothing from
       # `yadgarhq/actions` is on a consumer's runner and the gate takes a second
-      # checkout to get there. `@main` because that is what every consumer pins
-      # the workflow at, so the gate, its tests and the workflow whose conditions
-      # it reads all move together — and reading the conditions from the same
+      # checkout to get there. At the workflow's own commit (ADR-0981), so the
+      # gate, its tests and the workflow whose conditions it reads are one
+      # commit — and reading the conditions from the same
       # checkout as the script is what makes them the ones that actually ran.
       - if: github.repository == 'yadgarhq/actions'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ inputs.ref }}
+      # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
+      # the commit THIS workflow file runs at, never `main`. Read through
+      # `fromJSON(toJSON(job))` because actionlint types `job` strictly; checked
+      # here, fail-closed, before anything consumes it.
+      - name: the actions commit this job runs (ADR-0981)
+        id: own_sha
+        env:
+          OWN_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$OWN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::job.workflow_sha is not a 40-hex commit SHA: '${OWN_SHA}'. There is no fallback to main (ADR-0981)."
+            exit 1
+          fi
+          echo "sha=${OWN_SHA}" >> "$GITHUB_OUTPUT"
+      # ONCE PER RUN (ADR-0981): the commit of `yadgarhq/actions` every second
+      # checkout in this run reads, so a run can be reproduced from its summary.
+      - name: record the yadgarhq/actions commit this run executes
+        env:
+          OWN_SHA: ${{ steps.own_sha.outputs.sha }}
+        run: |
+          echo "yadgarhq/actions commit this run executes: \`${OWN_SHA}\` (ADR-0981)" >> "$GITHUB_STEP_SUMMARY"
       - if: github.repository != 'yadgarhq/actions'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           repository: yadgarhq/actions
-          ref: main
+          ref: ${{ steps.own_sha.outputs.sha }}
           path: .ci-actions
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:

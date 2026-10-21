@@ -61,6 +61,27 @@ jobs:
       # no `chart/`, which is every repository the `parent` job skips anyway.
       chartname: ${{ steps.d.outputs.chartname }}
     steps:
+      # ADR-0981 / ADR-0984: `detect` takes no checkout of `yadgarhq/actions`.
+      # It reads and checks the commit THIS workflow file runs at only to record
+      # it once per run, and to fail the whole release closed if it is unreadable.
+      - name: the actions commit this job runs (ADR-0981)
+        id: own_sha
+        env:
+          OWN_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$OWN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::job.workflow_sha is not a 40-hex commit SHA: '${OWN_SHA}'. There is no fallback to main (ADR-0981)."
+            exit 1
+          fi
+          echo "sha=${OWN_SHA}" >> "$GITHUB_OUTPUT"
+      # ONCE PER RUN (ADR-0981): the commit of `yadgarhq/actions` every second
+      # checkout in this run reads, so a run can be reproduced from its summary.
+      - name: record the yadgarhq/actions commit this run executes
+        env:
+          OWN_SHA: ${{ steps.own_sha.outputs.sha }}
+        run: |
+          echo "yadgarhq/actions commit this run executes: \`${OWN_SHA}\` (ADR-0981)" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -415,18 +436,34 @@ jobs:
           echo "Publishing with image digest \`$DIGEST\` (git keeps its tag)." \
             >> "$GITHUB_STEP_SUMMARY"
           yq -i ".image.digest = \"$DIGEST\" | del(.image.tag)" chart/values.yaml
+      # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
+      # the commit THIS workflow file runs at, never `main`. Read through
+      # `fromJSON(toJSON(job))` because actionlint types `job` strictly; checked
+      # here, fail-closed, before anything consumes it.
+      - name: the actions commit this job runs (ADR-0981)
+        id: own_sha
+        env:
+          OWN_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$OWN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::job.workflow_sha is not a 40-hex commit SHA: '${OWN_SHA}'. There is no fallback to main (ADR-0981)."
+            exit 1
+          fi
+          echo "sha=${OWN_SHA}" >> "$GITHUB_OUTPUT"
       # STAGED BEFORE THE PUSH, and the order is the point. The two steps below
       # fetch the gate that runs AFTER publishing; a checkout flake or a missing
       # file has to fail with nothing published rather than after.
       #
       # THE IDIOM IS `ci-pr.yaml`'S, five times over — its `portability`,
       # `service_immutable` and `passed` jobs among them: a second checkout of
-      # `yadgarhq/actions@main` into `.ci-actions`, skipped when this IS that
+      # `yadgarhq/actions` into `.ci-actions`, skipped when this IS that
       # repository, and the REPOSITORY NAME rather than the file's presence
-      # decides which copy runs. `@main` because there is no way to ask what ref
-      # this workflow was called at — `github.job_workflow_ref` renders empty as
-      # an expression — and `@main` is what every consumer pins the workflow at,
-      # so the script and the workflow that calls it move together.
+      # decides which copy runs. At the workflow's own commit (ADR-0981):
+      # `job.workflow_sha`, measured from a consumer, is the commit of this file
+      # as the caller resolved it, so the script and the workflow that calls it
+      # are one commit. (`github.job_workflow_ref` is an OIDC claim, not an
+      # expression; `job.workflow_sha` is.)
       #
       # THE `yadgarhq/actions` ARM IS INERT AS SHIPPED, said rather than left to
       # be discovered: that repository carries no `chart/`, so `detect` reports
@@ -438,7 +475,7 @@ jobs:
         with:
           persist-credentials: false
           repository: yadgarhq/actions
-          ref: main
+          ref: ${{ steps.own_sha.outputs.sha }}
           path: .ci-actions
       - name: stage the visibility gate, then restore the tree
         env:
@@ -770,6 +807,21 @@ jobs:
           repositories: chart
           permission-contents: write
 
+      # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
+      # the commit THIS workflow file runs at, never `main`. Read through
+      # `fromJSON(toJSON(job))` because actionlint types `job` strictly; checked
+      # here, fail-closed, before anything consumes it.
+      - name: the actions commit this job runs (ADR-0981)
+        id: own_sha
+        env:
+          OWN_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$OWN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::job.workflow_sha is not a 40-hex commit SHA: '${OWN_SHA}'. There is no fallback to main (ADR-0981)."
+            exit 1
+          fi
+          echo "sha=${OWN_SHA}" >> "$GITHUB_OUTPUT"
       # THE ONLY CHECKOUT THIS JOB WANTS IS THIS REPOSITORY'S. Nothing here reads
       # the caller's tree — the module's name and version arrive from `detect` as
       # outputs, and the parent's `Chart.yaml` arrives over the API — so the
@@ -777,17 +829,17 @@ jobs:
       # `rm -rf` dance, buys nothing: that dance exists because `helm package`
       # works on the same workspace. Here the workspace IS the scripts.
       #
-      # `@main` FOR THE SAME REASON THE FIVE OTHER SITES GIVE: there is no way to
-      # ask what ref this workflow was called at — `github.job_workflow_ref`
-      # renders empty as an expression — and `@main` is what every consumer pins
-      # the workflow at, so the script and the workflow that calls it move
-      # together.
+      # AT THE WORKFLOW'S OWN COMMIT FOR THE REASON THE OTHER SITES GIVE
+      # (ADR-0981): `job.workflow_sha`, measured from a consumer, is the commit
+      # of this file as the caller resolved it, so the script and the workflow
+      # that calls it are one commit. `github.job_workflow_ref` is an OIDC claim,
+      # not an expression.
       - if: steps.cred.outputs.configured == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           repository: yadgarhq/actions
-          ref: main
+          ref: ${{ steps.own_sha.outputs.sha }}
 
       # A SCRIPT RATHER THAN SHELL, which is this file's own instinct: the chart
       # visibility gate above gives the argument at length, and it is sharper
@@ -839,12 +891,27 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
+      # the commit THIS workflow file runs at, never `main`. Read through
+      # `fromJSON(toJSON(job))` because actionlint types `job` strictly; checked
+      # here, fail-closed, before anything consumes it.
+      - name: the actions commit this job runs (ADR-0981)
+        id: own_sha
+        env:
+          OWN_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$OWN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::job.workflow_sha is not a 40-hex commit SHA: '${OWN_SHA}'. There is no fallback to main (ADR-0981)."
+            exit 1
+          fi
+          echo "sha=${OWN_SHA}" >> "$GITHUB_OUTPUT"
       - if: github.repository != 'yadgarhq/actions'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           repository: yadgarhq/actions
-          ref: main
+          ref: ${{ steps.own_sha.outputs.sha }}
           path: .ci-actions
       - name: every pin the tagged examples carry is anonymously pullable
         env:
