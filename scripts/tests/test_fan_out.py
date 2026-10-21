@@ -350,8 +350,11 @@ def test_until_classes_json_arms_it_a_tag_push_is_dry(event, dry_run, ref, live)
     assert fan_out.is_live(event, dry_run, ref, armed=False) is live
 
 
-def test_classes_json_carries_a_boolean_live_and_it_starts_false():
-    assert CLASSES["live"] is False
+def test_classes_json_carries_a_boolean_live_and_it_is_armed():
+    # The S5 flip (ledger 1756): the file ships `"live": true`, so the tag this
+    # change cuts is the first live fan-out. Rollback is a pull request that
+    # sets it back to false and changes this assertion with it.
+    assert CLASSES["live"] is True
 
 
 @pytest.mark.parametrize("value", ["absent", "false", 0, None, "true", 1])
