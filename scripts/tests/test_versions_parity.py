@@ -208,3 +208,84 @@ def test_versions_are_plain_dotted_numbers():
     for name, entry in tools.items():
         assert re.fullmatch(r"\d+(\.\d+)+", str(entry["version"])), name
         assert isinstance(entry["sites"], int) and entry["sites"] >= 1, name
+
+
+def append(root, relative, text):
+    """Append `text` to a file and return the line number of its first line."""
+    path = root / relative
+    before = path.read_text()
+    if not before.endswith("\n"):
+        before += "\n"
+    path.write_text(before + text)
+    return before.count("\n") + 1
+
+
+UNPINNED_STEP = (
+    "      - name: extra scan\n"
+    "        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0\n"
+    "        with:\n"
+    "          scan-type: fs\n"
+)
+
+
+def test_the_four_known_unpinned_trivy_steps_are_recorded_in_versions_yaml():
+    trivy = yaml.safe_load((REPO / "versions.yaml").read_text())["tools"]["trivy"]
+    assert trivy["unpinned"] == {
+        ".github/workflows/base-images.yaml": 1,
+        ".github/workflows/ci-release.yaml": 1,
+        ".github/workflows/estate-runner-image.yaml": 2,
+    }
+
+
+def test_a_fifth_unpinned_trivy_action_step_is_refused_naming_file_and_line(tree):
+    first = append(tree, ".github/workflows/ci-release.yaml", UNPINNED_STEP)
+    uses_line = first + 1
+    problems = versions_parity.check(tree)
+    assert any(
+        f".github/workflows/ci-release.yaml:{uses_line}:" in p and "trivy" in p and "unpinned" in p
+        for p in problems
+    ), problems
+
+
+def test_an_unpinned_trivy_step_that_gains_a_version_changes_the_result(tree):
+    rewrite(
+        tree,
+        ".github/workflows/base-images.yaml",
+        "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0\n",
+        "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0\n"
+        "        with:\n          version: v0.74.0\n",
+    )
+    problems = versions_parity.check(tree)
+    assert any("base-images.yaml" in p and "trivy" in p and "unpinned" in p for p in problems), problems
+
+
+def test_the_site_count_message_lists_every_site_found(tree):
+    first = append(tree, ".github/workflows/seed-declaration.yaml", "env:\n  GITLEAKS_VERSION: 8.30.1\n")
+    problems = versions_parity.check(tree)
+    count = [p for p in problems if "gitleaks" in p and "sites" in p]
+    assert count, problems
+    message = count[0]
+    assert f".github/workflows/seed-declaration.yaml:{first + 1}" in message
+    assert f".github/workflows/ci-pr.yaml:{line_of(tree, '.github/workflows/ci-pr.yaml', 'GITLEAKS_VERSION: 8.30.1')}" in message
+    assert f".github/workflows/ci-self.yaml:{line_of(tree, '.github/workflows/ci-self.yaml', 'GITLEAKS_VERSION: 8.30.1')}" in message
+
+
+def test_a_helm_step_whose_first_key_is_name_is_still_read(tree):
+    first = append(
+        tree,
+        ".github/workflows/ci-release.yaml",
+        "      - name: extra helm\n"
+        "        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1\n"
+        "        with:\n"
+        "          version: v3.0.0\n",
+    )
+    problems = versions_parity.check(tree)
+    assert any(
+        p.startswith(f".github/workflows/ci-release.yaml:{first + 3}:") and "helm" in p and "3.0.0" in p
+        for p in problems
+    ), problems
+
+
+def test_pre_commit_hooks_rev_is_a_site(tree):
+    rewrite(tree, ".pre-commit-config.yaml", "rev: v5.0.0", "rev: v4.6.0")
+    assert any(p.startswith(".pre-commit-config.yaml:4:") and "pre-commit-hooks" in p for p in versions_parity.check(tree))

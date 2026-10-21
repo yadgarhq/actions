@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Every tool version pinned in this repository equals the one in `versions.yaml`.
+"""Every PINNED tool version listed in `versions.yaml` equals the canonical one there.
+
+SCOPE: the twelve tools in `versions.yaml` and the pin shapes in `SCANNERS`.
+Nothing else is covered; see "WHAT IT DOES NOT DO".
 
 `versions.yaml` at the repository root is the canonical list. Each tool in it has
 a `version` and a `sites` count: the number of places this repository pins it
@@ -20,7 +23,13 @@ copy fail until `versions.yaml` is edited in the same change. A count of zero
 found is also a failure: a gate that finds nothing reports success having
 checked nothing.
 
-WHAT IT DOES NOT DO. It does not change any pin. It does not read
+WHAT IT DOES NOT DO. It does not cover FLOATING pins: `python-version: "3.x"`,
+the Rust `stable` toolchain, the apt `shellcheck`, and `pre-commit` itself. Those
+are out of scope until ledger 1756 step 2. It does not cover the Rust toolchain
+(`rust:1.98-bookworm` and `--default-toolchain 1.98.0` spell one version two ways).
+It records the `aquasecurity/trivy-action` steps that carry no `version:` input as
+KNOWN UNPINNED (see the `unpinned:` map under `trivy` in `versions.yaml`) and
+checks that list exactly; it does not pin them. It does not change any pin. It does not read
 `scripts/tests/`. It does not check action SHAs (Dependabot moves those). The
 `azure/setup-helm` steps are also held equal to each other by
 `helm_pin_agrees.py`; this module adds the comparison to the canonical value.
@@ -66,6 +75,10 @@ SCANNERS = {
     "cargo-deny": [env("CARGO_DENY_VERSION")],
     "zizmor": [env("ZIZMOR_VERSION"), ("line", re.compile(rf"zizmor=={VERSION}"))],
     "helm": [helm_like("azure/setup-helm", True)],
+    # `require=False`: a trivy-action step with no `version:` runs the action's
+    # default trivy (0.70.0, measured in trivy_gate.py). Those steps are not an
+    # error here; `versions.yaml` lists them under `unpinned:` and `check` holds
+    # that list exact. Pinning them is ledger 1756 step 2, not this gate.
     "trivy": [
         helm_like("aquasecurity/trivy-action", False),
         ("line", re.compile(rf"^TRIVY_VERSION\s*=\s*{VALUE}")),
@@ -77,6 +90,14 @@ SCANNERS = {
         (
             "block",
             re.compile(r"repo:\s*\S*shellcheck-py/shellcheck-py\s*$"),
+            re.compile(rf"^\s*rev:\s*{VALUE}"),
+            True,
+        )
+    ],
+    "pre-commit-hooks": [
+        (
+            "block",
+            re.compile(r"repo:\s*\S*pre-commit/pre-commit-hooks\s*$"),
             re.compile(rf"^\s*rev:\s*{VALUE}"),
             True,
         )
@@ -108,8 +129,26 @@ def indent_of(line):
     return len(line) - len(line.lstrip())
 
 
+def item_start(lines, index):
+    """Index of the `- ` list-item line that holds the key on line `index`."""
+    if lines[index].lstrip().startswith("- "):
+        return index
+    base = indent_of(lines[index])
+    for back in range(index - 1, -1, -1):
+        line = lines[back]
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if indent_of(line) < base:
+            return back if line.lstrip().startswith("- ") else index
+    return index
+
+
 def sites_in(lines, rules):
-    """Yield (line number, version or None, required) for every pin in `lines`."""
+    """Yield (line number, version or None, required) for every pin in `lines`.
+
+    A block rule reads its key from anywhere inside the step's list item, so
+    `uses:` need not be the first key (`- name: ...` first is common).
+    """
     for number, line in enumerate(lines, 1):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
@@ -121,16 +160,18 @@ def sites_in(lines, rules):
                 _, anchor, key, require = rule
                 if not anchor.search(line):
                     continue
-                base = indent_of(line)
+                start = item_start(lines, number - 1)
+                base = indent_of(lines[start])
                 found = None
-                for offset, follow in enumerate(lines[number:], number + 1):
+                for offset in range(start + 1, len(lines)):
+                    follow = lines[offset]
                     if not follow.strip() or follow.lstrip().startswith("#"):
                         continue
                     if indent_of(follow) <= base:
                         break
                     match = key.match(follow)
                     if match:
-                        found = (offset, match.group(1))
+                        found = (offset + 1, match.group(1))
                         break
                 if found:
                     yield found[0], found[1], require
@@ -171,6 +212,9 @@ def check(root):
         if name not in tools:
             continue
         entry = tools[name] or {}
+        expected_unpinned = entry.get("unpinned") or {}
+        unpinned = {}
+        where = []
         want = str(entry.get("version", "")).lstrip("v")
         expected_sites = entry.get("sites")
         count = 0
@@ -178,6 +222,9 @@ def check(root):
             relative = path.relative_to(root).as_posix()
             for number, found, require in sites_in(lines, rules):
                 if found is None:
+                    if not require:
+                        unpinned.setdefault(relative, []).append(number)
+                        continue
                     if require:
                         problems.append(
                             f"{relative}:{number}: {name} is installed with no pinned version; "
@@ -185,16 +232,27 @@ def check(root):
                         )
                     continue
                 count += 1
+                where.append(f"{relative}:{number}")
                 if found.lstrip("v") != want:
                     problems.append(
                         f"{relative}:{number}: {name} pinned {found}, but {MANIFEST} says {want}"
                     )
+        for relative in sorted(set(unpinned) | set(expected_unpinned)):
+            lines_found = unpinned.get(relative, [])
+            if len(lines_found) != expected_unpinned.get(relative, 0):
+                shown = ", ".join(f"{relative}:{n}" for n in lines_found) or relative
+                problems.append(
+                    f"{shown}: {name} has {len(lines_found)} unpinned step(s) in {relative}, "
+                    f"{MANIFEST} lists {expected_unpinned.get(relative, 0)} under `unpinned`; "
+                    "pin the step (ledger 1756 step 2) or update the list"
+                )
         if count == 0:
             problems.append(f"{MANIFEST}: found no {name} pin sites; the scanner or the pin is gone")
         elif count != expected_sites:
             problems.append(
-                f"{MANIFEST}: {name} has {count} pin sites, {MANIFEST} expects {expected_sites}; "
-                "update `sites` with the pin change, or delete the stray copy"
+                f"{MANIFEST}: {name} has {count} pin sites, {MANIFEST} expects {expected_sites}. "
+                f"Found: {', '.join(where)}. "
+                "Update `sites` with the pin change, or delete the stray copy"
             )
     return problems
 
