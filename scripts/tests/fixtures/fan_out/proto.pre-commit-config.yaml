@@ -1,0 +1,150 @@
+# Every yadgarhq repo carries pre-commit (D59). Hook failure is signal, not
+# obstacle: fix the cause and re-stage. Never --no-verify.
+#
+# This is the CONTRACT repo, so it carries the baseline plus buf. A Rust module
+# repo swaps the buf block for the cargo one — see D59 for the full baseline.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      # PARSE GATES. A file a parser cannot load at all still passes any check
+      # that reads it as text and regexes it — which is how a malformed compose
+      # file once kept every version gate green in the predecessor repo.
+      - id: check-yaml
+      - id: check-json
+      - id: check-toml
+
+  # Shared, from yadgarhq/actions (D62) — this was a near-identical local block
+  # in every repository until the shared definition existed.
+  # IMMUTABLE rev, unlike the @v1 the workflow caller pins. pre-commit caches a
+  # rev at first install and never re-resolves it — "mutable references are never
+  # updated after first install and are not supported" — so a moving tag here
+  # would silently freeze each machine at whatever v1 meant the day it first ran.
+  # GitHub Actions re-resolves @v1 every run; pre-commit does not. Bump with
+  # `pre-commit autoupdate`.
+
+  - repo: https://github.com/yadgarhq/actions
+    rev: v1.20.1
+    hooks:
+      - id: gitleaks
+      - id: prettier
+      # No Containerfile here yet; the hook is a no-op until one arrives, which is
+      # cheaper than remembering to add it on the day it does.
+      - id: hadolint
+      # A CONSUMER IS NOT LINTED UNTIL IT REFERENCES THE HOOK, which is why this
+      # line exists rather than being inherited. This repository has a
+      # `.github/workflows/` and nothing read it: `ci-pr.yaml` installs the
+      # `actionlint` binary unconditionally and `yadgarhq/actions` publishes the
+      # hook, but publication makes a check AVAILABLE rather than switching it on
+      # (ledger 620, ADR-0577).
+      #
+      # The hook REFUSES rather than passes when actionlint's shellcheck rule
+      # class is not running: actionlint silently disables that whole class when
+      # the binary is absent, and "Passed, having checked nothing" is the defect
+      # the guard closes rather than a state this check may report.
+      - id: actionlint
+      - id: no-test-skips
+
+  - repo: https://github.com/bufbuild/buf
+    rev: v1.72.0
+    hooks:
+      # Canonical formatting. Rewrites files, so a first run fails the commit
+      # and you re-stage — the same shape as terraform_fmt.
+      - id: buf-format
+      # STANDARD lint: directory layout mirrors the package path, services carry
+      # the Service suffix.
+      - id: buf-lint
+      # D15's additive-only rule, enforced at commit time rather than only in
+      # CI. Local git, so it costs nothing — and a break caught here never
+      # reaches a branch someone else has pulled.
+      #
+      # TWO INVOCATIONS, AND NEITHER ONE IS THE GATE ON ITS OWN. This was one
+      # hook, against v1.0.0 only, and that half was silently vacuous for every
+      # file added after the first tag.
+      #
+      #   v1.0.0 — the major's first tag (D15). A change is additive-only
+      #     *within a major*, so v1 must stay compatible with v1.0.0 forever,
+      #     not merely with whatever shipped last. Comparing against the latest
+      #     tag alone would let the contract drift away from v1.0.0 one
+      #     compatible step at a time. Bump this only when a v2 exists, to that
+      #     major's first tag.
+      #
+      #   the previous tag — D16, verbatim: "`buf breaking` runs in CI against
+      #     the previous tag and rejects any breaking change." v1.0.0 contains
+      #     NONE of iam, iamdb, telemetry, ask or taskapi, so for those five
+      #     files the first-tag comparison has nothing to compare against and
+      #     passes on an empty set. A renumbered field in any of them exits 0
+      #     against v1.0.0 and 100 against v1.5.0 — verified by injecting one.
+      #
+      # THE SECOND COMPARISON NAMES NO VERSION, and that is the whole of the
+      # local hook below. It was a second invocation here, with the tag written
+      # into its args, and that constant went stale AFTER EVERY MERGE: merging
+      # cuts a tag, so the number a pull request bumped it to was already one
+      # release behind by the time it landed. Seven pull requests carried a bump
+      # between v1.5.0 and v1.10.0, every one of them riding along inside
+      # unrelated work, and `main` sat red in between. A stale constant is worse
+      # than noisy — it keeps comparing the files that existed at that tag while
+      # everything added since goes ungated, which is the exact class the second
+      # comparison exists to catch.
+      - id: buf-breaking
+        alias: buf-breaking-major
+        name: buf breaking (v1.0.0, the major's first tag)
+        args: [--against, .git#tag=v1.0.0]
+
+  # THE PREVIOUS TAG, RESOLVED WHEN THE HOOK RUNS. `git describe --tags
+  # --abbrev=0` is the newest tag reachable from HEAD, which is what the constant
+  # above was always transcribed from — so deriving it deletes the
+  # transcription, the release step that performed it, and the hook that used to
+  # check it had been performed.
+  #
+  # WHY THIS IS NOT THE UPSTREAM HOOK, which is maintained and already pins buf
+  # by rev. pre-commit passes `args` LITERALLY: there is no shell, so `$(...)` in
+  # an argument reaches buf as those characters. The value has to be computed by
+  # the entry, and the entry has to be able to run buf. The upstream hooks are
+  # `language: golang`, which builds buf into an isolated environment that is NOT
+  # on PATH — in CI or on a developer's machine — so `language: system` would
+  # need buf installed everywhere, which it is not. `language: golang` with
+  # `additional_dependencies` gets the same isolated build for a local hook.
+  #
+  # THE PRICE IS buf's VERSION WRITTEN TWICE, paid deliberately. `rev: v1.72.0`
+  # above and `buf@v1.72.0` below are the same version, and `pre-commit
+  # autoupdate` bumps the first and not the second. Keep them equal; when they
+  # are not, an older buf runs the breaking check, which misses check categories
+  # added since and nothing else. That is the drift being bought, and it is not
+  # the drift being sold: a stale `--against` SWITCHED THE GATE OFF for every
+  # file added after the tag it named.
+  #
+  # IT ALSO BUILDS buf A SECOND TIME, once per environment — about 230 CPU
+  # seconds. It gets that back: pre-commit's cache is keyed on this file, which
+  # changed on every pull request while the tag lived here and now does not.
+  #
+  # NO TAG REACHABLE FROM HEAD FAILS, and says why. There is no previous release
+  # to compare against, so the gate cannot run — and a gate that cannot run must
+  # not report green. `buf-breaking-major` above already fails this way on a
+  # clone without tags ("couldn't find remote ref v1.0.0"), so this matches the
+  # behaviour beside it rather than introducing one. The precommit job checks out
+  # at `fetch-depth: 0` precisely because `buf breaking` needs the tags, so a
+  # failure there means they are genuinely absent.
+  #
+  # A BRANCH CUT BEFORE A RELEASE resolves the tag IT can see, which is an older
+  # one — a narrower comparison, never a wrong one. CI does not inherit that
+  # narrowing: a `pull_request` run checks out the merge ref, whose history
+  # contains the base branch, so `git describe` there is main's newest tag
+  # however stale the branch is. The constant had no such backstop — it was
+  # whatever the branch had written down.
+  - repo: local
+    hooks:
+      - id: buf-breaking-previous
+        name: buf breaking (the previous tag)
+        language: golang
+        language_version: 1.25.10
+        additional_dependencies: ["github.com/bufbuild/buf/cmd/buf@v1.72.0"]
+        types: [proto]
+        pass_filenames: false
+        entry: sh -c 'previous=$(git describe --tags --abbrev=0 2>/dev/null); if [ -z "$previous" ]; then echo "No tag is reachable from HEAD, so there is no previous release to compare against. Fetch the tags (git fetch --tags) and run again."; exit 1; fi; exec buf breaking --against ".git#tag=$previous"'

@@ -1,0 +1,70 @@
+# Every yadgarhq repo carries pre-commit (D59). Hook failure is signal, not
+# obstacle: fix the cause and re-stage. Never --no-verify.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: check-yaml
+        # Helm templates are Go templates that HAPPEN to look like YAML —
+        # `{{- toYaml ... }}` is a syntax error to any real parser. Excluding
+        # them is not lowering the bar: `helm lint` and `helm template` are the
+        # checks that actually apply, and they run in CI.
+        exclude: ^chart/templates/
+      - id: check-toml
+
+  # Shared, from yadgarhq/actions (D62). IMMUTABLE rev: pre-commit caches a rev
+  # at first install and never re-resolves it, so a moving tag would silently
+  # freeze each machine at whatever it meant the day it first ran.
+  - repo: https://github.com/yadgarhq/actions
+    rev: v1.20.1
+    hooks:
+      - id: gitleaks
+      - id: prettier
+        exclude: ^(chart/templates/|proto/)
+      - id: hadolint
+      # A CONSUMER IS NOT LINTED UNTIL IT REFERENCES THE HOOK, which is why this
+      # line exists rather than being inherited. This repository has a
+      # `.github/workflows/` and nothing read it: `ci-pr.yaml` installs the
+      # `actionlint` binary unconditionally and `yadgarhq/actions` publishes the
+      # hook, but publication makes a check AVAILABLE rather than switching it on
+      # (ledger 620, ADR-0577).
+      #
+      # The hook REFUSES rather than passes when actionlint's shellcheck rule
+      # class is not running: actionlint silently disables that whole class when
+      # the binary is absent, and "Passed, having checked nothing" is the defect
+      # the guard closes rather than a state this check may report.
+      - id: actionlint
+      - id: cargo-fmt
+      - id: cargo-clippy
+      # LEDGER 719. Mechanical ceilings on file and function size (MAX_FILE_LINES
+      # 500, MAX_FN_LINES 120). This repository was over the file ceiling on one
+      # file — src/lib.rs — and under the function ceiling everywhere; the PR
+      # that adds these two ids also splits that file below the ceiling.
+      - id: complexity
+      - id: cargo-clippy-complexity
+      - id: cargo-deny
+      - id: observe-coverage
+      - id: helm-lint
+      # ADR-0569's gate (ledger 648), published in v1.15.0. This repository
+      # never carried the byte-identical local copy the five service
+      # repositories did, so this is a plain new-id adoption.
+      - id: no-compiled-in-defaults
+      # LEDGER 658. Adopted though it checks nothing today: the largest `run:`
+      # block outside yadgarhq/actions is 303 bytes against an 8000-byte limit,
+      # and this repository measures 0. It is a tripwire for a block someone
+      # writes later, not a fix for anything present now.
+      - id: run-block-size
+      # LEDGER 837. Refuses a test that stops running rather than fails: a
+      # skip marker, an unsatisfiable `cfg`, an environment-probe guard as a
+      # test's first statement, a narrowed `cargo test`/pytest invocation, or
+      # a captured run whose exit code is suppressed. ADR-0577: a published
+      # hook nobody references gates nothing, so this line is what makes it
+      # gate this repository rather than the tag alone. The rev also carries
+      # v1.19.0's `observe-coverage` tightening, which refuses nothing here.
+      - id: no-test-skips

@@ -1,0 +1,103 @@
+# Every yadgarhq repo carries pre-commit (D59). Hook failure is signal, not
+# obstacle: fix the cause and re-stage. Never --no-verify.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: check-yaml
+        # Helm templates are Go templates that HAPPEN to look like YAML, so a
+        # real parser rejects them. `helm lint` and `helm template` below are the
+        # checks that actually apply to those.
+        #
+        # `chart/config/` IS DELIBERATELY NOT EXCLUDED. Those files are the
+        # product of this repository and they are plain YAML by construction —
+        # nothing templates them — so a parse failure there is exactly the fault
+        # this hook exists to catch, one commit before a pod refuses to boot on it.
+        exclude: ^chart/templates/
+      - id: check-json
+
+  # Shared, from yadgarhq/actions (D62). IMMUTABLE rev: pre-commit caches a rev
+  # at first install and never re-resolves it, so a moving tag would silently
+  # freeze each machine at whatever it meant the day it first ran.
+  - repo: https://github.com/yadgarhq/actions
+    rev: v1.20.1
+    hooks:
+      - id: gitleaks
+      - id: prettier
+        exclude: ^chart/templates/
+      # No Containerfile here and there never will be one — this repository ships
+      # settings, not an image. The hook is a no-op and costs nothing, and is
+      # kept so the config matches every other repository's rather than being the
+      # one that has to be explained.
+      - id: hadolint
+      # A CONSUMER IS NOT LINTED UNTIL IT REFERENCES THE HOOK, which is why this
+      # line exists rather than being inherited. This repository has a
+      # `.github/workflows/` and nothing read it: `ci-pr.yaml` installs the
+      # `actionlint` binary unconditionally and `yadgarhq/actions` publishes the
+      # hook, but publication makes a check AVAILABLE rather than switching it on
+      # (ledger 620, ADR-0577).
+      #
+      # The hook REFUSES rather than passes when actionlint's shellcheck rule
+      # class is not running: actionlint silently disables that whole class when
+      # the binary is absent, and "Passed, having checked nothing" is the defect
+      # the guard closes rather than a state this check may report.
+      - id: actionlint
+      - id: helm-lint
+      - id: no-test-skips
+
+  # LOCAL, because it encodes a rule about THIS repository's shape rather than a
+  # rule the estate shares: a knob is defined in exactly one document, with no
+  # merge and no precedence between them (D4, and D34's "resolution replaces, it
+  # does not merge" applied to configuration).
+  #
+  # `language: python` rather than `system`: pre-commit builds the environment and
+  # installs PyYAML, which a bare CI interpreter does not carry.
+  #
+  # `always_run` with `pass_filenames: false`, because the question is about the
+  # WHOLE directory. A collision is a property of two files together, and a hook
+  # that only saw the changed one would miss half of every collision it exists to
+  # find — the same reasoning `versions_pinned.py` uses in `yadgarhq/argocd`.
+  - repo: local
+    hooks:
+      - id: one-source-per-knob
+        name: a knob is defined in exactly one file
+        entry: python scripts/one_source_per_knob.py
+        language: python
+        additional_dependencies: [pyyaml]
+        always_run: true
+        pass_filenames: false
+
+      # LEDGER 625. The gate above had no test, and it is the only thing standing
+      # between this repository and a knob defined twice — the silent
+      # single-writer failure D4 exists to prevent. A gate guarded by nothing is
+      # one refactor away from a green tick that checks nothing, so the suite
+      # demands each of its four refusals rather than only feeding it conforming
+      # input.
+      #
+      # `language: python` rather than `system`, so pre-commit provisions the
+      # interpreter, pytest and PyYAML. PYYAML IS FOR THE SUBJECT, NOT THE SUITE:
+      # the tests import nothing beyond the standard library and pytest, but they
+      # run `one_source_per_knob.py` as a subprocess of `sys.executable` — which
+      # inside this hook is the hook's own venv — and it parses YAML. Without it
+      # every case fails with `ModuleNotFoundError`, a red that blames the suite
+      # for a missing dependency of the thing it tests. Both pins match
+      # `yadgarhq/actions`' own `pytest-scripts` hook.
+      #
+      # `always_run` with `pass_filenames: false`, and `files:` is omitted rather
+      # than written as documentation: a hook filtered on `^scripts/` reports
+      # `Skipped`, exit 0, on a pull request that changes only `chart/config/` —
+      # which is exactly the pull request whose knobs this suite proves the gate
+      # can still refuse.
+      - id: pytest-scripts
+        name: pytest scripts/tests
+        language: python
+        additional_dependencies: ["pytest==9.1.1", "pyyaml==6.0.3"]
+        entry: pytest scripts/tests/ -q
+        pass_filenames: false
+        always_run: true

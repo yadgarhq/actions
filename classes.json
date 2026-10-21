@@ -1,0 +1,121 @@
+{
+  "about": [
+    "LEDGER 1756 S5, ADR-0982, ADR-0635. The yadgarhq/actions hook block each consumer class carries, as data.",
+    "A consumer's class is its ONE `yadgar-class-<name>` topic. `scripts/fan_out.py` renders a consumer's yadgarhq/actions block from this file and a tag.",
+    "MEASURED, NOT CHOSEN: every list below is the hook set the class's consumers carried on 2026-10-21 (fixtures in scripts/tests/fixtures/fan_out/, each with its source commit in test_fan_out.py). S4 records what exists; this file does not decide which hooks a class should carry.",
+    "ORDER is part of the class. Where consumers of one class disagreed on order, the majority wins; on a tie, the order the other rust classes share wins. Each class's `order` field says which repositories that moves.",
+    "Keys on a hook other than `id` are written into the consumer's block as they are (only `exclude` is measured today). `overrides` replaces a hook's keys for one repository."
+  ],
+  "topic_prefix": "yadgar-class-",
+  "exempt": {
+    "actions": "The producer. Its own .pre-commit-config.yaml runs its hooks from local paths (`repo: local`) at the commit under test, so it pins no rev to adopt."
+  },
+  "classes": {
+    "base": {
+      "order": "argocd, docs and proto agree.",
+      "hooks": [
+        { "id": "gitleaks" },
+        { "id": "prettier" },
+        { "id": "hadolint" },
+        { "id": "actionlint" },
+        { "id": "no-test-skips" }
+      ]
+    },
+    "verify": {
+      "order": "argocd-verify only.",
+      "hooks": [{ "id": "actionlint" }]
+    },
+    "chart": {
+      "order": "config and platform (2) put actionlint before helm-lint; chart (1) has the reverse. Majority: chart moves.",
+      "hooks": [
+        { "id": "gitleaks" },
+        { "id": "prettier", "exclude": "^chart/templates/" },
+        { "id": "hadolint" },
+        { "id": "actionlint" },
+        { "id": "helm-lint" },
+        { "id": "no-test-skips" }
+      ]
+    },
+    "rust-helm": {
+      "order": "dial, lifecycle and seeder agree.",
+      "hooks": [
+        { "id": "gitleaks" },
+        { "id": "prettier", "exclude": "^(chart/templates/|proto/)" },
+        { "id": "hadolint" },
+        { "id": "actionlint" },
+        { "id": "cargo-fmt" },
+        { "id": "cargo-clippy" },
+        { "id": "complexity" },
+        { "id": "cargo-clippy-complexity" },
+        { "id": "cargo-deny" },
+        { "id": "observe-coverage" },
+        { "id": "helm-lint" },
+        { "id": "no-compiled-in-defaults" },
+        { "id": "run-block-size" },
+        { "id": "no-test-skips" }
+      ]
+    },
+    "rust-app": {
+      "order": "estate and yadgar agree.",
+      "hooks": [
+        { "id": "gitleaks" },
+        { "id": "prettier" },
+        { "id": "actionlint" },
+        { "id": "cargo-fmt" },
+        { "id": "cargo-clippy" },
+        { "id": "complexity" },
+        { "id": "cargo-clippy-complexity" },
+        { "id": "cargo-deny" },
+        { "id": "observe-coverage" },
+        { "id": "no-compiled-in-defaults" },
+        { "id": "run-block-size" },
+        { "id": "no-test-skips" }
+      ]
+    },
+    "rust-lib": {
+      "order": "store and telemetry disagree on where no-compiled-in-defaults goes, one each. Tie: the place rust-app, rust-helm and service share (after observe-coverage, before run-block-size). Both move.",
+      "hooks": [
+        { "id": "gitleaks" },
+        { "id": "prettier" },
+        { "id": "hadolint" },
+        { "id": "actionlint" },
+        { "id": "cargo-fmt" },
+        { "id": "cargo-clippy" },
+        { "id": "complexity" },
+        { "id": "cargo-clippy-complexity" },
+        { "id": "cargo-deny" },
+        { "id": "observe-coverage" },
+        { "id": "no-compiled-in-defaults" },
+        { "id": "run-block-size" },
+        { "id": "no-test-skips" }
+      ]
+    },
+    "service": {
+      "order": "gateway, iam, project, task and task-db (5) put the complexity pair after cargo-clippy; iam-db and project-db (2) put it after boot-reads-watched. Majority: iam-db and project-db move.",
+      "hooks": [
+        { "id": "gitleaks" },
+        { "id": "prettier", "exclude": "^(chart/templates/|proto/)" },
+        { "id": "hadolint" },
+        { "id": "actionlint" },
+        { "id": "cargo-fmt" },
+        { "id": "cargo-clippy" },
+        { "id": "complexity" },
+        { "id": "cargo-clippy-complexity" },
+        { "id": "cargo-deny" },
+        { "id": "observe-coverage" },
+        { "id": "helm-lint" },
+        { "id": "no-compiled-in-defaults" },
+        { "id": "run-block-size" },
+        { "id": "boot-reads-watched" },
+        { "id": "no-test-skips" },
+        { "id": "chart-baseline" },
+        { "id": "chart-network-policy" }
+      ]
+    }
+  },
+  "overrides": {
+    "telemetry": {
+      "prettier": { "exclude": "^(chart/templates/|proto/)" }
+    }
+  }
+}

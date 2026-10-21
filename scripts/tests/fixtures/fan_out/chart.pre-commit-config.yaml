@@ -1,0 +1,112 @@
+# Every yadgarhq repo carries pre-commit (D59). Hook failure is signal, not
+# obstacle: fix the cause and re-stage. Never --no-verify.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: check-yaml
+        # Helm templates are Go templates that HAPPEN to look like YAML, so a real
+        # parser rejects them. `helm lint` and `helm template` below are the checks
+        # that actually apply to those.
+        #
+        # THE ONE `.yaml` IN THAT DIRECTORY IS NOT A MANIFEST. `validate.yaml`
+        # carries the parent's own refusals and its whole content is an include of
+        # a partial; it emits nothing (ADR-0777). So the exclusion is load-bearing
+        # here rather than kept as dead config, and it stays scoped to the whole
+        # directory: the day somebody adds a template that DOES emit an object, the
+        # interesting failure is the review conversation about whether a parent may
+        # render objects at all, not a YAML parse error on a Go template.
+        exclude: ^chart/templates/
+
+  # Shared, from yadgarhq/actions (D62). IMMUTABLE rev: pre-commit caches a rev
+  # at first install and never re-resolves it, so a moving tag would silently
+  # freeze each machine at whatever it meant the day it first ran.
+  - repo: https://github.com/yadgarhq/actions
+    rev: v1.31.0
+    hooks:
+      - id: gitleaks
+      - id: prettier
+        exclude: ^chart/templates/
+      # No Containerfile here and there never will be one — this repository ships
+      # eight pins, not an image. The hook is a no-op and costs nothing, and is
+      # kept so the config matches every other repository's rather than being the
+      # one that has to be explained.
+      #
+      # NO CONTAINERFILE IS ALSO WHAT KEEPS THE `deployment` JOB OF
+      # `ci-release.yaml` INERT HERE. That job writes `versions/<module>.yaml`
+      # into `yadgarhq/argocd`, and its condition is
+      # `needs.image.result == 'success'` — with no `Containerfile` the image job
+      # skips, so nothing writes `versions/chart.yaml` and the module
+      # ApplicationSet gains no phantom Application for this repository. Same
+      # reason `yadgarhq/config` sits outside it.
+      - id: hadolint
+      # A CONSUMER IS NOT LINTED UNTIL IT REFERENCES THE HOOK. `ci-pr.yaml`
+      # installs the `actionlint` binary unconditionally and `yadgarhq/actions`
+      # publishes the hook, but publication makes a check AVAILABLE rather than
+      # switching it on (ledger 620, ADR-0577).
+      #
+      # The hook REFUSES rather than passes when actionlint's shellcheck rule
+      # class is not running: actionlint silently disables that whole class when
+      # the binary is absent, and "Passed, having checked nothing" is the defect
+      # the guard closes rather than a state this check may report.
+      # `helm-lint` READS `chart/ci/api-versions.txt` from v1.28.0 on (ADR-0806)
+      # and passes each entry to `helm template` as `--api-versions`. The
+      # whole-estate defaults refuse a render without them, so this rev is the
+      # floor for this chart; v1.20.1's bare `helm template` refuses at `task`'s
+      # KEDA check.
+      - id: helm-lint
+      - id: actionlint
+      - id: no-test-skips
+      # NEITHER `chart-baseline` NOR `chart-network-policy` IS REFERENCED, and the
+      # omission is a consequence of ADR-0584 rather than a gap. Both assert
+      # properties of a chart's own pod spec and ingress policy —
+      # `terminationGracePeriodSeconds`, a dedicated ServiceAccount,
+      # `topologySpreadConstraints`, an ingress NetworkPolicy — and this parent has
+      # no pod spec and no templates at all. Adopting a gate in a repository it
+      # hard-fails is what ADR-0584 forbids. The eight subcharts each carry those
+      # assertions in their own repositories, which is where the pod specs live.
+
+  # LOCAL, because it encodes properties of THIS chart's render rather than one
+  # the estate shares.
+  #
+  # `language: python` rather than `system`: pre-commit builds the environment and
+  # installs PyYAML, which a bare CI interpreter does not carry — `Chart.yaml` and
+  # `values.yaml` are read with it, and so is a rendered ConfigMap's own YAML body.
+  #
+  # THE SUITE CARRIES THE RENDER ASSERTIONS an adopter cares about: the 81 objects
+  # of a default install (K1), that it refuses offline without the four declared
+  # API versions (K2), that the PACKAGED chart renders the same set as the
+  # directory, that an adopter's own value reaches a child's rendered object (goal
+  # item 6), and that every CRD-bearing resource can be switched off (D80). Per
+  # ADR-0725 the packaged-chart fixture resolves dependencies with
+  # `helm package chart -u`, the same as `ci-release.yaml`'s `chart` job, so this
+  # hook needs the registry reachable rather than running offline.
+  #
+  # PYYAML'S PIN matches `yadgarhq/actions`' own `pytest-scripts` hook.
+  #
+  # `shellcheck-py` PUTS `shellcheck` ON THE HOOK'S PATH for
+  # `test_kind_up.py`, which lints `bootstrap/kind-up.sh` and fails rather than
+  # skips when the binary is absent (ADR-0650). A pinned wheel rather than
+  # whatever the machine carries, so a local run and CI lint with one version.
+  #
+  # `always_run` with `pass_filenames: false`, and `files:` is omitted rather
+  # than written as documentation: a hook filtered on `^scripts/` reports
+  # `Skipped`, exit 0, on a pull request that changes only `chart/Chart.yaml` —
+  # which is exactly the pull request whose effect on the render this suite exists
+  # to catch.
+  - repo: local
+    hooks:
+      - id: pytest-scripts
+        name: pytest scripts/tests
+        language: python
+        additional_dependencies:
+          ["pytest==9.1.1", "pyyaml==6.0.3", "shellcheck-py==0.11.0.1"]
+        entry: pytest scripts/tests/ -q
+        pass_filenames: false
+        always_run: true

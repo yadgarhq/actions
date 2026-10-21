@@ -1,0 +1,71 @@
+# Every yadgarhq repo carries pre-commit (D59). Hook failure is signal, not
+# obstacle: fix the cause and re-stage. Never --no-verify.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: check-yaml
+        # Helm templates are Go templates that happen to look like YAML;
+        # `helm lint` and the render suite are the checks that apply to them.
+        exclude: ^chart/templates/
+      - id: check-toml
+
+  # Shared, from yadgarhq/actions (D62), at the IMMUTABLE rev `project` pins:
+  # pre-commit caches a rev at first install and never re-resolves it.
+  - repo: https://github.com/yadgarhq/actions
+    rev: v1.34.0
+    hooks:
+      - id: gitleaks
+      - id: prettier
+        exclude: ^(chart/templates/|proto/)
+      - id: hadolint
+      - id: actionlint
+      - id: cargo-fmt
+      - id: cargo-clippy
+      - id: complexity
+      - id: cargo-clippy-complexity
+      - id: cargo-deny
+      - id: observe-coverage
+      - id: helm-lint
+      - id: no-compiled-in-defaults
+      - id: run-block-size
+      - id: no-test-skips
+      # NOT ADOPTED, AND ADR-0584 IS WHY: `boot-reads-watched`. It judges
+      # every boot read against the watch set in `src/rotate.rs` (ADR-0523's
+      # exit-on-change watcher) and refuses outright when there is none. The
+      # seeder has no watcher by design: a Job process lives for one sync, and
+      # a rotated leaf or a changed declaration is read by the next run. Its
+      # boot reads still carry `ADR-0523-UNWATCHED` markers with that reason,
+      # so adopting the gate later is one line once it can judge a Job.
+      #
+      # NOT ADOPTED, AND ADR-0584 IS WHY: `chart-baseline` and
+      # `chart-network-policy`. Both judge a chart by its Deployment — the grace
+      # period against ADR-0601's drain floor, a hostname topology spread, an
+      # ingress NetworkPolicy — and a chart that "renders no Deployment" is not
+      # judged, which their `judged == charts` floor turns red by construction.
+      # This chart renders a Job only (ADR-0940): it has no drain, no replicas
+      # to spread and no ingress to police. ADR-0584 forbids adopting a gate in
+      # a repository it hard-fails, and bending the chart to satisfy a
+      # Deployment gate would be the wrong fix. The dedicated, token-less
+      # ServiceAccount the first gate also checks is asserted by
+      # `scripts/tests/test_render.py` instead.
+
+  # LOCAL: this chart's own render assertions, `scripts/tests/`. `always_run`
+  # with no `files:` filter, so a pull request touching only `chart/values.yaml`
+  # still runs them. HELM IS NOT PROVISIONED HERE and the suite fails without it
+  # (ADR-0650); `ci-pr.yaml`'s precommit job installs helm before pre-commit.
+  - repo: local
+    hooks:
+      - id: pytest-scripts
+        name: pytest scripts/tests
+        language: python
+        additional_dependencies: ["pytest==9.1.1", "pyyaml==6.0.3"]
+        entry: pytest scripts/tests/ -q
+        pass_filenames: false
+        always_run: true

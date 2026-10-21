@@ -1,0 +1,175 @@
+# Every yadgarhq repo carries pre-commit (D59). Hook failure is signal, not
+# obstacle: fix the cause and re-stage. Never --no-verify.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: check-yaml
+        # Helm templates are Go templates that HAPPEN to look like YAML —
+        # `{{- toYaml ... }}` is a syntax error to any real parser. Excluding
+        # them is not lowering the bar: `helm lint` and `helm template` are the
+        # checks that actually apply, and they run in CI.
+        exclude: ^chart/templates/
+      - id: check-toml
+
+  # Shared, from yadgarhq/actions (D62). IMMUTABLE rev: pre-commit caches a rev
+  # at first install and never re-resolves it, so a moving tag would silently
+  # freeze each machine at whatever it meant the day it first ran.
+  #
+  # v1.18.2 -> v1.18.3 FOR `complexity` BELOW, AND THE BUMP IS LOAD-BEARING
+  # RATHER THAN HOUSEKEEPING. v1.18.2's copy of the gate exempts a test
+  # DIRECTORY and nothing else, so it measures src/upstream/tests.rs as
+  # production code — this repository would adopt the id and immediately fail
+  # it. The attribute-and-filename exemption (actions#69, ADR-0636) is only in
+  # v1.18.3. `git diff --stat v1.18.2 v1.18.3` is hooks/complexity.py and its
+  # own test file, nothing else, so the other eleven hooks pinned here are
+  # byte-identical across the bump.
+  - repo: https://github.com/yadgarhq/actions
+    # THE REV MOVES FROM v1.22.0 TO v1.31.0 (ledger 965, unit C-SVb), and the
+    # whole block comes with it because pre-commit resolves one rev per
+    # repository entry — the same reason the v1.20.1 -> v1.22.0 note above
+    # gives. `hooks/no_compiled_in_defaults.sh` is the hook this move is FOR:
+    # the widened gate (unit C-A1) adds the `EnvFilter::new(...)` and the
+    # `lookup/env/get(...) == Some("...")` shapes this repository carried with
+    # no marker — `src/boot.rs`'s log-level fallback and the (now removed)
+    # `!= Some("1")` TLS-flag checks in `src/serve.rs`/`src/upstream.rs`. An
+    # older `rev:` here would keep running the NARROWER gate forever, silently
+    # exempting this repository from a widening every other consumer gets at
+    # their own next bump. `hooks/helm_lint.py` also lands in this range (the
+    # `helm-lint` id's `entry` moves from a bare `language: system` shell
+    # command to that script, with no change to what this chart's own lint and
+    # render must pass) — unrelated hook ids added in the same range
+    # (`hermetic-git`, `seed-front-matter`, `seed-no-ask-prompt`) are not
+    # referenced below; ADR-0577 is why that is inert rather than a gap.
+    #
+    # v1.31.0 -> v1.34.0 (ledger 925, unit B-U5). `boot-reads-watched` at
+    # v1.34.0 accepts `ADR-0523-LIBRARY-WATCHED` on `watch_set`: this
+    # repository's only direct boot read left `src/` with the local
+    # `ServeTls`, so the older gate judged zero reads and refused, while the
+    # files are still read — and watched — by `yadgar_lifecycle::serve_tls`.
+    rev: v1.34.0
+    hooks:
+      - id: gitleaks
+      - id: prettier
+        exclude: ^(chart/templates/|proto/)
+      - id: hadolint
+      # Every repository here carries workflows, and until this hook was
+      # published nothing linted them. It REFUSES rather than passes when
+      # actionlint's shellcheck rule class is not running: actionlint silently
+      # disables that whole class when the binary is absent, and "Passed, having
+      # checked nothing" is the defect the guard closes.
+      - id: actionlint
+      - id: cargo-fmt
+      - id: cargo-clippy
+      # LEDGER 719. The two halves of the complexity gate, adopted together
+      # because neither measures what the other does: `complexity` bounds a
+      # file at 500 lines and a function at 120, and `cargo-clippy-complexity`
+      # bounds nesting and argument count, which no line count can see.
+      #
+      # THIS REPOSITORY WAS OVER THE LINE CEILINGS WHEN THE HOOKS WERE
+      # PUBLISHED, and the refactor that put it under is the PR adopting them —
+      # not a later one. Adopting a limit already breached means starting with
+      # an exemption list, which is how a limit stops meaning anything.
+      #
+      # `cargo-clippy-complexity` measured CLEAN on the tree before that
+      # refactor, so its adoption fixes nothing and forbids a regression.
+      - id: complexity
+      - id: cargo-clippy-complexity
+      - id: cargo-deny
+      - id: observe-coverage
+      - id: helm-lint
+      # ADR-0569's gate (ledger 648), now shared instead of the byte-identical
+      # copy this repository carried at scripts/no_compiled_in_defaults.sh.
+      # Publishing let the sweep run against repositories the copy never
+      # covered; converting this repository's OWN reference changes no verdict
+      # here (see PR body).
+      - id: no-compiled-in-defaults
+      # LEDGER 658. Adopted though it checks nothing today: the largest `run:`
+      # block outside yadgarhq/actions is 303 bytes against an 8000-byte limit,
+      # and this repository measures 0. It is a tripwire for a block someone
+      # writes later, not a fix for anything present now.
+      - id: run-block-size
+      # LEDGER 734, adopting ledger 726's gate: a file read at boot is marked
+      # ADR-0523-WATCHED naming a src/rotate.rs material, or ADR-0523-UNWATCHED
+      # with a reason. This repository had never run it before this PR.
+      - id: boot-reads-watched
+      # LEDGER 837. `hooks/no_test_skips.py` refuses a test that stops
+      # running — a skip marker, an unsatisfiable cfg, an environment-probe
+      # guard at the first statement, a narrowed `cargo test`/pytest
+      # invocation, or a captured run whose exit code is suppressed.
+      # ADR-0577: a published hook nobody references gates nothing, and this
+      # one gates this repository for the first time with this line.
+      #
+      # THE REV ALSO CARRIES v1.19.0's `observe-coverage` Rule B tightening
+      # (resolving callees and route handlers crate-wide rather than
+      # file-local); it changes nothing this repository's own
+      # `observe-coverage` hook enforces. See the PR body for the
+      # measurement.
+      - id: no-test-skips
+      # LEDGER 511, adopted as BOTH halves ADR-0685 split that gate into.
+      # ADR-0577 makes a published hook inert until a repository references it,
+      # and both halves were published at v1.22.0 and referenced by nobody — so
+      # these two lines are what enforce the four baseline fields here for the
+      # first time.
+      #
+      # `chart-baseline` asserts the three fields that are properties of the
+      # chart's own pod spec: the grace period against ADR-0601's floor, a
+      # dedicated ServiceAccount with no API token, and a hostname topology
+      # spread carrying `ScheduleAnyway` so it cannot hang a roll.
+      # `chart-network-policy` asserts the fourth, that a template declares
+      # `kind: NetworkPolicy`. The split is not an exemption mechanism for this
+      # repository: it exists because `yadgarhq/gateway`'s ingress policy
+      # legitimately lives in `yadgarhq/deploy`, and that repository therefore
+      # references the first id only. This one references both, so its charts
+      # are covered whole.
+      #
+      # Measured on this tree at v1.22.0: chart-baseline 1 chart, 1 judged, 29
+      # assertions evaluated, 0 findings; chart-network-policy 1 chart, 1
+      # judged, 1 assertion evaluated, 0 findings. 29 + 1 is the 30 the gate
+      # reported before the split. Both halves carry floors —
+      # `MINIMUM_CHARTS`, `MINIMUM_ASSERTIONS` and a `judged == charts`
+      # check — so a half that examined nothing is red rather than green.
+      - id: chart-baseline
+      - id: chart-network-policy
+
+  # LOCAL, because it is this repository's own content assertion rather than a rule
+  # the estate shares. Until this hook the chart was covered by `helm lint --strict`
+  # and the two shared `chart-*` hooks alone — none of which asserts what the chart
+  # RENDERS — so `scripts/tests/` is this chart's first content assertion and this
+  # line is what makes it run. The Rust suites in `tests/` do not render the chart,
+  # and a render check's correctness is a property of the render.
+  #
+  # INSIDE THE MERGE GATE. `ci-pr.yaml`'s `passed` job lists `precommit` in its
+  # `needs`, and the ruleset on `main` requires the check `ci / passed`, so a red
+  # case here blocks the merge rather than reporting beside it.
+  #
+  # `language: python` rather than `system`, so pre-commit provisions the
+  # interpreter, pytest and PyYAML. PYYAML IS FOR THE SUBJECT AS WELL AS THE SUITE:
+  # every case there parses a `helm template` render. Both pins match
+  # `yadgarhq/platform`'s, `yadgarhq/iam-db`'s and `yadgarhq/gateway`'s copies of
+  # this block.
+  #
+  # HELM IS NOT PROVISIONED BY THIS HOOK and the suite does not skip without it — it
+  # fails, naming helm (ADR-0650). `ci-pr.yaml`'s `precommit` job installs helm
+  # v3.18.4 before it runs pre-commit, and the suite is measured on that version and
+  # on 4.3.0.
+  #
+  # `always_run` with `pass_filenames: false`, and `files:` is omitted rather than
+  # written as documentation: a hook filtered on `^scripts/` reports `Skipped`, exit
+  # 0, on a pull request that changes only `chart/values.yaml` — which is exactly the
+  # pull request whose rendered instance this suite exists to check.
+  - repo: local
+    hooks:
+      - id: pytest-scripts
+        name: pytest scripts/tests
+        language: python
+        additional_dependencies: ["pytest==9.1.1", "pyyaml==6.0.3"]
+        entry: pytest scripts/tests/ -q
+        pass_filenames: false
+        always_run: true
