@@ -78,10 +78,22 @@
   pass_filenames: false
   files: \.(rs|toml)$
 
+#
+# LEDGER 1285: `--all-features`, so a dependency behind an opt-in feature is
+# checked too (rustls and tonic behind lifecycle's `serve-tls` were not). It is a
+# TOP-LEVEL flag in cargo-deny 0.20.2: measured, `cargo deny check
+# --all-features` is a usage error, `cargo deny --all-features check` runs.
+#
+# VERSION-ASSERTED (ledger 1756 S3, ADR-0983), like gitleaks, hadolint and
+# actionlint below: `hooks/tool_version.py` refuses a binary whose version is
+# neither the `version` nor an `accept` entry in `versions.yaml` at the `rev` a
+# repository uses, and a missing one. `versions.yaml` says how a bump moves. That is why these four are `language: script` rather than
+# `system`: a script runs from pre-commit's clone of this repository at that
+# `rev`, so `versions.yaml` sits beside it. A system entry cannot see the clone.
 - id: cargo-deny
   name: cargo deny (licences, advisories, sources)
-  language: system
-  entry: cargo deny check
+  language: script
+  entry: hooks/tool_version.py cargo-deny -- cargo deny --all-features check
   pass_filenames: false
   files: (Cargo\.(toml|lock)|deny\.toml)$
 
@@ -97,10 +109,12 @@
 # entry stays staged rather than detecting CI, because a hook cannot see the
 # pull request's base and a history scan here would re-scan old commits on
 # every local commit.
+#
+# Version-asserted, as the cargo-deny entry above says.
 - id: gitleaks
   name: Detect secrets and credentials
-  language: system
-  entry: gitleaks git --pre-commit --staged --verbose
+  language: script
+  entry: hooks/tool_version.py gitleaks -- gitleaks git --pre-commit --staged --verbose
   pass_filenames: false
 
 # Prettier for markdown, JSON and YAML. cargo fmt covers Rust and buf format
@@ -136,11 +150,13 @@
 # dockerfile, so this hook matches them unchanged — verified empirically).
 # hadolint publishes its own hooks, but it is wrapped here anyway
 # — see the note below on when that is right.
+#
+# Version-asserted, as the cargo-deny entry above says.
 - id: hadolint
   name: hadolint
-  language: system
+  language: script
   types: [dockerfile]
-  entry: hadolint
+  entry: hooks/tool_version.py hadolint -- hadolint
 
 # EVERY repository here has workflows, and until this entry existed none of them
 # was linted. The hook was declared in yadgarhq/actions' own local config alone,
@@ -158,12 +174,14 @@
 # PUBLICATION CHANGES THAT ARGUMENT rather than refuting it. A named check that
 # sixteen repositories reference has to mean one thing, and "Passed, having
 # checked nothing" is the defect being closed here, not a convenience to carry
-# forward. Every other system hook in this file — cargo-fmt, cargo-clippy,
-# cargo-deny, gitleaks, hadolint, helm-lint — is a bare entry that fails with
-# "Executable `X` not found" when the tool is absent. THIS ONE IS A SCRIPT, for
-# the reason the paragraph below gives, and it prints that same sentence
-# verbatim for an absent actionlint — so the missing-binary direction reads
-# exactly as it did while this entry was bare.
+# forward. The bare system hooks in this file — cargo-fmt, cargo-clippy — fail
+# with "Executable `X` not found" when the tool is absent, and the
+# version-asserted scripts (cargo-deny, gitleaks, hadolint) print that same
+# sentence first. THIS ONE IS A SCRIPT, for the reason the paragraph below
+# gives, and it prints that same sentence verbatim for an absent actionlint —
+# so the missing-binary direction reads exactly as it did while this entry was
+# bare. It also asserts the version (ledger 1756 S3), through the same
+# `hooks/tool_version.py`, before its shellcheck probe.
 #
 # actionlint publishes its own hooks. It is wrapped here anyway, for the reason
 # the note above gives: sixteen repositories use it, so a direct reference would

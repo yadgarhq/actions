@@ -80,6 +80,13 @@ if ! command -v actionlint >/dev/null 2>&1; then
   exit 1
 fi
 
+# LEDGER 1756 S3, ADR-0983: the version must be one versions.yaml pins or
+# accepts at the `rev` of yadgarhq/actions this repository uses, which is the
+# checkout this file sits in. hooks/tool_version.py says why, and refuses with the
+# expected and found versions. It runs BEFORE the probe, so a wrong version is
+# named as that rather than as a probe failure.
+python3 "${BASH_SOURCE[0]%/*}/tool_version.py" actionlint || exit 1
+
 # `echo $GITHUB_ENV` is an unquoted expansion and nothing else, so shellcheck
 # reports SC2086 on it and actionlint reports nothing of its own. Measured
 # against actionlint 1.7.12 and shellcheck 0.11.0: with shellcheck the probe

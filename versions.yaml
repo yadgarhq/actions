@@ -12,7 +12,21 @@
 # number of sites differs from `sites`.
 #
 # TO MOVE A PIN: change `version` here (and `sha256`, if present) and every literal
-# copy outside the workflows in the same pull request.
+# copy outside the workflows in the same pull request. That is the whole rule for
+# every tool EXCEPT the four the hooks assert.
+#
+# GITLEAKS, HADOLINT, ACTIONLINT AND CARGO-DENY MOVE IN TWO STEPS (ledger 1756 S3,
+# ADR-0983). `hooks/tool_version.py` refuses a local binary unless it is `version`
+# or listed in `accept`, read from this file at the `rev` a repository pins. CI
+# installs `version` from this file on main. A one-step move on main would red
+# every repository whose `rev` does not yet accept the new version.
+#   1. Accept: add the new version to the tool's `accept` list, e.g.
+#      `gitleaks: { version: "8.30.1", ..., accept: ["8.31.0"] }`. Release, and let
+#      the ADR-0982 fan-out land that tag in every repository.
+#   2. Move: only after every adoption pull request has merged, change `version`
+#      (and `sha256`) to the new version and delete it from `accept`.
+# Nothing refuses step 2 early yet: that check needs the fan-out's adoption report
+# (S5/S6). `accept` on any other tool is refused by `scripts/versions_parity.py`.
 # TO ADD OR DELETE A SITE: change `sites` in the same pull request.
 #
 # ONE LINE PER TOOL, as a flow mapping. `tool_versions.py` runs before setup-python,

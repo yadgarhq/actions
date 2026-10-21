@@ -111,3 +111,71 @@ def test_a_malformed_file_is_refused(tmp_path, body, needle):
 def test_a_missing_file_is_refused(tmp_path):
     proc = run(tmp_path / "absent.yaml")
     assert proc.returncode == 1 and proc.stdout == "" and "::error::" in proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# Ledger 1756 S3, ADR-0983: `accept`, the extra versions a hook at this rev
+# also accepts. CI installs `version` only, so `accept` never reaches an output.
+# ---------------------------------------------------------------------------
+
+
+def test_accept_is_read_and_never_becomes_a_step_output(tmp_path):
+    path = write(
+        tmp_path,
+        "tools:\n"
+        f'  gitleaks: {{ version: "8.30.1", sites: 2, sha256: "{SHA}", accept: ["8.31.0", "8.32.1"] }}\n'
+        '  helm: { version: "3.18.4", sites: 6 }\n',
+    )
+    assert tool_versions.read(path) == {"gitleaks": "8.30.1", "gitleaks_sha256": SHA, "helm": "3.18.4"}
+    assert tool_versions.accepted(path) == {"gitleaks": ("8.31.0", "8.32.1"), "helm": ()}
+    proc = run(path)
+    assert proc.returncode == 0, proc.stderr
+    assert "accept" not in proc.stdout and "8.31.0" not in proc.stdout
+
+
+def test_the_reader_agrees_with_yaml_on_accept(tmp_path):
+    body = (
+        "tools:\n"
+        '  gitleaks: { version: "8.30.1", sites: 2, accept: ["8.31.0"] }\n'
+        '  hadolint: { version: "2.14.0", sites: 1, accept: [ "2.15.0" , "2.16.0" ] }\n'
+    )
+    path = write(tmp_path, body)
+    tools = yaml.safe_load(body)["tools"]
+    assert tool_versions.accepted(path) == {name: tuple(entry["accept"]) for name, entry in tools.items()}
+
+
+def test_the_real_file_reads_accept_as_yaml_does():
+    tools = yaml.safe_load((REPO / "versions.yaml").read_text())["tools"]
+    assert tool_versions.accepted(REPO / "versions.yaml") == {
+        name: tuple(entry.get("accept", ())) for name, entry in tools.items()
+    }
+
+
+@pytest.mark.parametrize(
+    "accept,needle",
+    [
+        ('["8.31.0", "8.31.0"]', "twice"),
+        ('["8.30.1"]', "is its own version"),
+        ('["v8.31.0"]', "not a dotted number"),
+        ('["8.x"]', "not a dotted number"),
+        ('["٨.31.0"]', "not a dotted number"),
+        ("[]", "empty"),
+        ('"8.31.0"', "cannot read"),
+        ("[8.31.0]", "cannot read"),
+        ('["8.31.0",]', "cannot read"),
+    ],
+)
+def test_a_malformed_accept_is_refused(tmp_path, accept, needle):
+    path = write(tmp_path, f'tools:\n  gitleaks: {{ version: "8.30.1", sites: 2, accept: {accept} }}\n')
+    with pytest.raises(tool_versions.ReadError, match=needle):
+        tool_versions.read(path)
+    with pytest.raises(tool_versions.ReadError, match=needle):
+        tool_versions.accepted(path)
+    proc = run(path)
+    assert proc.returncode == 1 and proc.stdout == ""
+
+
+def test_accept_given_twice_is_refused(tmp_path):
+    path = write(tmp_path, 'tools:\n  gitleaks: { version: "8.30.1", accept: ["8.31.0"], accept: ["8.32.0"] }\n')
+    with pytest.raises(tool_versions.ReadError, match="twice"):
+        tool_versions.read(path)
