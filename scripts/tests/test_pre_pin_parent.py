@@ -350,7 +350,8 @@ def test_the_job_installs_the_same_helm_pin_as_every_other_chart_job():
     steps = workflow_jobs()["pre_pin_parent"]["steps"]
     helm_steps = [s for s in steps if str(s.get("uses", "")).startswith("azure/setup-helm@")]
     assert len(helm_steps) == 1
-    assert helm_steps[0]["with"]["version"] == "v3.18.4"
+    # LEDGER 1756 S2b: the same read of `versions.yaml` as every other chart job.
+    assert helm_steps[0]["with"]["version"] == "v${{ needs.detect.outputs.helm }}"
 
 
 def test_passed_gates_the_new_job():

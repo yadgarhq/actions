@@ -1,8 +1,20 @@
 #!/usr/bin/env python3
 """Every PINNED tool version listed in `versions.yaml` equals the canonical one there.
 
-SCOPE: the twelve tools in `versions.yaml` and the pin shapes in `SCANNERS`.
+SCOPE: the tools in `versions.yaml` and the pin shapes in `SCANNERS`.
 Nothing else is covered; see "WHAT IT DOES NOT DO".
+
+A WORKFLOW READS, IT DOES NOT NAME (ledger 1756 S2b, ADR-0981). For the tools in
+`READ_IN_WORKFLOWS`, a site under `.github/workflows/` must be a read of that
+tool's output, `${{ needs.<job>.outputs.<tool> }}` or
+`${{ steps.<id>.outputs.<tool> }}` (a `-` in the name becomes `_`), produced by
+`scripts/tool_versions.py` from `versions.yaml` at the running commit. A literal
+there is refused even at the right value, because it is a second copy of the
+pin; `stable` and `3.x` are refused as floating. Sites outside the workflows
+(gate scripts, hook definitions, Containerfiles) stay literals and must equal
+the canonical value. For the tools in `SHA256_REQUIRED`, `versions.yaml` must
+carry a 64-hex `sha256`; `scripts/tests/test_tool_installs.py` proves the
+install steps check it.
 
 `versions.yaml` at the repository root is the canonical list. Each tool in it has
 a `version` and a `sites` count: the number of places this repository pins it
@@ -23,13 +35,12 @@ copy fail until `versions.yaml` is edited in the same change. A count of zero
 found is also a failure: a gate that finds nothing reports success having
 checked nothing.
 
-WHAT IT DOES NOT DO. It does not cover FLOATING pins: `python-version: "3.x"`,
-the Rust `stable` toolchain, the apt `shellcheck`, and `pre-commit` itself. Those
-are out of scope until ledger 1756 step 2. It does not cover the Rust toolchain
-(`rust:1.98-bookworm` and `--default-toolchain 1.98.0` spell one version two ways).
-It records the `aquasecurity/trivy-action` steps that carry no `version:` input as
-KNOWN UNPINNED (see the `unpinned:` map under `trivy` in `versions.yaml`) and
-checks that list exactly; it does not pin them. It does not change any pin. It does not read
+WHAT IT DOES NOT DO. It does not cover the apt `shellcheck` or `pre-commit`
+itself, which still float. It does not check that a read step really reads
+`versions.yaml` (`test_tool_versions.py` and the workflow wiring do that). The
+image toolchain `rust-image` is spelt two ways: a `rust:` base-image tag that
+names major.minor only, and a full rustup toolchain. A site marked `prefix` matches when its dotted
+value is a leading part of the canonical one. It does not change any pin. It does not read
 `scripts/tests/`. It does not check action SHAs (Dependabot moves those). The
 `azure/setup-helm` steps are also held equal to each other by
 `helm_pin_agrees.py`; this module adds the comparison to the canonical value.
@@ -47,22 +58,48 @@ import yaml
 MANIFEST = "versions.yaml"
 
 VERSION = r"v?(\d[\w.]*)"
-# Value after a key, with optional quotes, stopped by a quote, space or comment.
-VALUE = r"[\"']?v?([^\s\"'#]+)"
+# Value after a key, with optional quotes: a whole `${{ ... }}` expression, or a
+# literal stopped by a quote, space or comment.
+VALUE = r"[\"']?v?(\$\{\{[^}]*\}\}|[^\s\"'#]+)"
+# A read of a versions output. Group 1 is the output name.
+READ = re.compile(r"^\$\{\{\s*(?:needs\.[\w-]+|steps\.[\w-]+)\.outputs\.([\w-]+)\s*\}\}$")
+# Literals that are not versions at all: the toolchain or interpreter they name moves.
+FLOATING = {"stable", "beta", "nightly", "latest", "3.x", "3", "x"}
+WORKFLOWS = ".github/workflows/"
+
+# Every workflow site of these reads `versions.yaml`; a literal is refused.
+READ_IN_WORKFLOWS = {
+    "gitleaks",
+    "hadolint",
+    "actionlint",
+    "cargo-deny",
+    "zizmor",
+    "helm",
+    "trivy",
+    "rust-toolchain",
+    "python",
+}
+# These are downloaded as artefacts; `versions.yaml` carries their sha256.
+SHA256_REQUIRED = ("gitleaks", "hadolint", "actionlint", "cargo-deny")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 def env(key):
     return ("line", re.compile(rf"^\s*{key}:\s*{VALUE}"))
 
 
-def helm_like(action, require):
-    """The `version:` input of every step that uses `action`."""
+def uses_input(action, key="version", require=True):
+    """The `key:` input of every step that uses `action`."""
     return (
         "block",
         re.compile(rf"uses:\s*{re.escape(action)}@"),
-        re.compile(rf"^\s*version:\s*{VALUE}"),
+        re.compile(rf"^\s*{re.escape(key)}:\s*{VALUE}"),
         require,
     )
+
+
+def output_name(tool):
+    return tool.replace("-", "_")
 
 
 # tool -> scanner rules. A "line" rule yields one site per regex match on a line.
@@ -74,15 +111,21 @@ SCANNERS = {
     "actionlint": [env("ACTIONLINT_VERSION")],
     "cargo-deny": [env("CARGO_DENY_VERSION")],
     "zizmor": [env("ZIZMOR_VERSION"), ("line", re.compile(rf"zizmor=={VERSION}"))],
-    "helm": [helm_like("azure/setup-helm", True)],
-    # `require=False`: a trivy-action step with no `version:` runs the action's
-    # default trivy (0.70.0, measured in trivy_gate.py). Those steps are not an
-    # error here; `versions.yaml` lists them under `unpinned:` and `check` holds
-    # that list exact. Pinning them is ledger 1756 step 2, not this gate.
+    "helm": [uses_input("azure/setup-helm")],
+    # A trivy-action step with no `version:` runs the action's own default
+    # (0.70.0, measured in trivy_gate.py), so a missing input is refused.
     "trivy": [
-        helm_like("aquasecurity/trivy-action", False),
+        uses_input("aquasecurity/trivy-action"),
         ("line", re.compile(rf"^TRIVY_VERSION\s*=\s*{VALUE}")),
     ],
+    "rust-toolchain": [uses_input("dtolnay/rust-toolchain", "toolchain")],
+    # The build images. `rust:1.98-bookworm` names major.minor only, so that
+    # site is a PREFIX match; `--default-toolchain` names the full version.
+    "rust-image": [
+        ("line", re.compile(r"^FROM\s+(?:\S*/)?rust:(\d+(?:\.\d+)*)-"), "prefix"),
+        ("line", re.compile(r"--default-toolchain\s+v?(\d[\w.]*)")),
+    ],
+    "python": [uses_input("actions/setup-python", "python-version")],
     "prettier": [("line", re.compile(rf"prettier@{VERSION}"))],
     "pytest": [("line", re.compile(rf"\bpytest=={VERSION}"))],
     "pyyaml": [("line", re.compile(rf"\bpyyaml=={VERSION}", re.IGNORECASE))],
@@ -144,7 +187,7 @@ def item_start(lines, index):
 
 
 def sites_in(lines, rules):
-    """Yield (line number, version or None, required) for every pin in `lines`.
+    """Yield (line number, version or None, required, prefix) for every pin in `lines`.
 
     A block rule reads its key from anywhere inside the step's list item, so
     `uses:` need not be the first key (`- name: ...` first is common).
@@ -154,8 +197,9 @@ def sites_in(lines, rules):
             continue
         for rule in rules:
             if rule[0] == "line":
+                prefix = len(rule) > 2 and rule[2] == "prefix"
                 for match in rule[1].finditer(line):
-                    yield number, match.group(1), True
+                    yield number, match.group(1), True, prefix
             else:
                 _, anchor, key, require = rule
                 if not anchor.search(line):
@@ -174,9 +218,9 @@ def sites_in(lines, rules):
                         found = (offset + 1, match.group(1))
                         break
                 if found:
-                    yield found[0], found[1], require
+                    yield found[0], found[1], require, False
                 else:
-                    yield number, None, require
+                    yield number, None, require, False
 
 
 def load_manifest(root):
@@ -193,6 +237,37 @@ def load_manifest(root):
     return tools, []
 
 
+def judge(name, relative, found, prefix, want):
+    """The problem with one found site, or None."""
+    if found.startswith("${{"):
+        read = READ.match(found)
+        if not relative.startswith(WORKFLOWS):
+            return f"{name} reads `{found}` outside a workflow; pin it to {want}"
+        if not read:
+            return (
+                f"{name} reads `{found}`, which is not a versions output; "
+                f"read `${{{{ needs.<job>.outputs.{output_name(name)} }}}}` or "
+                f"`${{{{ steps.<id>.outputs.{output_name(name)} }}}}`"
+            )
+        if read.group(1) != output_name(name):
+            return (
+                f"{name} reads outputs.{read.group(1)}; it must read outputs.{output_name(name)}"
+            )
+        return None
+    if relative.startswith(WORKFLOWS) and name in READ_IN_WORKFLOWS:
+        floats = " `" + found + "` floats: it names no version at all." if found in FLOATING else ""
+        return (
+            f"{name} is hardcoded as {found} in a workflow.{floats} A workflow reads it "
+            f"from {MANIFEST} at the running commit (ADR-0981): use "
+            f"`${{{{ needs.detect.outputs.{output_name(name)} }}}}` or the job's "
+            f"`${{{{ steps.versions.outputs.{output_name(name)} }}}}`"
+        )
+    value = found.lstrip("v")
+    if value == want or (prefix and want.startswith(value + ".")):
+        return None
+    return f"{name} pinned {found}, but {MANIFEST} says {want}"
+
+
 def check(root):
     """Return the problems found under `root`, each as `path:line: message`."""
     root = pathlib.Path(root)
@@ -206,46 +281,44 @@ def check(root):
     for name in tools:
         if name not in SCANNERS:
             problems.append(f"{MANIFEST}: {name} is listed but has no scanner in versions_parity.py")
+    for name in SHA256_REQUIRED:
+        entry = tools.get(name) or {}
+        if not SHA256.match(str(entry.get("sha256", ""))):
+            problems.append(
+                f"{MANIFEST}: {name} is downloaded by the workflows and needs `sha256`, "
+                "64 lowercase hex characters from the upstream checksum file"
+            )
+    for name, entry in tools.items():
+        if isinstance(entry, dict) and "unpinned" in entry:
+            problems.append(
+                f"{MANIFEST}: {name} carries `unpinned`; there is no allowance for an "
+                "unpinned step any more (ledger 1756 S2b). Pin the step"
+            )
 
     texts = {p: p.read_text(errors="replace").splitlines() for p in scanned_files(root)}
     for name, rules in SCANNERS.items():
         if name not in tools:
             continue
         entry = tools[name] or {}
-        expected_unpinned = entry.get("unpinned") or {}
-        unpinned = {}
         where = []
         want = str(entry.get("version", "")).lstrip("v")
         expected_sites = entry.get("sites")
         count = 0
         for path, lines in texts.items():
             relative = path.relative_to(root).as_posix()
-            for number, found, require in sites_in(lines, rules):
+            for number, found, require, prefix in sites_in(lines, rules):
                 if found is None:
-                    if not require:
-                        unpinned.setdefault(relative, []).append(number)
-                        continue
                     if require:
                         problems.append(
                             f"{relative}:{number}: {name} is installed with no pinned version; "
-                            f"pin it to {want}"
+                            f"read it from {MANIFEST} ({want})"
                         )
                     continue
                 count += 1
                 where.append(f"{relative}:{number}")
-                if found.lstrip("v") != want:
-                    problems.append(
-                        f"{relative}:{number}: {name} pinned {found}, but {MANIFEST} says {want}"
-                    )
-        for relative in sorted(set(unpinned) | set(expected_unpinned)):
-            lines_found = unpinned.get(relative, [])
-            if len(lines_found) != expected_unpinned.get(relative, 0):
-                shown = ", ".join(f"{relative}:{n}" for n in lines_found) or relative
-                problems.append(
-                    f"{shown}: {name} has {len(lines_found)} unpinned step(s) in {relative}, "
-                    f"{MANIFEST} lists {expected_unpinned.get(relative, 0)} under `unpinned`; "
-                    "pin the step (ledger 1756 step 2) or update the list"
-                )
+                problem = judge(name, relative, found, prefix, want)
+                if problem:
+                    problems.append(f"{relative}:{number}: {problem}")
         if count == 0:
             problems.append(f"{MANIFEST}: found no {name} pin sites; the scanner or the pin is gone")
         elif count != expected_sites:

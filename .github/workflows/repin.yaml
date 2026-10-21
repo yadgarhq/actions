@@ -120,6 +120,17 @@ jobs:
           ref: ${{ steps.own_sha.outputs.sha }}
           path: .ci-actions
 
+      # LEDGER 1756 S2b: the rust toolchain version, from `versions.yaml` in the
+      # checkout above, at this workflow's own commit (ADR-0981).
+      - name: the tool versions this job installs (versions.yaml)
+        id: versions
+        env:
+          UNDER_REVIEW: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$UNDER_REVIEW" = "yadgarhq/actions" ]; then dir=.; else dir=.ci-actions; fi
+          python3 "$dir/scripts/tool_versions.py" "$dir/versions.yaml" >> "$GITHUB_OUTPUT"
+
       - name: where the planner is, and whether this repository has a manifest
         id: where
         env:
@@ -325,7 +336,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         if: steps.proposed.outputs.proceed == 'true'
         with:
-          toolchain: stable
+          toolchain: ${{ steps.versions.outputs.rust_toolchain }}
 
       # THE LOCKFILE IS PART OF THE BUMP, and `gateway#90` is the measurement:
       # three lines of `Cargo.toml` and three `source` stanzas of `Cargo.lock`.

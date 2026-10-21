@@ -60,10 +60,15 @@ jobs:
       # counterexample: its chart is named `yadgar`. Empty for a repository with
       # no `chart/`, which is every repository the `parent` job skips anyway.
       chartname: ${{ steps.d.outputs.chartname }}
+      # LEDGER 1756 S2b (ADR-0981): the tool versions the `image` and `chart`
+      # jobs install, read once from `versions.yaml` at this workflow's commit.
+      helm: ${{ steps.versions.outputs.helm }}
+      trivy: ${{ steps.versions.outputs.trivy }}
     steps:
-      # ADR-0981 / ADR-0984: `detect` takes no checkout of `yadgarhq/actions`.
-      # It reads and checks the commit THIS workflow file runs at only to record
-      # it once per run, and to fail the whole release closed if it is unreadable.
+      # ADR-0981 / ADR-0984: `detect` reads and checks the commit THIS workflow
+      # file runs at, records it once per run, fails the whole release closed if
+      # it is unreadable, and reads `versions.yaml` at that commit (the sparse
+      # checkout at the end of this job).
       - name: the actions commit this job runs (ADR-0981)
         id: own_sha
         env:
@@ -123,6 +128,35 @@ jobs:
             echo "chartname=$name" >> "$GITHUB_OUTPUT"
             echo "- chart name: \`$name\`" >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      # LEDGER 1756 S2b. The tool versions, from `versions.yaml` at this
+      # workflow's own commit (ADR-0981). Two files only; the reader runs on the
+      # runner's own `python3`. Same steps as `ci-pr.yaml`'s `detect`.
+      - if: github.repository != 'yadgarhq/actions'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: yadgarhq/actions
+          ref: ${{ steps.own_sha.outputs.sha }}
+          path: .ci-versions
+          sparse-checkout: |
+            versions.yaml
+            scripts/tool_versions.py
+          sparse-checkout-cone-mode: false
+      - name: the tool versions this run installs (versions.yaml)
+        id: versions
+        env:
+          UNDER_REVIEW: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$UNDER_REVIEW" = "yadgarhq/actions" ]; then dir=.; else dir=.ci-versions; fi
+          python3 "$dir/scripts/tool_versions.py" "$dir/versions.yaml" > "$RUNNER_TEMP/versions.txt"
+          cat "$RUNNER_TEMP/versions.txt" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Tool versions (versions.yaml)"
+            sed 's/^/- /' "$RUNNER_TEMP/versions.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
+          rm -rf .ci-versions
 
   image:
     needs: detect
@@ -263,6 +297,10 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: "1"
           ignore-unfixed: true
+          # LEDGER 1756 S2b. With no `version:` this ran the action's default
+          # trivy (0.70.0) while the pull request scan ran the pinned one. Now
+          # both run the trivy in `versions.yaml`.
+          version: v${{ needs.detect.outputs.trivy }}
 
       # D63: lean and secure are measured, not asserted. A claim about an
       # image's contents that nothing verifies is a claim about the
@@ -401,7 +439,7 @@ jobs:
       # copy in `ci-pr.yaml`; when Argo's bundled helm changes, all three follow.
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v3.18.4
+          version: v${{ needs.detect.outputs.helm }}
       # D65: the chart IN GIT points at a moving tag, because our own cluster
       # deploys it from git at HEAD and development follows HEAD by design. The
       # PUBLISHED chart pins a digest, because a release must name exactly what
