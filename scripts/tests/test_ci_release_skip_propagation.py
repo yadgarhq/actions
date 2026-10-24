@@ -266,3 +266,70 @@ def test_the_generalised_check_catches_the_measured_defect_on_a_revert():
     jobs = real_jobs()
     jobs["parent"]["if"] = jobs["parent"]["if"].replace("always() && ", "")
     assert ("parent", "image") in suspect_jobs(jobs)
+
+
+# ---------------------------------------------------------------------------
+# C7 (plans/auto-deploy-parent-chart.md, ADR-1004): the argocd pin nudge runs
+# for the parent chart ONLY. `ci-release.yaml` is pinned `@main` by every
+# consumer, so this matrix is the proof that a merge here is a no-op for every
+# repository except `yadgarhq/chart`.
+# ---------------------------------------------------------------------------
+
+NUDGE = "argocd-pin-nudge"
+GREEN = {"detect": "success", "image": "skipped", "chart": "success"}
+# Every `@main` consumer of this file except the parent, as of 2026-10-24
+# (repositories whose `ci.yaml` calls `ci-release.yaml@main`), plus
+# `yadgarhq/actions` itself (its own release runs this file) and a fork-shaped
+# name. A new consumer is skipped by the same literal arm; add it here.
+NON_PARENT_CONSUMERS = [
+    "yadgarhq/actions",
+    "yadgarhq/argocd",
+    "yadgarhq/config",
+    "yadgarhq/dial",
+    "yadgarhq/docs",
+    "yadgarhq/estate",
+    "yadgarhq/gateway",
+    "yadgarhq/iam",
+    "yadgarhq/iam-db",
+    "yadgarhq/lifecycle",
+    "yadgarhq/platform",
+    "yadgarhq/project",
+    "yadgarhq/project-db",
+    "yadgarhq/proto",
+    "yadgarhq/seeder",
+    "yadgarhq/store",
+    "yadgarhq/task",
+    "yadgarhq/task-db",
+    "yadgarhq/telemetry",
+    "someone/chart",
+]
+
+
+def test_the_nudge_runs_for_the_parent_chart_when_its_chart_published():
+    assert admits(real_jobs(), NUDGE, GREEN, repo="yadgarhq/chart") is True
+
+
+@pytest.mark.parametrize("repo", NON_PARENT_CONSUMERS)
+def test_the_nudge_skips_for_every_other_consumer(repo):
+    assert admits(real_jobs(), NUDGE, GREEN, repo=repo) is False
+
+
+@pytest.mark.parametrize("result", ["failure", "cancelled", "skipped"])
+def test_the_nudge_skips_when_the_parent_chart_did_not_publish(result):
+    conclusions = dict(GREEN, chart=result)
+    assert admits(real_jobs(), NUDGE, conclusions, repo="yadgarhq/chart") is False
+
+
+def test_the_nudge_needs_detect_directly_for_the_version():
+    assert set(direct_needs(real_jobs(), NUDGE)) == {"detect", "chart"}
+
+
+def test_dropping_the_repository_arm_reddens_the_matrix():
+    """MUTATION: without the literal-repository arm the job runs for every
+    chart-bearing module — the exact @main blast radius this gate exists for."""
+    jobs = real_jobs()
+    jobs[NUDGE]["if"] = jobs[NUDGE]["if"].replace(
+        "&& github.repository == 'yadgarhq/chart'", ""
+    )
+    assert "github.repository" not in jobs[NUDGE]["if"]
+    assert admits(jobs, NUDGE, GREEN, repo="yadgarhq/gateway") is True

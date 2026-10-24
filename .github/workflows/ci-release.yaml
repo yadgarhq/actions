@@ -13,7 +13,9 @@ on:
         type: string
         required: true
     # BOTH OPTIONAL, because only the `parent` job below reads them and only a
-    # repository that publishes a chart reaches it. A reusable workflow cannot
+    # repository that publishes a chart reaches it. (`argocd-pin-nudge` reads
+    # them too, for `yadgarhq/chart` only, and warns rather than reddens when
+    # they are absent.) A reusable workflow cannot
     # see a caller's secrets unless the caller passes them, so a repository with
     # no chart passes nothing and loses nothing. A chart-carrying repository
     # that passes nothing hands over two empty strings, and `parent`'s `cred`
@@ -969,3 +971,91 @@ jobs:
             dir=.ci-actions/scripts
           fi
           python3 "$dir/example_published.py"
+
+  # C7 OF plans/auto-deploy-parent-chart.md: THE NUDGE (ADR-0946, ADR-0948 R3-a,
+  # ADR-1004). When the PARENT chart publishes, tell `yadgarhq/argocd` so its
+  # `auto-pin.yaml` opens the pin PR in seconds rather than at its next
+  # scheduled run (cron `7,22,37,52 * * * *`, every 15 minutes). `repository_dispatch` type `chart-published`, the version in
+  # `client_payload`. The payload is a nudge, never an input: argocd computes
+  # the target from chart's tags and the registry itself.
+  #
+  # THE PARENT ONLY, BY LITERAL NAME. Every consumer pins this file `@main`, so a
+  # merge here is live for all of them at once; the repository arm is what makes
+  # it a no-op for every other consumer, and `test_ci_release_skip_propagation.py`
+  # evaluates it for each one listed there (`NON_PARENT_CONSUMERS`, the
+  # estate's `@main` callers of this file as of 2026-10-24). `always()` for the reason `parent` gives: `image`
+  # is skipped in a chart-only repository.
+  #
+  # IT NEVER FAILS THE RELEASE. The chart is already published when this runs,
+  # and `repository_dispatch` answers 204 whether or not a workflow matched, so
+  # even a green nudge proves no delivery. argocd's 15-minute schedule is the
+  # backstop. Every failure here is a `::warning::`: no release App passed (as
+  # between the actions merge and the chart merge), a failed mint, a failed
+  # dispatch. `continue-on-error` on the job covers a timeout too.
+  #
+  # `permissions: {}`: no checkout, and the App token does the only call. The
+  # token is minted for `argocd` alone with `contents: write` alone, the
+  # minimum `POST /repos/{owner}/{repo}/dispatches` accepts; no pull-requests,
+  # which is the auto-pin workflow's own mint inside argocd.
+  argocd-pin-nudge:
+    needs: [detect, chart]
+    if: >-
+      always() && needs.chart.result == 'success'
+      && github.repository == 'yadgarhq/chart'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions: {}
+    steps:
+      # The `secrets` context is not available in a step-level `if:`, hence an
+      # output. Unlike `parent`'s probe, this one warns rather than reddens.
+      - name: is the release App configured here
+        id: cred
+        env:
+          CLIENT_ID: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          APP_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "$CLIENT_ID" ] && [ -n "$APP_KEY" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "configured=false" >> "$GITHUB_OUTPUT"
+          echo "::warning::argocd was not nudged: the release job passes no release App. The argocd auto-pin schedule picks this version up instead."
+
+      - name: mint a token that can dispatch to argocd and nothing else
+        id: app
+        if: steps.cred.outputs.configured == 'true'
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: argocd
+          permission-contents: write
+
+      - name: say the mint failed
+        id: mint_failed
+        if: steps.app.outcome == 'failure'
+        run: |
+          echo "::warning::argocd was not nudged: the release App token mint failed. The argocd auto-pin schedule picks this version up instead."
+
+      - name: nudge argocd that a parent chart version published
+        id: nudge
+        if: steps.app.outcome == 'success'
+        continue-on-error: true
+        env:
+          # Through the environment, never `${{ }}` inside the script.
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          OWNER: ${{ github.repository_owner }}
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: |
+          set -euo pipefail
+          body=$(jq -nc --arg v "$VERSION" \
+            '{event_type: "chart-published", client_payload: {version: $v}}')
+          if gh api -X POST "repos/${OWNER}/argocd/dispatches" --input - <<< "$body"; then
+            echo "nudged argocd: chart-published ${VERSION}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::argocd was not nudged: the dispatch failed. The argocd auto-pin schedule picks ${VERSION} up instead."
+          fi
