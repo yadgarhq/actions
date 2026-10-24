@@ -25,6 +25,16 @@ newline-separated, so a scope check that only splits on `\n` would pass a mint
 scoped to `chart,argocd`; and `contents/versions/` is its own tell in a `run:`
 block, independent of `/argocd/` and `versions/<`/`versions/${`.
 
+C7 (ADR-1004, plans/auto-deploy-parent-chart.md) NARROWS this guard; it does not
+delete it. ADR-0946 / ADR-0948 R3-a put one argocd-scoped mint back: job
+`argocd-pin-nudge`, run for `yadgarhq/chart` only, which sends a
+`repository_dispatch` and writes nothing. So the checks below now allow exactly
+that shape and nothing wider: an argocd mint only in that job, scoped to
+`argocd` alone with `permission-contents: write` alone (the minimum
+`POST /repos/{owner}/{repo}/dispatches` takes), and an argocd API path only as
+`/argocd/dispatches` in that job. Every `versions` tell stays forbidden
+everywhere, the nudge job included. Mutations below widen each edge and red.
+
 Run: python3 -m pytest scripts/tests/ -q
 """
 
@@ -71,10 +81,31 @@ def run_blocks(jobs):
 # ---------------------------------------------------------------------------
 
 
+NUDGE = "argocd-pin-nudge"
+DISPATCH_CALL = 'gh api -X POST "repos/${OWNER}/argocd/dispatches" --input -'
+
+
 def no_step_mints_a_token_scoped_to_argocd(jobs):
+    """Outside the nudge job, no argocd mint at all. Inside it, exactly one,
+    scoped to `argocd` alone with `permission-contents: write` alone. And no
+    mint anywhere without `repositories:`: the App is installed on all
+    repositories, so an unscoped mint is an argocd mint too (and every other
+    repository's)."""
+    for step in mint_steps(jobs):
+        if not repositories_of(step):
+            return False
     for job_id, job in jobs.items():
+        argocd_mints = 0
         for step in job.get("steps", []):
-            if "argocd" in repositories_of(step):
+            if "argocd" not in repositories_of(step):
+                continue
+            argocd_mints += 1
+            if job_id != NUDGE or argocd_mints > 1:
+                return False
+            if repositories_of(step) != ["argocd"]:
+                return False
+            perms = {k: v for k, v in step["with"].items() if k.startswith("permission-")}
+            if perms != {"permission-contents": "write"}:
                 return False
     return True
 
@@ -84,8 +115,12 @@ def test_no_step_mints_a_token_scoped_to_argocd():
 
 
 def no_run_block_names_the_argocd_api_or_a_versions_write(jobs):
-    for _job_id, _step_name, run in run_blocks(jobs):
-        if "/argocd/" in run:
+    for job_id, _step_name, run in run_blocks(jobs):
+        # The nudge's dispatch is the one argocd API path allowed, in that job
+        # only, and only as this exact call: a bare `/argocd/dispatches` strip
+        # would pass `repos/o/argocd/dispatches/../contents/a`.
+        named = run.replace(DISPATCH_CALL, "") if job_id == NUDGE else run
+        if "/argocd/" in named:
             return False
         if "versions/<" in run or "versions/${" in run:
             return False
@@ -130,9 +165,10 @@ def nothing_asks_estate_for_a_verdict(jobs):
 
 def test_nothing_asks_estate_for_a_verdict():
     jobs = real_jobs()
-    # NOT VACUOUS: the scan must see the one mint that remains (`parent`'s,
-    # scoped to `chart`). A file that parsed into no steps would otherwise pass.
-    assert [repositories_of(s) for s in mint_steps(jobs)] == [["chart"]]
+    # NOT VACUOUS: the scan must see the two mints that remain (`parent`'s,
+    # scoped to `chart`, and the nudge's, scoped to `argocd`). A file that
+    # parsed into no steps would otherwise pass.
+    assert [repositories_of(s) for s in mint_steps(jobs)] == [["chart"], ["argocd"]]
     assert nothing_asks_estate_for_a_verdict(jobs)
 
 
@@ -226,6 +262,80 @@ def test_mutation_a_comma_scoped_mint_including_argocd_reddens_too():
     jobs["parent"]["steps"].append(new_mint)
     assert "argocd" in repositories_of(new_mint)
     assert not no_step_mints_a_token_scoped_to_argocd(jobs)
+
+
+def _nudge_mint(jobs):
+    return next(s for s in jobs[NUDGE]["steps"] if s.get("id") == "app")
+
+
+def test_mutation_the_nudge_mint_widened_to_pull_requests_reddens():
+    jobs = copy.deepcopy(real_jobs())
+    _nudge_mint(jobs)["with"]["permission-pull-requests"] = "write"
+    assert not no_step_mints_a_token_scoped_to_argocd(jobs)
+
+
+def test_mutation_the_nudge_mint_widened_to_a_second_repository_reddens():
+    jobs = copy.deepcopy(real_jobs())
+    _nudge_mint(jobs)["with"]["repositories"] = "argocd,chart"
+    assert not no_step_mints_a_token_scoped_to_argocd(jobs)
+
+
+def test_mutation_the_nudge_mint_moved_into_parent_reddens():
+    jobs = copy.deepcopy(real_jobs())
+    jobs["parent"]["steps"].append(copy.deepcopy(_nudge_mint(jobs)))
+    assert not no_step_mints_a_token_scoped_to_argocd(jobs)
+
+
+def test_mutation_the_dispatch_moved_into_parent_reddens():
+    jobs = copy.deepcopy(real_jobs())
+    jobs["parent"]["steps"].append(
+        {"name": "dispatch", "run": 'gh api -X POST "repos/${OWNER}/argocd/dispatches"\n'}
+    )
+    assert not no_run_block_names_the_argocd_api_or_a_versions_write(jobs)
+
+
+def test_the_exact_dispatch_call_is_the_one_the_nudge_ships():
+    """NOT VACUOUS: the allowed string must be the shipped one, or the strip
+    allows nothing and the check above passes only by accident."""
+    nudge = next(s for s in real_jobs()[NUDGE]["steps"] if s.get("id") == "nudge")
+    assert DISPATCH_CALL in nudge["run"]
+
+
+def test_mutation_a_dispatch_path_traversal_in_the_nudge_job_reddens():
+    for run in (
+        'gh api -X POST "repos/o/argocd/dispatches/../contents/a"\n',
+        'gh api -X PUT "repos/${OWNER}/argocd/dispatches/../contents/a"\n',
+        'gh api -X POST "repos/${OWNER}/argocd/dispatches"/../contents/a --input -\n',
+    ):
+        jobs = copy.deepcopy(real_jobs())
+        jobs[NUDGE]["steps"].append({"name": "sneaky", "run": run})
+        assert not no_run_block_names_the_argocd_api_or_a_versions_write(jobs), run
+
+
+def test_mutation_a_second_argocd_mint_in_the_nudge_job_reddens():
+    jobs = copy.deepcopy(real_jobs())
+    second = copy.deepcopy(_nudge_mint(jobs))
+    second["id"] = "app2"
+    jobs[NUDGE]["steps"].append(second)
+    assert not no_step_mints_a_token_scoped_to_argocd(jobs)
+
+
+def test_mutation_a_mint_without_repositories_reddens():
+    for job_id in ("parent", NUDGE, "examples"):
+        jobs = copy.deepcopy(real_jobs())
+        unscoped = copy.deepcopy(_nudge_mint(jobs))
+        del unscoped["with"]["repositories"]
+        unscoped["id"] = "unscoped"
+        jobs[job_id]["steps"].append(unscoped)
+        assert not no_step_mints_a_token_scoped_to_argocd(jobs), job_id
+
+
+def test_mutation_a_versions_write_in_the_nudge_job_still_reddens():
+    jobs = copy.deepcopy(real_jobs())
+    jobs[NUDGE]["steps"].append(
+        {"name": "write", "run": 'gh api -X PUT "repos/${OWNER}/argocd/contents/versions/x.yaml"\n'}
+    )
+    assert not no_run_block_names_the_argocd_api_or_a_versions_write(jobs)
 
 
 # ---------------------------------------------------------------------------
