@@ -1,0 +1,335 @@
+{
+  "check_runs": [
+    {
+      "completed_at": "2026-10-26T16:05:37Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354983139/job/121684902766",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121684902766,
+      "name": "Analyze (rust)",
+      "started_at": "2026-10-26T16:01:00Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:42Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354983139/job/121684903427",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121684903427,
+      "name": "Analyze (actions)",
+      "started_at": "2026-10-26T16:01:00Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:01Z",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354995949/job/121684941010",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121684941010,
+      "name": "ci / version",
+      "started_at": "2026-10-26T16:01:01Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:01Z",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354995949/job/121684941290",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121684941290,
+      "name": "main",
+      "started_at": "2026-10-26T16:01:01Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:02Z",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354998584/job/121684950129",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121684950129,
+      "name": "main",
+      "started_at": "2026-10-26T16:01:02Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:02Z",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354998584/job/121684950730",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121684950730,
+      "name": "ci / version",
+      "started_at": "2026-10-26T16:01:02Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:03:22Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354995949/job/121684938446",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121684938446,
+      "name": "windows",
+      "started_at": "2026-10-26T16:01:03Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:19Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354995949/job/121684938958",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121684938958,
+      "name": "stamp",
+      "started_at": "2026-10-26T16:01:03Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:08Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354995949/job/121684939161",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121684939161,
+      "name": "ci / template",
+      "started_at": "2026-10-26T16:01:03Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:12Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354995949/job/121684939495",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121684939495,
+      "name": "ci / detect",
+      "started_at": "2026-10-26T16:01:03Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:19Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354998584/job/121684947241",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121684947241,
+      "name": "stamp",
+      "started_at": "2026-10-26T16:01:04Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:12Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354998584/job/121684947831",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121684947831,
+      "name": "ci / detect",
+      "started_at": "2026-10-26T16:01:04Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:09Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354998584/job/121684947900",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121684947900,
+      "name": "ci / template",
+      "started_at": "2026-10-26T16:01:04Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:03:20Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354998584/job/121684948446",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121684948446,
+      "name": "windows",
+      "started_at": "2026-10-26T16:01:05Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:12Z",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354998584/job/121685048302",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121685048302,
+      "name": "ci / workflows",
+      "started_at": "2026-10-26T16:01:12Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:12Z",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354998584/job/121685048859",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121685048859,
+      "name": "ci / portability",
+      "started_at": "2026-10-26T16:01:12Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:12Z",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354998584/job/121685049157",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121685049157,
+      "name": "ci / test",
+      "started_at": "2026-10-26T16:01:12Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:12Z",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354998584/job/121685049168",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121685049168,
+      "name": "ci / vulnerabilities",
+      "started_at": "2026-10-26T16:01:12Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:12Z",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354995949/job/121685049275",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121685049275,
+      "name": "ci / proto",
+      "started_at": "2026-10-26T16:01:12Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:12Z",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354998584/job/121685049300",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121685049300,
+      "name": "ci / pre_pin_parent",
+      "started_at": "2026-10-26T16:01:12Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:12Z",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354998584/job/121685049350",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121685049350,
+      "name": "ci / proto",
+      "started_at": "2026-10-26T16:01:12Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:12Z",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354998584/job/121685049827",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121685049827,
+      "name": "ci / precommit",
+      "started_at": "2026-10-26T16:01:12Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:12Z",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354998584/job/121685050045",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121685050045,
+      "name": "ci / service_immutable",
+      "started_at": "2026-10-26T16:01:12Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:02:33Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354995949/job/121685046048",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121685046048,
+      "name": "ci / test",
+      "started_at": "2026-10-26T16:01:14Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:35Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354995949/job/121685046126",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121685046126,
+      "name": "ci / vulnerabilities",
+      "started_at": "2026-10-26T16:01:14Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:30Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354995949/job/121685046180",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121685046180,
+      "name": "ci / pre_pin_parent",
+      "started_at": "2026-10-26T16:01:14Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:22Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354995949/job/121685046231",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121685046231,
+      "name": "ci / workflows",
+      "started_at": "2026-10-26T16:01:14Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:02:17Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354995949/job/121685046305",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121685046305,
+      "name": "ci / precommit",
+      "started_at": "2026-10-26T16:01:14Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:27Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354995949/job/121685046486",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121685046486,
+      "name": "ci / service_immutable",
+      "started_at": "2026-10-26T16:01:14Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:27Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354995949/job/121685046725",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121685046725,
+      "name": "ci / portability",
+      "started_at": "2026-10-26T16:01:14Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:25Z",
+      "conclusion": "failure",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354998584/job/121685047731",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121685047731,
+      "name": "ci / passed",
+      "started_at": "2026-10-26T16:01:14Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:01:34Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/yadgarhq/yadgar/runs/121685226702",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121685226702,
+      "name": "CodeQL",
+      "started_at": "2026-10-26T16:01:31Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-26T16:02:47Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/yadgarhq/yadgar/actions/runs/40354995949/job/121685826708",
+      "head_sha": "c28c9e37161e067f86d99c0470fef8932007696f",
+      "id": 121685826708,
+      "name": "ci / passed",
+      "started_at": "2026-10-26T16:02:35Z",
+      "status": "completed"
+    }
+  ],
+  "total_count": 33
+}

@@ -631,17 +631,27 @@ def one(client, owner, meta, cls, tag, classes, live, row):
     wrote = False
     head = client.branch_sha(owner, name, branch)
     on_branch = client.read_file(owner, name, CONFIG, head) if head else None
+    rewrite = on_branch is None or on_branch[0] != new
+    if rewrite and head is not None:
+        foreign = [c for c in client.branch_commits(owner, name, base_sha, head)
+                   if c["author"] != BOT or not GENERATED.match(c["message"])]
+        if foreign:
+            raise Refusal(
+                f"`{branch}` carries {len(foreign)} commit(s) not made by the fan-out; "
+                "refusing to reset them away. Merge or move that work, then re-run."
+            )
+    # EDIT BEFORE PUSH (yaadgaar 440, ADR-1032). An `edited` event's payload
+    # carries the head at edit time, so editing first puts the text-only run on
+    # the OLD head, which already carries a verdict, and the new head gets only
+    # the full `synchronize` run. Edited after the push, both runs started on
+    # the new head and the text-only one refused before the full one finished.
+    if open_pr is not None and (open_pr["title"], open_pr["body"]) != (title, text_body):
+        client.update_pr(owner, name, open_pr["number"], title, text_body)
+        wrote = True
     if head is None:
         client.create_ref(owner, name, branch, base_sha)
-    if on_branch is None or on_branch[0] != new:
+    if rewrite:
         if head is not None:
-            foreign = [c for c in client.branch_commits(owner, name, base_sha, head)
-                       if c["author"] != BOT or not GENERATED.match(c["message"])]
-            if foreign:
-                raise Refusal(
-                    f"`{branch}` carries {len(foreign)} commit(s) not made by the fan-out; "
-                    "refusing to reset them away. Merge or move that work, then re-run."
-                )
             client.reset_ref(owner, name, branch, base_sha)
         client.put_file(owner, name, CONFIG, branch, new, blob, title)
         wrote = True
@@ -649,9 +659,6 @@ def one(client, owner, meta, cls, tag, classes, live, row):
         row.update(status="opened",
                    url=client.create_pr(owner, name, base, branch, title, text_body))
         return
-    if (open_pr["title"], open_pr["body"]) != (title, text_body):
-        client.update_pr(owner, name, open_pr["number"], title, text_body)
-        wrote = True
     row.update(status="updated" if wrote else "unchanged", url=open_pr["url"])
 
 

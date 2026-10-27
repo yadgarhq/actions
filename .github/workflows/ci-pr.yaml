@@ -2349,6 +2349,12 @@ jobs:
         pre_pin_parent,
       ]
     runs-on: ubuntu-latest
+    # ADR-1032: a text-only edit may wait here, bounded by
+    # `ci_verdict.DEFAULT_WAIT_SECONDS` (600 s), for a full run on the same
+    # commit. The wait holds a runner slot, so the job carries its own ceiling:
+    # the bound plus five minutes for checkout, setup and the gate itself.
+    # `test_ci_verdict.py` pins that this stays above the bound.
+    timeout-minutes: 15
     steps:
       # THE CHECKOUTS ARE THE `portability` AND `template` JOBS', deliberately
       # unchanged from them. `ci-pr.yaml` is a reusable workflow, so nothing from

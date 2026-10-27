@@ -790,6 +790,7 @@ def check_run(run_id, conclusion="success", status="completed", at="2026-09-06T0
         "status": status,
         "conclusion": conclusion,
         "completed_at": at if status == "completed" else None,
+        "head_sha": SHA,
         "details_url": (
             f"https://github.com/yadgarhq/actions/actions/runs/{run_id}"
             f"/job/10141{run_id[-4:]}"
@@ -838,7 +839,21 @@ def edited_needs(text_edit="true", **override):
     return ctx
 
 
-def gate(ctx, response, run_id=OWN_RUN, repo="yadgarhq/actions", sha=SHA, token="t"):
+def no_sleep(seconds):  # pragma: no cover - the point is that it is never called
+    raise AssertionError(f"the gate waited {seconds}s on a run with nothing to wait for")
+
+
+def gate(
+    ctx,
+    response,
+    run_id=OWN_RUN,
+    repo="yadgarhq/actions",
+    sha=SHA,
+    token="t",
+    budget=0,
+    sleep=no_sleep,
+    clock=lambda: 0.0,
+):
     """The real workflow's real conditions, with the check-runs endpoint stubbed.
 
     IN-PROCESS RATHER THAN THROUGH THE SUBPROCESS, and deliberately: there is no
@@ -851,8 +866,9 @@ def gate(ctx, response, run_id=OWN_RUN, repo="yadgarhq/actions", sha=SHA, token=
 
     def fetch(url):
         urls.append(url)
-        return response
+        return response(url) if callable(response) else response
 
+    conditions = ci_verdict.load_conditions(CI_PR, "passed")
     ci_verdict.register_deferred_reference(
         ci_verdict.TEXT_EDIT_REF,
         ci_verdict.make_text_edit_resolver(
@@ -863,11 +879,14 @@ def gate(ctx, response, run_id=OWN_RUN, repo="yadgarhq/actions", sha=SHA, token=
             check_name="ci / passed",
             token=token,
             fetch=fetch,
+            sentinels=ci_verdict.text_edit_sentinels(conditions, "ci / passed"),
+            budget=budget,
+            sleep=sleep,
+            clock=clock,
         ),
     )
     try:
         resolve = ci_verdict.make_resolver("pull_request", "User", repo, ctx)
-        conditions = ci_verdict.load_conditions(CI_PR, "passed")
         ok, rows = ci_verdict.verdict(conditions, ctx, resolve)
         return ok, rows, urls
     finally:
@@ -1316,12 +1335,15 @@ def test_the_newest_FINISHED_verdict_decides_rather_than_the_newest_entry():
     assert latest["conclusion"] == "success"
 
 
-def test_a_text_only_edit_racing_an_unfinished_run_refuses():
+def test_a_text_only_edit_racing_an_unfinished_run_refuses_with_no_wait_budget():
     """The same case through the resolver, with the MESSAGE asserted.
 
     A bare `pytest.raises` would pass either way here: with the state test gone
     the resolver reads a `None` conclusion, finds it is not `success` and
     refuses with different words. The words are what tells the two apart.
+
+    `gate()` gives no wait budget by default. With one, this same response is
+    waited on until the bound and then refused — yaadgaar 440's tests below.
     """
     ctx = edited_needs()
     with pytest.raises(ci_verdict.Refused) as exc:
@@ -1385,3 +1407,507 @@ def test_the_workflow_grants_the_permission_the_read_needs():
     permissions = yaml.safe_load(CI_PR.read_text(encoding="utf-8"))["permissions"]
     assert permissions.get("checks") == "read"
     assert permissions.get("contents") == "read"
+
+
+# ---------------------------------------------------------------------------
+# Yaadgaar 440: a text-only edit racing the full run on the SAME commit
+# ---------------------------------------------------------------------------
+#
+# WHAT HAPPENED, transcribed rather than described. `fan_out.py` moves an open
+# bot pull request with a file write (`synchronize`) and then a body update
+# (`edited`) seconds apart, so two `pull_request` runs start on one head sha.
+# On yadgarhq/yadgar#94 (head `c28c9e3`, 2026-10-26) the full run 40354995949
+# and the text-only run 40354998584 started one second apart. The text-only
+# run's `ci / passed` ran 16:01:14-16:01:25. The full run's `ci / passed` was
+# not CREATED until 16:02:35, because `passed` starts only after every job it
+# needs has finished. So at the moment the gate looked, no `ci / passed` of any
+# other run existed on the commit, the gate refused ("Absence is not success"),
+# and that red check run kept the commit rollup at FAILURE after the full run
+# went green. The fixture is the live endpoint's response for that commit,
+# trimmed to the fields this gate reads.
+
+Y94 = json.loads(
+    (ROOT / "scripts" / "tests" / "fixtures" / "ci_verdict" / "yadgar-94-c28c9e3.json").read_text(
+        encoding="utf-8"
+    )
+)
+Y94_SHA = "c28c9e37161e067f86d99c0470fef8932007696f"
+Y94_FULL = "40354995949"
+Y94_EDIT = "40354998584"
+
+
+def epoch(stamp):
+    import datetime
+
+    return datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+
+
+# The text-only run's gate step, inside the 16:01:14-16:01:25 window of its job.
+Y94_GATE_AT = epoch("2026-10-26T16:01:20Z")
+
+
+def check_name_of(url):
+    import urllib.parse
+
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+    return (query.get("check_name") or [None])[0]
+
+
+def y94_at(t, url):
+    """The endpoint's answer for `url` as it stood at time `t`, replayed.
+
+    A check run not yet started is absent. One started and not yet finished is
+    `in_progress` with no conclusion. The text-only run's OWN `ci / passed` stays
+    in progress throughout, because the run under test is still running while
+    it waits; the 16:01:25 failure in the fixture is the shipped gate's outcome.
+    """
+    name = check_name_of(url)
+    runs = []
+    for r in Y94["check_runs"]:
+        if epoch(r["started_at"]) > t:
+            continue
+        r = dict(r)
+        own = f"/runs/{Y94_EDIT}/" in r["details_url"] and r["name"] == "ci / passed"
+        if own or epoch(r["completed_at"]) > t:
+            r.update(status="in_progress", conclusion=None, completed_at=None)
+        if name is None or r["name"] == name:
+            runs.append(r)
+    return {"total_count": len(runs), "check_runs": runs}
+
+
+class Clock:
+    """A clock that moves only when the gate sleeps, so no test waits for real.
+
+    CAPPED, so a regression that resets the deadline each poll fails here in
+    milliseconds rather than hanging the suite: no test needs more than 100
+    sleeps (1800 s at 30 s is 60).
+    """
+
+    MAX_SLEEPS = 100
+
+    def __init__(self, start=0.0):
+        self.now = start
+        self.sleeps = []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        if len(self.sleeps) > self.MAX_SLEEPS:
+            raise AssertionError(f"the gate slept {len(self.sleeps)} times; its bound is not holding")
+        self.now += seconds
+
+
+def job_run(run_id, job, status="completed", conclusion="success", sha=SHA):
+    """A check run of another job, `ci / <job>`, in run `run_id`."""
+    r = check_run(run_id, conclusion, status=status)
+    r["name"] = f"ci / {job}"
+    r["head_sha"] = sha
+    return r
+
+
+def full_run_in_progress(run_id, sha=SHA):
+    """A full run whose gated jobs are still working: its `ci / passed` does not exist yet."""
+    return [job_run(run_id, "detect", sha=sha)] + [
+        job_run(run_id, job, status="in_progress", conclusion=None, sha=sha)
+        for job in SHORT_CIRCUITED
+    ]
+
+
+def text_only_run(run_id, sha=SHA):
+    """A text-only sibling: every short-circuited job skipped, its `passed` waiting."""
+    runs = [job_run(run_id, "detect", sha=sha)]
+    runs += [job_run(run_id, job, conclusion="skipped", sha=sha) for job in SHORT_CIRCUITED]
+    passed = check_run(run_id, None, status="in_progress")
+    passed["head_sha"] = sha
+    return runs + [passed]
+
+
+def by_name(runs):
+    """A stubbed endpoint over `runs()` that honours `check_name` the way GitHub does."""
+
+    def respond(url):
+        name = check_name_of(url)
+        picked = [r for r in runs() if name is None or r["name"] == name]
+        return payload(*picked)
+
+    return respond
+
+
+def test_yadgar_94_reproduces_the_shipped_refusal():
+    """THE DEFECT, from the real response: no `ci / passed` but this run's own.
+
+    Characterization rather than RED: `standing_verdict` is unchanged by this
+    fix, so this passes before and after. It pins that the race is real in the
+    data and that the shipped rule, applied once at 16:01:20, refuses it — and
+    that the SAME rule over the response as it stood at 16:02:50 accepts the
+    full run's green. That second half is the documented workaround (re-run the
+    red run), which is why waiting adds no new acceptance.
+    """
+    url = ci_verdict.check_runs_url("yadgarhq/yadgar", Y94_SHA, "ci / passed")
+    with pytest.raises(ci_verdict.Refused) as exc:
+        ci_verdict.standing_verdict(y94_at(Y94_GATE_AT, url), Y94_EDIT, "ci / passed")
+    assert "Absence is not success" in str(exc.value)
+    later = ci_verdict.standing_verdict(
+        y94_at(epoch("2026-10-26T16:02:50Z"), url), Y94_EDIT, "ci / passed"
+    )
+    assert later["conclusion"] == "success"
+    assert f"/runs/{Y94_FULL}/" in later["details_url"]
+
+
+def test_yadgar_94_waits_for_the_full_run_and_carries_its_verdict():
+    """THE FIX, on the real timeline: wait for the sibling, then carry what it found."""
+    clock = Clock(Y94_GATE_AT)
+    ok, rows, urls = gate(
+        edited_needs(),
+        lambda url: y94_at(clock.now, url),
+        run_id=Y94_EDIT,
+        repo="yadgarhq/yadgar",
+        sha=Y94_SHA,
+        budget=1800,
+        sleep=clock.sleep,
+        clock=clock,
+    )
+    assert ok, [r for r in rows if not r[4]]
+    assert clock.sleeps, "the gate must have waited: the full run had no verdict yet"
+    assert clock.now >= epoch("2026-10-26T16:02:47Z")
+    assert all(f"/commits/{Y94_SHA}/check-runs" in u for u in urls)
+
+
+def test_absence_with_no_sibling_refuses_without_waiting():
+    """Fail-closed stays immediate: nothing on the commit but this run's own entry."""
+    clock = Clock()
+    with pytest.raises(ci_verdict.Refused) as exc:
+        gate(
+            edited_needs(),
+            by_name(lambda: [check_run(OWN_RUN, None, status="in_progress")]),
+            budget=1800,
+            sleep=clock.sleep,
+            clock=clock,
+        )
+    assert "Absence is not success" in str(exc.value)
+    assert clock.sleeps == []
+
+
+def test_this_runs_own_jobs_are_not_a_sibling_to_wait_for():
+    """This run's own entries are excluded by identity here too."""
+    clock = Clock()
+    own = [job_run(OWN_RUN, j, status="in_progress", conclusion=None) for j in SHORT_CIRCUITED]
+    with pytest.raises(ci_verdict.Refused) as exc:
+        gate(
+            edited_needs(),
+            by_name(lambda: own + [check_run(OWN_RUN, None, status="in_progress")]),
+            budget=1800,
+            sleep=clock.sleep,
+            clock=clock,
+        )
+    assert "Absence is not success" in str(exc.value)
+    assert clock.sleeps == []
+
+
+def test_a_text_only_sibling_is_not_waited_for():
+    """Two racing edits with no full run must not wait on each other.
+
+    The sibling skipped every short-circuited job, so it checked nothing and has
+    no verdict of its own to bring. Waiting on it would make two quick body
+    edits hold each other until the bound.
+    """
+    clock = Clock()
+    with pytest.raises(ci_verdict.Refused) as exc:
+        gate(
+            edited_needs(),
+            by_name(
+                lambda: text_only_run("34009222222")
+                + [check_run(OWN_RUN, None, status="in_progress")]
+            ),
+            budget=1800,
+            sleep=clock.sleep,
+            clock=clock,
+        )
+    assert "Absence is not success" in str(exc.value)
+    assert clock.sleeps == []
+
+
+def test_a_full_sibling_that_never_finishes_refuses_at_the_bound():
+    """The wait is bounded, and the bound ends in a refusal, never a pass."""
+    clock = Clock()
+    with pytest.raises(ci_verdict.Refused) as exc:
+        gate(
+            edited_needs(),
+            by_name(lambda: full_run_in_progress("34009333333")),
+            budget=290,
+            sleep=clock.sleep,
+            clock=clock,
+        )
+    assert "Absence is not success" in str(exc.value)
+    assert "34009333333" in str(exc.value)
+    # 290 is not a multiple of the poll interval, so the last sleep must be cut short.
+    assert clock.sleeps and sum(clock.sleeps) == 290
+    assert clock.now == 290
+
+
+def test_a_full_sibling_that_finishes_red_is_refused():
+    """Waiting carries the sibling's verdict, whatever it is. Red stays red."""
+    clock = Clock()
+
+    def runs():
+        if clock.now < 60:
+            return full_run_in_progress("34009444444")
+        return [check_run("34009444444", "failure")]
+
+    with pytest.raises(ci_verdict.Refused) as exc:
+        gate(edited_needs(), by_name(runs), budget=1800, sleep=clock.sleep, clock=clock)
+    assert "'failure'" in str(exc.value)
+    assert clock.sleeps
+
+
+def test_a_sibling_still_in_detect_is_waited_for():
+    """A sibling whose short-circuited jobs have no check runs yet may be a full run.
+
+    Until `detect` finishes, the two kinds of run look alike. Treated as pending,
+    which costs seconds for a text-only sibling and is what closes the gap for a
+    full one.
+    """
+    clock = Clock()
+
+    def runs():
+        if clock.now < 30:
+            return [job_run("34009555555", "detect", status="in_progress", conclusion=None)]
+        if clock.now < 90:
+            return full_run_in_progress("34009555555")
+        return [check_run("34009555555", "success")]
+
+    ok, rows, _ = gate(edited_needs(), by_name(runs), budget=1800, sleep=clock.sleep, clock=clock)
+    assert ok, [r for r in rows if not r[4]]
+    assert clock.sleeps
+
+
+def test_a_run_on_another_commit_is_not_waited_for():
+    """A sibling whose `head_sha` is not this commit is no sibling."""
+    clock = Clock()
+    with pytest.raises(ci_verdict.Refused) as exc:
+        gate(
+            edited_needs(),
+            by_name(lambda: full_run_in_progress("34009666666", sha="0" * 40)),
+            budget=1800,
+            sleep=clock.sleep,
+            clock=clock,
+        )
+    assert "Absence is not success" in str(exc.value)
+    assert clock.sleeps == []
+
+
+def test_a_verdict_from_another_commit_is_never_carried():
+    """A green `ci / passed` whose `head_sha` is not this commit carries nothing."""
+    foreign = check_run("34007298356", "success")
+    foreign["head_sha"] = "0" * 40
+    with pytest.raises(ci_verdict.Refused) as exc:
+        gate(edited_needs(), payload(foreign))
+    assert "another commit" in str(exc.value)
+
+
+def test_a_check_run_of_another_workflow_is_not_waited_for():
+    """CodeQL and the caller's own jobs share the commit and are no `ci` verdict."""
+    clock = Clock()
+    other = job_run("34009777777", "x", status="in_progress", conclusion=None)
+    other["name"] = "Analyze (rust)"
+    with pytest.raises(ci_verdict.Refused):
+        gate(edited_needs(), by_name(lambda: [other]), budget=1800, sleep=clock.sleep, clock=clock)
+    assert clock.sleeps == []
+
+
+def test_only_absence_waits():
+    """A truncated response refuses at once; only absence earns a wait."""
+    clock = Clock()
+    with pytest.raises(ci_verdict.Refused) as exc:
+        gate(
+            edited_needs(),
+            payload(*full_run_in_progress("34009888888"), total=500),
+            budget=1800,
+            sleep=clock.sleep,
+            clock=clock,
+        )
+    assert "may not be among them" in str(exc.value)
+    assert clock.sleeps == []
+
+
+def test_the_sibling_listing_is_paged_and_bounded():
+    """The unfiltered listing pages to `total_count`, and refuses past its bound."""
+    seen = []
+
+    def fetch(url):
+        seen.append(url)
+        return {"total_count": 150, "check_runs": [{}] * (100 if url.endswith("page=1") else 50)}
+
+    runs = ci_verdict.fetch_all_check_runs(fetch, "yadgarhq/actions", SHA)
+    assert len(runs) == 150
+    assert len(seen) == 2
+    assert all(f"/commits/{SHA}/check-runs" in u and "check_name" not in u for u in seen)
+
+    def short(url):
+        seen.append(url)
+        return {"total_count": 150, "check_runs": [{}] * (100 if url.endswith("page=1") else 0)}
+
+    # An empty page ends the listing even when `total_count` says more exist.
+    seen.clear()
+    assert len(ci_verdict.fetch_all_check_runs(short, "yadgarhq/actions", SHA)) == 100
+    assert len(seen) == 2
+
+    def endless(url):
+        return {"total_count": 10**6, "check_runs": [{}] * 100}
+
+    with pytest.raises(ci_verdict.Refused):
+        ci_verdict.fetch_all_check_runs(endless, "yadgarhq/actions", SHA)
+
+
+def test_the_sentinels_are_read_off_the_workflow():
+    """The jobs that tell a full sibling from a text-only one are the conjunct's jobs."""
+    conditions = ci_verdict.load_conditions(CI_PR, "passed")
+    assert sorted(ci_verdict.text_edit_sentinels(conditions, "ci / passed")) == sorted(
+        f"ci / {j}" for j in SHORT_CIRCUITED
+    )
+
+
+def test_a_sentinel_is_a_job_carrying_the_conjunct_and_no_other():
+    """A condition that reads another `needs.` output does not make a sentinel."""
+    conditions = [
+        ("detect", "github.event_name != 'push'"),
+        ("proto", "needs.detect.outputs.proto == 'true'"),
+        ("precommit", f"github.event_name != 'push' && {ci_verdict.TEXT_EDIT_REF} != 'true'"),
+        ("template", None),
+    ]
+    assert ci_verdict.text_edit_sentinels(conditions, "ci / passed") == ("ci / precommit",)
+    assert ci_verdict.text_edit_sentinels(conditions, "passed") == ()
+
+
+def test_no_sentinel_job_renames_its_check_run():
+    """A sentinel's check run is `ci / <job id>` only while the job has no `name:`.
+
+    With a `name:` the check run would carry that name instead, the sentinel
+    would never match, every text-only sibling would read as undetermined, and
+    two racing edits would wait on each other until the bound.
+    """
+    import yaml
+
+    jobs = yaml.safe_load(CI_PR.read_text(encoding="utf-8"))["jobs"]
+    assert [j for j in SHORT_CIRCUITED if "name" in jobs[j]] == []
+
+
+def test_a_sentinel_not_completed_does_not_read_as_skipped():
+    """`skipped` counts only on a COMPLETED check run.
+
+    GitHub sets no conclusion before completion, so this entry is malformed on
+    purpose: the guard must not rest on that convention alone.
+    """
+    clock = Clock()
+
+    def runs():
+        if clock.now < 30:
+            return [job_run("34009131313", "detect")] + [
+                job_run("34009131313", job, status="queued", conclusion="skipped")
+                for job in SHORT_CIRCUITED
+            ]
+        return [check_run("34009131313", "success")]
+
+    ok, rows, _ = gate(edited_needs(), by_name(runs), budget=600, sleep=clock.sleep, clock=clock)
+    assert ok, [r for r in rows if not r[4]]
+    assert clock.sleeps == [30]
+
+
+def test_the_passed_job_outlives_the_wait_bound():
+    """ADR-1032: `passed` carries a `timeout-minutes` above the default bound.
+
+    The wait holds a runner slot, so the job needs its own ceiling, and a
+    ceiling below the bound would cancel a wait that was still allowed.
+    """
+    import yaml
+
+    job = yaml.safe_load(CI_PR.read_text(encoding="utf-8"))["jobs"]["passed"]
+    minutes = job.get("timeout-minutes")
+    assert isinstance(minutes, int)
+    assert minutes * 60 > ci_verdict.DEFAULT_WAIT_SECONDS
+    assert minutes <= 30
+
+
+def test_a_full_sibling_between_its_last_job_and_its_passed_is_waited_for():
+    """Every gated job finished, `ci / passed` not yet created: still a full run.
+
+    On #94 that gap was two seconds (`test` done 16:02:33, `passed` created
+    16:02:35). Its sentinels concluded `success`, not `skipped`, which is what
+    tells it from a text-only run.
+    """
+    clock = Clock()
+
+    def runs():
+        if clock.now < 30:
+            return [job_run("34009121212", "detect")] + [
+                job_run("34009121212", job) for job in SHORT_CIRCUITED
+            ]
+        return [check_run("34009121212", "success")]
+
+    ok, rows, _ = gate(edited_needs(), by_name(runs), budget=1800, sleep=clock.sleep, clock=clock)
+    assert ok, [r for r in rows if not r[4]]
+    assert clock.sleeps == [30]
+
+
+def test_no_sentinels_refuses_without_waiting():
+    """A gate that cannot tell a full run from a text-only one does not wait."""
+    clock = Clock()
+    resolve = ci_verdict.make_text_edit_resolver(
+        needs=edited_needs(),
+        repo="yadgarhq/actions",
+        sha=SHA,
+        run_id=OWN_RUN,
+        check_name="ci / passed",
+        token="t",
+        fetch=by_name(lambda: full_run_in_progress("34009999999")),
+        sentinels=(),
+        budget=1800,
+        sleep=clock.sleep,
+        clock=clock,
+    )
+    with pytest.raises(ci_verdict.Refused):
+        resolve("x")
+    assert clock.sleeps == []
+
+
+@pytest.mark.parametrize("value", ["-1", "ten", "1.5"])
+def test_an_unreadable_wait_bound_refuses(value, monkeypatch):
+    monkeypatch.setenv("CARRY_FORWARD_WAIT_SECONDS", value)
+    with pytest.raises(ci_verdict.Refused):
+        ci_verdict.wait_budget()
+
+
+def test_main_arms_the_wait_with_the_workflows_sentinels(monkeypatch):
+    """`main()` passes the bound and the sentinels; the resolver's defaults wait for nothing."""
+    seen = {}
+    real = ci_verdict.make_text_edit_resolver
+
+    def spy(**kw):
+        seen.update(kw)
+        return real(**kw)
+
+    monkeypatch.setattr(ci_verdict, "make_text_edit_resolver", spy)
+    monkeypatch.delenv("CARRY_FORWARD_WAIT_SECONDS", raising=False)
+    ctx = edited_needs(text_edit="false")
+    for job in SHORT_CIRCUITED:
+        ctx[job]["result"] = "success"
+    ctx["test"]["result"] = "skipped"
+    ctx["proto"]["result"] = "skipped"
+    monkeypatch.setenv("NEEDS", json.dumps(ctx))
+    monkeypatch.setenv("EVENT", "pull_request")
+    monkeypatch.setenv("WORKFLOW", str(CI_PR))
+    try:
+        assert ci_verdict.main() == 0
+    finally:
+        ci_verdict._DEFERRED.clear()
+    assert seen["budget"] == ci_verdict.DEFAULT_WAIT_SECONDS
+    assert sorted(seen["sentinels"]) == sorted(f"ci / {j}" for j in SHORT_CIRCUITED)
+
+
+def test_the_wait_bound_defaults_to_the_measured_ceiling(monkeypatch):
+    monkeypatch.delenv("CARRY_FORWARD_WAIT_SECONDS", raising=False)
+    assert ci_verdict.wait_budget() == ci_verdict.DEFAULT_WAIT_SECONDS == 600
+    monkeypatch.setenv("CARRY_FORWARD_WAIT_SECONDS", "0")
+    assert ci_verdict.wait_budget() == 0
