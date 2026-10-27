@@ -465,8 +465,9 @@ def headings(text):
 def body(template, repository, cls, current, tag, changes, deployable):
     """The adoption pull request body, from the CONSUMER's own template.
 
-    NOTHING OUTSIDE `## Changelog` MAY LOOK LIKE A CONVENTIONAL COMMITS BULLET
-    (see `repin.body`): the lists below open with a backticked phrase.
+    NO LINE MAY LOOK LIKE A CONVENTIONAL COMMITS BULLET, `## Changelog`
+    included (yaadgaar 442): a merged adoption cuts no release. The lists below
+    open with a backticked phrase.
     """
     if len((template or "").encode()) > MAX_TEMPLATE_BYTES:
         raise Refusal(f"{TEMPLATE} is over {MAX_TEMPLATE_BYTES} bytes")
@@ -504,19 +505,24 @@ def body(template, repository, cls, current, tag, changes, deployable):
         ]
     what += ["", f"No other block of `{CONFIG}` changed."]
     risk = [
-        "Merging cuts a patch release of this repository. The `version` job "
-        "derives one from the Changelog bullet above, as it does for any bullet.",
+        "Merging cuts no release of this repository. The hook block is developer "
+        "tooling and is not part of what the repository ships, so the change "
+        "waits for the next release a person cuts.",
     ]
     if deployable:
         risk += [
             "",
-            f"This repository carries `{DEPLOYABLE}`, so that release enters the "
-            "parent chart's pin chain like any other release.",
+            f"This repository carries `{DEPLOYABLE}`, and with no release nothing "
+            "enters the parent chart's pin chain.",
         ]
     risk += [
         "",
         "A newer hook can red a check that passed at the old rev. That is the gate "
-        "working: fix the cause, and never widen the gate to make it pass.",
+        "working: fix the cause in its own pull request, and never widen the gate "
+        "to make it pass.",
+        "",
+        "A commit a person adds to this branch lands with no release, because the "
+        "squash keeps the bot as author. Put such a fix in its own pull request.",
         "",
         (f"Reversible: restore `rev: {current}`. A published tag never moves, so the "
          if moved else "Reversible: revert this pull request. A published tag never moves, so the ")
@@ -540,7 +546,22 @@ def body(template, repository, cls, current, tag, changes, deployable):
             "ADR-0531). ADR-0983: the run's report says which consumers carry "
             f"`{tag}`.",
         ],
-        "Changelog": [f"- {title_for(current, tag, changes)}"],
+        # NO BULLET, AND THAT IS THE RELEASE DECISION (yaadgaar 442, ruled
+        # 2026-10-27). Any bullet is at least a patch to `pr_body.bump_for`, and
+        # in the v1.37.0 fan-out 17 of 21 merges cut a tag that way, and the
+        # ten tags in deployable repositories pushed ten pin commits onto
+        # chart's `main`. With no
+        # bullet, a bot-authored range that touches nothing in
+        # `next_version.SHIPS` derives no version, green. The body therefore
+        # fails the HUMAN template on purpose, and is accepted only through the
+        # bot exemption that `ci / template` and the merge-time gate already
+        # apply. `commit_entries` reads every line of the message, so no line
+        # anywhere in this body may look like a bullet either.
+        "Changelog": [
+            "No release: a hook adoption changes developer tooling only, so this "
+            "body carries no Conventional Commits entry and the `version` job "
+            "cuts no tag for it.",
+        ],
         "Verification": [
             "`ci / passed` on this pull request runs this repository's pre-commit "
             "at the new rev; that run IS the verification. Nothing was run before "

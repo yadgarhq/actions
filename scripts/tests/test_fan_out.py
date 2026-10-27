@@ -13,8 +13,10 @@ fan-out runs against `Fake`, an in-memory client that records every write and
 can be told to raise on one. That is how "a dry run makes zero writes" is
 proved rather than promised.
 
-THE BODY IS CHECKED BY RUNNING `pr_body.review`, in both of its modes, as
-`test_repin.py` does, never by restating its rules.
+THE BODY IS CHECKED BY RUNNING `pr_body.review`, in both of its modes, and
+`next_version.derive`, never by restating their rules. Since yaadgaar 442 the
+body carries no Changelog bullet, so `review` refuses it as a human's and the
+bot exemption is what accepts it.
 
 Run: python3 -m pytest scripts/tests/ -q
 """
@@ -33,6 +35,7 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts"))
 
 import fan_out  # noqa: E402
+import next_version  # noqa: E402
 import pr_body  # noqa: E402
 
 GATE = REPO / "scripts" / "fan_out.py"
@@ -771,14 +774,154 @@ def test_the_body_fills_every_heading_of_the_consumers_template_in_its_order():
         "## What", "## Why", "## Changelog", "## Verification", "## Risk"]
 
 
-def test_the_body_passes_the_template_gate_in_both_modes():
+# --------------------------------------------------------------------------
+# a merged adoption cuts no release (yaadgaar 442)
+# --------------------------------------------------------------------------
+#
+# THE RULING (2026-10-27, "No release + sweeper"): merging a hook bump cuts no
+# tag. In the v1.37.0 fan-out 17 of 21 merges cut one, and the ten tags in
+# deployable repositories pushed ten bot pin commits onto chart's `main`,
+# leaving every open chart pull request BEHIND. The tag came from the `- chore(deps):`
+# bullet the body carried, which `bump_for` reads as a patch like any bullet.
+#
+# NO NEW CLASSIFICATION. `next_version.derive` already answers "no release" for
+# a range that carries no Changelog bullet, is bot-authored throughout and
+# touches nothing in `next_version.SHIPS`. An adoption writes only
+# `.pre-commit-config.yaml`, so the body carrying no bullet is the whole change.
+#
+# THE PRICE, stated: no Changelog both passes the human template and releases
+# nothing, because every bullet is at least a patch. So this body relies on the
+# bot exemption at both readers — `ci / template` skips a `Bot` pull request,
+# and the merge-time gate exempts a `[bot]` commit author. All 21 v1.37.0
+# merges were authored `yadgarhq-bot[bot]` and all 20 with a `template` check
+# reported it `skipped`. `review` itself is unchanged.
+
+FAN_OUT_BOT = "yadgarhq-bot[bot] <324366854+yadgarhq-bot[bot]@users.noreply.github.com>"
+HUMAN = "Max Agahi <64974579+m-agahi@users.noreply.github.com>"
+ADOPTED = [fan_out.CONFIG]
+
+
+def squash(body, title="chore(deps): bump yadgarhq/actions hooks from v1.34.0 to v1.35.0"):
+    """The commit message GitHub writes: the title plus ` (#N)`, the body wrapped."""
+    return f"{title} (#180)\n\n{wrap(body)}\n"
+
+
+def human_body(changelog):
+    return (
+        f"## What\n\na thing\n\n## Why\n\na reason\n\n## Changelog\n\n{changelog}\n\n"
+        "## Verification\n\nran it\n\n## Risk\n\nnone\n"
+    )
+
+
+@pytest.mark.parametrize("repo,deployable", [("iam-db", True), ("docs", False)])
+def test_a_merged_adoption_cuts_no_release(repo, deployable):
+    body = generated_body(repo, deployable=deployable)
+    for message in (squash(body), f"title (#180)\n\n{body}"):
+        verdict = next_version.derive("v1.4.0", ["v1.4.0"], [message], [FAN_OUT_BOT], ADOPTED)
+        assert (verdict.rc, verdict.nxt) == (0, ""), verdict.lines
+
+
+@pytest.mark.parametrize("repo", ["iam-db", "docs"])
+def test_no_line_of_the_body_reads_as_a_changelog_bullet(repo):
+    # `commit_entries` is not scoped to `## Changelog`: it reads every line of
+    # the message, so a bullet-shaped line anywhere would still release.
+    body = generated_body(repo)
+    for text in (body, wrap(body)):
+        assert not [l for l in text.splitlines() if pr_body.BULLET.match(l)]
+        assert pr_body.commit_entries(text.splitlines()) == ([], [], [])
+
+
+def test_the_body_still_answers_every_heading():
+    found = pr_body.sections(generated_body())
+    for heading in pr_body.REQUIRED:
+        assert any(line.strip() for line in found[heading]), heading
+
+
+def test_the_body_says_it_cuts_no_release():
     body = generated_body()
-    problems, bump, count = pr_body.review(body, wrapped=False)
-    assert problems == []
-    assert (bump, count) == ("patch", 1)
-    problems, wbump, wcount = pr_body.review(wrap(body), wrapped=True)
-    assert problems == []
-    assert (wbump, wcount) == (bump, count)
+    assert "cuts a patch release" not in body
+    assert "no release" in " ".join(pr_body.sections(body)["Changelog"]).lower()
+    risk = " ".join(pr_body.sections(body)["Risk"])
+    assert "Merging cuts no release of this repository." in risk
+    assert "pin chain like any other release" not in risk
+
+
+def test_a_deployable_body_says_nothing_enters_the_pin_chain():
+    risk = " ".join(pr_body.sections(generated_body("iam-db"))["Risk"])
+    assert ("This repository carries `yadgar-deployable`, and with no release "
+            "nothing enters the parent chart's pin chain.") in risk
+
+
+def test_the_body_says_a_commit_added_to_the_branch_lands_unreleased():
+    risk = " ".join(pr_body.sections(generated_body())["Risk"])
+    assert ("A commit a person adds to this branch lands with no release, because "
+            "the squash keeps the bot as author. Put such a fix in its own pull "
+            "request.") in risk
+    assert "fix the cause in its own pull request" in risk
+
+
+def test_the_merge_time_gate_exempts_the_bot_author(monkeypatch, capsys):
+    monkeypatch.setenv("BODY", squash(generated_body()))
+    monkeypatch.setenv("WRAPPED", "true")
+    monkeypatch.setenv("AUTHOR", FAN_OUT_BOT)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    assert pr_body.main() == 0
+    assert "bot-authored" in capsys.readouterr().out
+
+
+def test_the_human_template_still_refuses_a_body_with_no_bullet():
+    # The exemption is the only reason the body above is accepted. Read as a
+    # human's, it is refused in both modes, which is the template unchanged.
+    body = generated_body()
+    problems, _, _ = pr_body.review(body, wrapped=False)
+    assert problems and "Conventional Commits bullet" in problems[0]
+    problems, _, _ = pr_body.review(wrap(body), wrapped=True)
+    assert problems
+
+
+@pytest.mark.parametrize("changelog,expected", [
+    ("- fix: a metadata leak in the audit relay", "1.4.1"),
+    ("- feat: partial results when one provider is unhealthy", "1.5.0"),
+    ("- chore(deps): bump yadgarhq/actions hooks from v1.34.0 to v1.35.0", "1.4.1"),
+])
+def test_a_human_bullet_still_releases(changelog, expected):
+    verdict = next_version.derive("v1.4.0", ["v1.4.0"], [squash(human_body(changelog), "t")],
+                                  [HUMAN], ["src/main.rs"])
+    assert (verdict.rc, verdict.nxt) == (0, expected)
+
+
+def test_the_adoption_body_under_a_human_author_fails_closed():
+    # Not reachable today (every adoption merge is bot-authored); if it ever is,
+    # the job reds rather than tagging or staying silently green.
+    verdict = next_version.derive("v1.4.0", ["v1.4.0"], [squash(generated_body())],
+                                  [HUMAN], ADOPTED)
+    assert (verdict.rc, verdict.nxt) == (1, "")
+
+
+def test_a_real_adoption_merge_cuts_no_tag_end_to_end(tmp_path):
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+    def git(*args):
+        subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "user.name=t",
+                        "-c", "user.email=t@t", *args],
+                       cwd=tmp_path, check=True, capture_output=True, text=True, env=env)
+
+    git("init", "-q", "-b", "main")
+    git("commit", "-q", "--allow-empty", "-m", "root")
+    git("tag", "-a", "v1.4.0", "-m", "v1.4.0")
+    (tmp_path / fan_out.CONFIG).write_text("repos: []\n")
+    git("add", "--", fan_out.CONFIG)
+    git("commit", "-q", f"--author={FAN_OUT_BOT}", "-m", squash(generated_body()))
+    out, summary = tmp_path / "out.txt", tmp_path / "summary.md"
+    out.touch()
+    summary.touch()
+    env.update(GITHUB_OUTPUT=str(out), GITHUB_STEP_SUMMARY=str(summary),
+               RUNNER_TEMP=str(tmp_path))
+    done = subprocess.run([sys.executable, str(REPO / "scripts" / "next_version.py")],
+                          cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert out.read_text() == "next=\n"
+    assert not (tmp_path / "tag_message.txt").exists()
 
 
 def test_the_body_names_the_drift_it_fixes_and_the_release_range():
