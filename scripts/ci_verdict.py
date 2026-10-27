@@ -105,6 +105,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -117,6 +118,15 @@ class Refused(Exception):
 
     Raised rather than returned so that no caller can mistake it for a verdict.
     Every path that raises it exits non-zero.
+    """
+
+
+class NoStandingVerdict(Refused):
+    """No COMPLETED `ci / passed` of another run is on this commit yet.
+
+    A `Refused` like any other, so every caller that catches `Refused` still
+    reddens on it. It is a separate class for ONE reader only:
+    `await_standing_verdict`, which waits on this refusal and on no other.
     """
 
 
@@ -478,8 +488,9 @@ def standing_verdict(payload, run_id, check_name):
         and r.get("status") == "completed"
     ]
     if not prior:
-        raise Refused(
-            f"no COMPLETED `{check_name}` on this commit predates this run, so "
+        raise NoStandingVerdict(
+            f"no COMPLETED `{check_name}` on this commit other than this run's "
+            f"own, so "
             f"there is no standing verdict for a text-only edit to carry "
             f"forward. Absence is not success."
         )
@@ -490,7 +501,201 @@ def standing_verdict(payload, run_id, check_name):
     return prior[0]
 
 
-def make_text_edit_resolver(needs, repo, sha, run_id, check_name, token, fetch=None):
+# ---------------------------------------------------------------------------
+# Yaadgaar 440: a text-only edit racing the full run on the same commit
+# ---------------------------------------------------------------------------
+#
+# THE RACE, measured on yadgarhq/yadgar#94 (head `c28c9e3`, 2026-10-26).
+# `fan_out.py` moves an open bot pull request with a file write
+# (`synchronize`) and then a body update (`edited`) seconds apart, so a full
+# run and a text-only run start on ONE head sha. The text-only run reaches
+# this gate in about ten seconds. The full run's `ci / passed` does not EXIST
+# yet at that moment: `passed` starts only after every job it needs has
+# finished, which was 80 seconds later on #94 and can be twenty minutes in a
+# repository with a database-backed `test`. So `standing_verdict` found no
+# prior verdict, refused, and that red check run kept the commit rollup at
+# FAILURE after the full run went green.
+#
+# THE FIX WAITS, BOUNDED, AND DECIDES BY THE SAME RULE. On the absence
+# refusal ONLY, the gate looks for a SIBLING run on this commit that is still
+# checking it: another run of the same caller job (`ci / *`), on the same
+# `head_sha`, that has no completed `ci / passed` and is not a text-only run
+# itself. If one exists, it sleeps and asks `standing_verdict` again. Each
+# answer it acts on is `standing_verdict`'s, unchanged, over the response as
+# it stood at that poll — so for any one response the gate passes only where
+# the shipped gate passes. What changes is WHEN it reads, which is what the
+# documented workaround (re-run the red run after the full run finishes)
+# already did by hand.
+#
+# STILL FAIL-CLOSED. No sibling: refuse at once, as before. A sibling that
+# does not finish inside the bound: refuse. A sibling that finishes red:
+# refuse, because `standing_verdict` then returns its red. Any other refusal
+# (a truncated response, a 403, no run id) is not waited on at all.
+#
+# A TEXT-ONLY SIBLING IS NOT WAITED FOR, because it checked nothing and has no
+# verdict of its own to bring, and because two quick body edits would
+# otherwise hold each other until the bound. It is recognised by its
+# SENTINELS — the jobs whose `if:` carries the text-edit conjunct, read from
+# the workflow — all of which it reports `skipped`. A full run executes at
+# least `precommit`, which no other fact skips on a pull request. A sibling
+# with no sentinel check run yet (its `detect` still running) cannot be told
+# apart, so it is waited for; for a text-only one that costs seconds.
+#
+# ONE WINDOW READS THE WRONG WAY, and it fails closed. In a repository with no
+# Rust or no vendored contract, a full run's `test` and `proto` are listed as
+# completed-`skipped` the moment `detect` finishes, about a second before
+# `precommit` is listed. A poll inside that second sees only skipped sentinels,
+# reads the sibling as text-only, and refuses at once — the shipped behaviour.
+#
+# THE PRODUCER EDITS FIRST (ADR-1032). `fan_out.py` now updates the pull
+# request's title and body BEFORE it moves the branch, so the `edited` run
+# lands on the OLD head, which already carries a verdict, and the new head
+# gets only the full `synchronize` run. The wait is left for a human editing
+# a body while a push is still being checked.
+
+# THE BOUND, ten minutes (ADR-1032). The longest successful pull request runs
+# measured on 2026-10-27 were `store` 1128 s and `iam` 1011 s, so a text-only
+# edit racing one of those still refuses at the bound. That is accepted: with
+# the producer editing first, the wait serves only a human edit race, and a
+# waiting `passed` holds one of the organisation's runner slots for as long
+# as it waits. `ci-pr.yaml` gives `passed` a `timeout-minutes` above this
+# bound. `CARRY_FORWARD_WAIT_SECONDS` overrides it; no value of it turns a
+# red commit green, because the bound only decides how long to wait before a
+# refusal.
+DEFAULT_WAIT_SECONDS = 600
+POLL_SECONDS = 30
+
+# The unfiltered listing pages at 100. Ten pages is far past any real commit;
+# more than that refuses rather than reads a partial set.
+MAX_PAGES = 10
+
+_RUN_ID = re.compile(r"/runs/(\d+)/")
+
+
+def wait_budget():
+    """`CARRY_FORWARD_WAIT_SECONDS` as a whole number of seconds, or refuse."""
+    raw = os.environ.get("CARRY_FORWARD_WAIT_SECONDS")
+    if raw is None or raw == "":
+        return DEFAULT_WAIT_SECONDS
+    if not raw.isdigit():
+        raise Refused(
+            f"CARRY_FORWARD_WAIT_SECONDS is {raw!r}, not a whole number of seconds."
+        )
+    return int(raw)
+
+
+def text_edit_sentinels(conditions, check_name):
+    """The check-run names of the jobs a text-only edit skips, read off the workflow."""
+    prefix = check_name.rpartition(" / ")[0]
+    if not prefix:
+        return ()
+    return tuple(
+        f"{prefix} / {job}"
+        for job, cond in conditions
+        if cond is not None and TEXT_EDIT_REF in str(cond)
+    )
+
+
+def all_check_runs_url(repo, sha, page):
+    """Every check run on `sha`, any name, one page of 100."""
+    return (
+        "https://api.github.com/repos/"
+        f"{repo}/commits/{sha}/check-runs"
+        f"?filter=all&per_page=100&page={page}"
+    )
+
+
+def fetch_all_check_runs(fetch, repo, sha):
+    """Every check run on `sha`, paged to `total_count`, or refuse."""
+    runs = []
+    for page in range(1, MAX_PAGES + 1):
+        body = fetch(all_check_runs_url(repo, sha, page))
+        batch = body.get("check_runs")
+        total = body.get("total_count")
+        if not isinstance(batch, list) or not isinstance(total, int):
+            raise Refused("the check runs listing carries no `check_runs` or `total_count`.")
+        runs.extend(batch)
+        if len(runs) >= total or not batch:
+            return runs
+    raise Refused(
+        f"this commit carries more than {MAX_PAGES * 100} check runs, so the "
+        f"runs still checking it cannot all be read."
+    )
+
+
+def pending_siblings(runs, run_id, sha, check_name, sentinels):
+    """Other runs of this caller job on `sha` that may yet bring a verdict."""
+    prefix = check_name.rpartition(" / ")[0] + " / "
+    by_run = {}
+    for r in runs:
+        if not str(r.get("name") or "").startswith(prefix):
+            continue
+        if r.get("head_sha") != sha:
+            continue
+        m = _RUN_ID.search(str(r.get("details_url") or ""))
+        if not m or m.group(1) == str(run_id):
+            continue
+        by_run.setdefault(m.group(1), []).append(r)
+    pending = []
+    # A sibling with a COMPLETED `check_name` needs no test here: the
+    # `standing_verdict` call that precedes this one would have returned it.
+    for rid, entries in sorted(by_run.items()):
+        marks = [r for r in entries if r.get("name") in sentinels]
+        text_only = marks and all(
+            r.get("status") == "completed" and r.get("conclusion") == "skipped"
+            for r in marks
+        )
+        if not text_only:
+            pending.append(rid)
+    return pending
+
+
+def await_standing_verdict(fetch, repo, sha, run_id, check_name, sentinels, budget, sleep, clock, log):
+    """`standing_verdict`, asked again while a sibling run is still checking `sha`."""
+    deadline = clock() + budget
+    while True:
+        try:
+            return standing_verdict(
+                fetch(check_runs_url(repo, sha, check_name)), run_id, check_name
+            )
+        except NoStandingVerdict as absent:
+            if not sentinels:
+                raise
+            pending = pending_siblings(
+                fetch_all_check_runs(fetch, repo, sha), run_id, sha, check_name, sentinels
+            )
+            if not pending:
+                raise Refused(
+                    f"{absent} No other run on {sha} is still checking it either."
+                ) from None
+            remaining = deadline - clock()
+            if remaining <= 0:
+                raise Refused(
+                    f"{absent} Waited {budget}s for run(s) {', '.join(pending)} "
+                    f"on {sha}, and none concluded `{check_name}` inside the bound."
+                ) from None
+            log(
+                f"no standing `{check_name}` on {sha} yet; run(s) "
+                f"{', '.join(pending)} still checking it. Waiting "
+                f"{min(POLL_SECONDS, remaining):.0f}s ({remaining:.0f}s of the bound left)."
+            )
+            sleep(min(POLL_SECONDS, remaining))
+
+
+def make_text_edit_resolver(
+    needs,
+    repo,
+    sha,
+    run_id,
+    check_name,
+    token,
+    fetch=None,
+    sentinels=(),
+    budget=0,
+    sleep=time.sleep,
+    clock=time.monotonic,
+    log=None,
+):
     """Resolve `text_edit`, and on `true` assert the verdict that makes it a reason.
 
     THE VALUE IS RETURNED ONLY WHEN IT HAS BEEN EARNED. `text_edit` is `true`
@@ -511,6 +716,11 @@ def make_text_edit_resolver(needs, repo, sha, run_id, check_name, token, fetch=N
         def fetch(url):
             return fetch_check_runs(url, token)
 
+    if log is None:
+
+        def log(message):
+            print(message, file=sys.stderr, flush=True)
+
     cache = {}
 
     def resolve(expr):
@@ -527,10 +737,17 @@ def make_text_edit_resolver(needs, repo, sha, run_id, check_name, token, fetch=N
                 "verdict it would carry forward was not named."
             )
         if "run" not in cache:
-            cache["run"] = standing_verdict(
-                fetch(check_runs_url(repo, sha, check_name)), run_id, check_name
+            cache["run"] = await_standing_verdict(
+                fetch, repo, sha, run_id, check_name, sentinels, budget, sleep, clock, log
             )
         latest = cache["run"]
+        if latest.get("head_sha") != sha:
+            # The endpoint is per commit, so this cannot happen against GitHub.
+            # Checked anyway: a verdict on other bytes is no verdict on these.
+            raise Refused(
+                f"the standing `{check_name}` ({latest.get('details_url')}) is on "
+                f"another commit, {latest.get('head_sha')!r}, not {sha}."
+            )
         conclusion = str(latest.get("conclusion") or "")
         if conclusion != "success":
             raise Refused(
@@ -730,6 +947,12 @@ def main(argv=None):
     # check runs on this commit produces no standing verdict, and no standing
     # verdict refuses. There is no value of this variable that turns a red
     # commit green.
+    #
+    # YAADGAAR 440: the sentinels come from the same conditions the verdict
+    # reads, so a job added to the short-circuit is a sentinel with no second
+    # edit, and the wait bound is the only new input.
+    conditions = load_conditions(workflow, gate_job)
+    check_name = env.get("REQUIRED_CHECK") or DEFAULT_REQUIRED_CHECK
     register_deferred_reference(
         TEXT_EDIT_REF,
         make_text_edit_resolver(
@@ -737,8 +960,10 @@ def main(argv=None):
             repo=env.get("REPO") or "",
             sha=env.get("HEAD_SHA") or "",
             run_id=env.get("RUN_ID") or "",
-            check_name=env.get("REQUIRED_CHECK") or DEFAULT_REQUIRED_CHECK,
+            check_name=check_name,
             token=env.get("GH_TOKEN") or "",
+            sentinels=text_edit_sentinels(conditions, check_name),
+            budget=wait_budget(),
         ),
     )
 
@@ -748,7 +973,6 @@ def main(argv=None):
         repository=env.get("REPO") or "",
         needs=needs,
     )
-    conditions = load_conditions(workflow, gate_job)
     ok, rows = verdict(conditions, needs, resolve)
     print(render(rows))
     if ok:

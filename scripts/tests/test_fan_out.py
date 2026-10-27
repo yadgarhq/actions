@@ -615,6 +615,52 @@ def test_a_rerun_after_main_moved_updates_the_same_branch_and_pull_request():
     assert head[".pre-commit-config.yaml"].endswith("# later\n")
 
 
+def moved_to_a_new_tag():
+    """An open adoption pull request for v1.34.0, re-run for v1.35.0 after `main` moved.
+
+    Both the branch and the title/body change, which is the shape that started
+    a `synchronize` and an `edited` run on one head sha (yaadgaar 440).
+    """
+    gh = Fake(estate())
+    fan_out.run(gh, "yadgarhq", "v1.34.0", CLASSES, live=True)
+    r = gh.repos["docs"]
+    r["commits"]["base2"] = {**r["commits"]["base"],
+                             ".pre-commit-config.yaml": fixture("docs") + "# later\n"}
+    r["branches"]["main"] = "base2"
+    gh.writes.clear()
+    return gh, r
+
+
+def test_the_pull_request_is_edited_before_its_branch_moves():
+    """YAADGAAR 440 / ADR-1032: `update_pr` comes BEFORE `reset_ref` and `put_file`.
+
+    An `edited` event's payload carries the head at edit time. Edited first, the
+    text-only run lands on the OLD head, which already carries a verdict, and
+    the new head gets only the full `synchronize` run. Edited after, both runs
+    start on the new head and the text-only one finds no verdict to carry.
+    """
+    gh, r = moved_to_a_new_tag()
+    rows, _ = fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=True)
+    assert by_repo(rows)["docs"]["status"] == "updated"
+    kinds = [w[0] for w in gh.writes if w[1] == "docs"]
+    assert kinds == ["update_pr", "reset_ref", "put_file"]
+    assert fan_out.target_of(r["prs"][0]["title"]) == "v1.35.0"
+
+
+def test_a_foreign_commit_refuses_before_the_pull_request_is_edited():
+    """Edited first must not mean edited regardless: the reset refusal still writes nothing."""
+    gh, r = moved_to_a_new_tag()
+    head = r["branches"]["actions-adopt"]
+    r["commits"]["h1"] = {**r["commits"][head], "fix.txt": "a human fix"}
+    r["meta"]["h1"] = {"parent": head, "author": "m-agahi", "message": "fix: hand fix"}
+    r["branches"]["actions-adopt"] = "h1"
+    rows, code = fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=True)
+    assert by_repo(rows)["docs"]["status"] == "error"
+    assert not [w for w in gh.writes if w[1] == "docs"]
+    assert fan_out.target_of(r["prs"][0]["title"]) == "v1.34.0"
+    assert code == 1
+
+
 def test_a_branch_left_without_a_pull_request_is_reused_not_duplicated():
     gh = Fake(estate())
     gh.repos["argocd"]["branches"]["actions-adopt"] = "base"
