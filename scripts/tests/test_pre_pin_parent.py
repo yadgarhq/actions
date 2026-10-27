@@ -430,6 +430,13 @@ def test_ci_verdict_can_evaluate_the_real_condition():
                 fetch=lambda url: (_ for _ in ()).throw(AssertionError("not a text-only edit; must not fetch")),
             ),
         )
+        ci_verdict.register_deferred_reference(
+            ci_verdict.CONFIG_ONLY_REF,
+            ci_verdict.make_config_only_resolver(
+                needs=ctx, repo=repository, base_ref="main", sha="deadbeef", token="t",
+                fetch=lambda url: (_ for _ in ()).throw(AssertionError("not config-only; must not fetch")),
+            ),
+        )
         try:
             resolver = ci_verdict.make_resolver(
                 event="pull_request", author_type="User", repository=repository, needs=ctx,

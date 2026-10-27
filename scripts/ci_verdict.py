@@ -101,6 +101,7 @@ arm — the one that decides whether less work is acceptable — is on the fact.
 Tests: `python3 -m pytest scripts/tests/ -q`.
 """
 
+import base64
 import json
 import os
 import re
@@ -111,6 +112,8 @@ import urllib.parse
 import urllib.request
 
 import yaml
+
+import config_only
 
 
 class Refused(Exception):
@@ -391,14 +394,15 @@ def check_runs_url(repo, sha, check_name):
     )
 
 
-def fetch_check_runs(url, token):
+def fetch_check_runs(url, token, permission="checks"):
     """`GET` the URL as JSON, or refuse. Every failure path refuses.
 
     A GATE THAT CANNOT READ THE ANSWER HAS NOT GOT A GREEN ONE. The 403 a
     missing `checks: read` produces is the failure most likely to happen in
     practice — a consumer that subscribes to `edited` without granting the
     permission on its `uses:` line gets exactly it — and it must redden the
-    merge gate rather than wave the run through.
+    merge gate rather than wave the run through. `permission` only names the
+    grant in that message; yaadgaar 442's reads need `contents: read`.
     """
     if not token:
         raise Refused(
@@ -421,7 +425,7 @@ def fetch_check_runs(url, token):
         hint = ""
         if exc.code in (403, 404):
             hint = (
-                " This is what a missing `checks: read` looks like: the "
+                f" This is what a missing `{permission}: read` looks like: the "
                 "permission must be granted on the CALLER's `uses:` line as "
                 "well as declared here, because a called workflow's token can "
                 "only be narrowed by the caller, never widened."
@@ -547,13 +551,13 @@ def standing_verdict(payload, run_id, check_name):
 # `precommit` is listed. A poll inside that second sees only skipped sentinels,
 # reads the sibling as text-only, and refuses at once — the shipped behaviour.
 #
-# THE PRODUCER EDITS FIRST (ADR-1032). `fan_out.py` now updates the pull
+# THE PRODUCER EDITS FIRST (ADR-1033). `fan_out.py` now updates the pull
 # request's title and body BEFORE it moves the branch, so the `edited` run
 # lands on the OLD head, which already carries a verdict, and the new head
 # gets only the full `synchronize` run. The wait is left for a human editing
 # a body while a push is still being checked.
 
-# THE BOUND, ten minutes (ADR-1032). The longest successful pull request runs
+# THE BOUND, ten minutes (ADR-1033). The longest successful pull request runs
 # measured on 2026-10-27 were `store` 1128 s and `iam` 1011 s, so a text-only
 # edit racing one of those still refuses at the bound. That is accepted: with
 # the producer editing first, the wait serves only a human edit race, and a
@@ -763,6 +767,230 @@ def make_text_edit_resolver(
     return resolve
 
 
+# ---------------------------------------------------------------------------
+# Yaadgaar 442: the fact that earns a hook rev bump's skips
+# ---------------------------------------------------------------------------
+#
+# `detect` reports `config_only=true` when the whole pull request is one
+# forward move of the `yadgarhq/actions` hook rev (`config_only.py` says what
+# that means exactly). Seven jobs then skip, and `precommit` runs the hooks at
+# the new rev. This gate does not take `detect`'s word for it. It reads the
+# change again from the API — `passed` has no checkout of the consumer — and
+# runs the SAME `config_only.classify` over both versions of the file. Any
+# failure to read, any doubt, and any disagreement with `detect` refuses.
+#
+# FOUR READS, all `contents: read`, and only when the value is `true`:
+#
+#   GET /repos/{o}/{r}/git/ref/heads/{base}       the base tip, which must be the
+#                                                 one `detect` merged onto
+#   GET /repos/{o}/{r}/compare/{base}...{head}   the files the pull request changes
+#   GET /repos/{o}/{r}/git/trees/{commit}         the file's mode and blob, per side
+#   GET /repos/{o}/{r}/git/blobs/{sha}            the file itself, per side
+#
+# The compare response carries no file modes, so the trees are read for them.
+#
+# THE TEXT CHECK IS NOT THE WHOLE CHECK. `classify` reads lines, and YAML is not
+# lines: a duplicate `repo:` key or a multi-line quoted scalar can put a line
+# that looks like the actions block where no actions entry is. So both sides
+# are also parsed, refusing duplicate keys, and must be equal once the one
+# actions entry's `rev` is moved from `before` to `after`.
+
+CONFIG_ONLY_REF = "needs.detect.outputs.config_only"
+
+
+def compare_url(repo, base, head):
+    return (
+        f"https://api.github.com/repos/{repo}/compare/"
+        f"{urllib.parse.quote(base, safe='')}...{head}"
+    )
+
+
+def tree_url(repo, commit):
+    return f"https://api.github.com/repos/{repo}/git/trees/{commit}"
+
+
+def blob_url(repo, sha):
+    return f"https://api.github.com/repos/{repo}/git/blobs/{sha}"
+
+
+def compared_file(compare):
+    """The one changed file of a compare response, and the merge base, or refuse."""
+    files = compare.get("files")
+    if not isinstance(files, list) or len(files) != 1:
+        count = len(files) if isinstance(files, list) else "no"
+        raise Refused(f"the pull request changes {count} files, not exactly one.")
+    f = files[0]
+    if f.get("filename") != config_only.CONFIG or f.get("status") != "modified":
+        raise Refused(f"the one changed file is {f.get('filename')!r} ({f.get('status')!r}).")
+    if f.get("previous_filename"):
+        raise Refused(f"{config_only.CONFIG} was renamed from {f.get('previous_filename')!r}.")
+    if not isinstance(f.get("patch"), str) or not f["patch"]:
+        raise Refused("the compare response carries no patch, so it was truncated.")
+    if f.get("additions") != 1 or f.get("deletions") != 1:
+        raise Refused(
+            f"the patch adds {f.get('additions')} and deletes {f.get('deletions')} "
+            f"lines, not one of each."
+        )
+    base = (compare.get("merge_base_commit") or {}).get("sha")
+    if not config_only.SHA.fullmatch(str(base or "")):
+        raise Refused("the compare response names no merge base commit.")
+    return f, base
+
+
+def config_at(fetch, repo, commit):
+    """`.pre-commit-config.yaml` at `commit`, as text, after checking its mode."""
+    tree = fetch(tree_url(repo, commit))
+    entries = tree.get("tree")
+    if tree.get("truncated") or not isinstance(entries, list):
+        raise Refused(f"the tree of {commit} could not be read in full.")
+    matching = [e for e in entries if e.get("path") == config_only.CONFIG]
+    if len(matching) != 1 or matching[0].get("type") != "blob":
+        raise Refused(f"{commit} has no single {config_only.CONFIG} blob.")
+    if matching[0].get("mode") != config_only.REGULAR_FILE:
+        raise Refused(
+            f"{config_only.CONFIG} at {commit} has mode {matching[0].get('mode')!r}, "
+            f"not {config_only.REGULAR_FILE}."
+        )
+    blob = fetch(blob_url(repo, matching[0].get("sha")))
+    if blob.get("encoding") != "base64" or not isinstance(blob.get("content"), str):
+        raise Refused(f"the {config_only.CONFIG} blob at {commit} is not base64 content.")
+    try:
+        return base64.b64decode(blob["content"]).decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise Refused(f"the {config_only.CONFIG} blob at {commit} did not decode: {exc}") from exc
+
+
+def patch_lines(patch):
+    """The `-` and `+` lines of a compare patch, hunk headers excluded."""
+    removed = [line[1:] for line in patch.split("\n") if line.startswith("-")]
+    added = [line[1:] for line in patch.split("\n") if line.startswith("+")]
+    return removed, added
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """`SafeLoader` that refuses a mapping with the same key twice."""
+
+
+def _unique_mapping(loader, node, deep=False):
+    seen = set()
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=True)
+        try:
+            duplicate = key in seen
+            seen.add(key)
+        except TypeError:
+            raise yaml.constructor.ConstructorError(
+                None, None, f"an unhashable key {key!r}", key_node.start_mark
+            ) from None
+        if duplicate:
+            raise yaml.constructor.ConstructorError(
+                None, None, f"the key {key!r} appears twice", key_node.start_mark
+            )
+    return loader.construct_mapping(node, deep=deep)
+
+
+_UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _unique_mapping
+)
+
+ACTIONS_URL = "https://github.com/yadgarhq/actions"
+
+
+def parsed_config(text, commit):
+    try:
+        return yaml.load(text, Loader=_UniqueKeyLoader)  # a SafeLoader subclass
+    except yaml.YAMLError as exc:
+        raise Refused(f"{config_only.CONFIG} at {commit} is not YAML this gate accepts: {exc}") from None
+
+
+def parsed_agrees(old_text, new_text, before, after):
+    """Refuse unless the two files parse equal apart from the actions entry's `rev`."""
+    old = parsed_config(old_text, "the merge base")
+    new = parsed_config(new_text, "the head")
+    repos = old.get("repos") if isinstance(old, dict) else None
+    if not isinstance(repos, list):
+        raise Refused(f"{config_only.CONFIG} at the merge base has no `repos` list.")
+    hits = [e for e in repos if isinstance(e, dict) and e.get("repo") == ACTIONS_URL]
+    if len(hits) != 1:
+        raise Refused(f"{config_only.CONFIG} has {len(hits)} yadgarhq/actions entries, not one.")
+    if hits[0].get("rev") != before:
+        raise Refused(
+            f"the yadgarhq/actions entry's parsed rev is {hits[0].get('rev')!r}, "
+            f"not the {before} the changed line shows."
+        )
+    hits[0]["rev"] = after
+    if old != new:
+        raise Refused(
+            f"{config_only.CONFIG} parses differently at the head in more than the "
+            f"yadgarhq/actions entry's rev."
+        )
+
+
+def branch_url(repo, base_ref):
+    return (
+        f"https://api.github.com/repos/{repo}/git/ref/heads/"
+        f"{urllib.parse.quote(base_ref, safe='/')}"
+    )
+
+
+def earn_config_only(fetch, repo, base_ref, sha, outputs):
+    """Re-derive `config_only` from the API, or refuse. Returns nothing."""
+    if not repo or not base_ref or not config_only.SHA.fullmatch(sha or ""):
+        raise Refused(
+            "a config-only change was reported, but the repository, the base "
+            "branch or the head commit was not named."
+        )
+    # THE BASE HAS NOT MOVED since `detect` merged onto it, so both read one base.
+    tip = (fetch(branch_url(repo, base_ref)).get("object") or {}).get("sha")
+    if not config_only.SHA.fullmatch(str(tip or "")) or tip != outputs.get("config_only_base"):
+        raise Refused(
+            f"`{base_ref}` is at {tip!r} and `detect` merged onto "
+            f"{outputs.get('config_only_base')!r}, so the two did not read the same "
+            f"base. Re-run the checks."
+        )
+    changed, merge_base = compared_file(fetch(compare_url(repo, base_ref, sha)))
+    old_text, new_text = config_at(fetch, repo, merge_base), config_at(fetch, repo, sha)
+    try:
+        before, after = config_only.classify(old_text, new_text)
+    except config_only.NotConfigOnly as exc:
+        raise Refused(f"`detect` reported a config-only change and the API says otherwise: {exc}.") from None
+    parsed_agrees(old_text, new_text, before, after)
+    if patch_lines(changed["patch"]) != ([f"    rev: {before}"], [f"    rev: {after}"]):
+        raise Refused("the compare patch does not show exactly the rev line that changed.")
+    claimed = (outputs.get("config_only_from"), outputs.get("config_only_to"))
+    if claimed != (before, after):
+        raise Refused(
+            f"`detect` reported {claimed[0]} -> {claimed[1]}, and the API shows "
+            f"{before} -> {after}."
+        )
+
+
+def make_config_only_resolver(needs, repo, base_ref, sha, token, fetch=None):
+    """Resolve `config_only`, and on `true` re-derive it before handing it back.
+
+    ON ANY OTHER VALUE NOTHING IS READ. `false` and the empty string (a push,
+    where `detect` is skipped) justify no skip, so they are returned as they are.
+    """
+    if fetch is None:
+
+        def fetch(url):
+            return fetch_check_runs(url, token, permission="contents")
+
+    cache = {}
+
+    def resolve(expr):
+        outputs = (needs.get("detect") or {}).get("outputs") or {}
+        value = str(outputs.get("config_only", ""))
+        if value != "true":
+            return value
+        if "earned" not in cache:
+            earn_config_only(fetch, repo, base_ref, sha, outputs)
+            cache["earned"] = True
+        return value
+
+    return resolve
+
+
 def make_resolver(event, author_type, repository, needs):
     """The whitelist, closed over this run's facts."""
 
@@ -964,6 +1192,19 @@ def main(argv=None):
             token=env.get("GH_TOKEN") or "",
             sentinels=text_edit_sentinels(conditions, check_name),
             budget=wait_budget(),
+        ),
+    )
+
+    # YAADGAAR 442. Earned from the API rather than read off `detect`; see
+    # `make_config_only_resolver`.
+    register_deferred_reference(
+        CONFIG_ONLY_REF,
+        make_config_only_resolver(
+            needs=needs,
+            repo=env.get("REPO") or "",
+            base_ref=env.get("BASE_REF") or "",
+            sha=env.get("HEAD_SHA") or "",
+            token=env.get("GH_TOKEN") or "",
         ),
     )
 
