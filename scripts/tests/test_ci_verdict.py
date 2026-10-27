@@ -561,6 +561,14 @@ def test_every_condition_in_the_real_workflow_is_evaluable():
             fetch=no_fetch,
         ),
     )
+    # Yaadgaar 442's reference, `false` here, so it reads nothing either.
+    ctx["detect"]["outputs"]["config_only"] = "false"
+    ci_verdict.register_deferred_reference(
+        ci_verdict.CONFIG_ONLY_REF,
+        ci_verdict.make_config_only_resolver(
+            needs=ctx, repo="yadgarhq/actions", base_ref="main", sha=SHA, token="", fetch=no_fetch
+        ),
+    )
     try:
         resolve = ci_verdict.make_resolver(
             "pull_request", "User", "yadgarhq/actions", ctx
@@ -883,6 +891,13 @@ def gate(
             budget=budget,
             sleep=sleep,
             clock=clock,
+        ),
+    )
+    # Yaadgaar 442: these fixtures carry no `config_only`, so nothing is read.
+    ci_verdict.register_deferred_reference(
+        ci_verdict.CONFIG_ONLY_REF,
+        ci_verdict.make_config_only_resolver(
+            needs=ctx, repo=repo, base_ref="main", sha=sha, token=token, fetch=no_fetch
         ),
     )
     try:
@@ -1816,7 +1831,7 @@ def test_a_sentinel_not_completed_does_not_read_as_skipped():
 
 
 def test_the_passed_job_outlives_the_wait_bound():
-    """ADR-1032: `passed` carries a `timeout-minutes` above the default bound.
+    """ADR-1033: `passed` carries a `timeout-minutes` above the default bound.
 
     The wait holds a runner slot, so the job needs its own ceiling, and a
     ceiling below the bound would cancel a wait that was still allowed.

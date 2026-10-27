@@ -632,7 +632,7 @@ def moved_to_a_new_tag():
 
 
 def test_the_pull_request_is_edited_before_its_branch_moves():
-    """YAADGAAR 440 / ADR-1032: `update_pr` comes BEFORE `reset_ref` and `put_file`.
+    """YAADGAAR 440 / ADR-1033: `update_pr` comes BEFORE `reset_ref` and `put_file`.
 
     An `edited` event's payload carries the head at edit time. Edited first, the
     text-only run lands on the OLD head, which already carries a verdict, and

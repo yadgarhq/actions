@@ -640,7 +640,7 @@ def one(client, owner, meta, cls, tag, classes, live, row):
                 f"`{branch}` carries {len(foreign)} commit(s) not made by the fan-out; "
                 "refusing to reset them away. Merge or move that work, then re-run."
             )
-    # EDIT BEFORE PUSH (yaadgaar 440, ADR-1032). An `edited` event's payload
+    # EDIT BEFORE PUSH (yaadgaar 440, ADR-1033). An `edited` event's payload
     # carries the head at edit time, so editing first puts the text-only run on
     # the OLD head, which already carries a verdict, and the new head gets only
     # the full `synchronize` run. Edited after the push, both runs started on

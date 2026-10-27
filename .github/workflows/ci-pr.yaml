@@ -120,6 +120,15 @@ jobs:
       chart: ${{ steps.d.outputs.chart }}
       proto: ${{ steps.d.outputs.proto }}
       text_edit: ${{ steps.e.outputs.text_edit }}
+      # YAADGAAR 442: the whole pull request is one forward move of the
+      # `yadgarhq/actions` hook rev. `scripts/config_only.py` decides it and
+      # `ci / passed` re-derives it from the API before it accepts the skips.
+      config_only: ${{ steps.c.outputs.config_only }}
+      config_only_from: ${{ steps.c.outputs.config_only_from }}
+      config_only_to: ${{ steps.c.outputs.config_only_to }}
+      # The base tip the merge commit was built on. `passed` refuses when the
+      # base branch has moved since.
+      config_only_base: ${{ steps.c.outputs.config_only_base }}
       # LEDGER 1756 S2b (ADR-0981): every tool version a job below installs,
       # read ONCE from `versions.yaml` at the commit of `yadgarhq/actions` this
       # workflow runs at. A job reads `needs.detect.outputs.<tool>` and names no
@@ -143,6 +152,9 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.ref }}
+          # Yaadgaar 442: the merge commit AND its two parents, so step `c`
+          # can diff the base against the merge.
+          fetch-depth: 2
       # LEDGER 1756 S2b. THE TOOL VERSIONS, from `versions.yaml` at the commit
       # this workflow file runs at (ADR-0981), never at `main` and never from
       # the repository under review. Only two files are fetched. The reader is
@@ -173,6 +185,7 @@ jobs:
           sparse-checkout: |
             versions.yaml
             scripts/tool_versions.py
+            scripts/config_only.py
           sparse-checkout-cone-mode: false
       - name: the tool versions this run installs (versions.yaml)
         id: versions
@@ -189,6 +202,27 @@ jobs:
             echo "## Tool versions (versions.yaml)"
             sed 's/^/- /' "$RUNNER_TEMP/versions.txt"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # YAADGAAR 442. AFTER `versions` (ledger 1756 S2b's read order) and
+      # before `.ci-versions` is deleted, because the classifier comes from
+      # that checkout. It cannot fail the job: any error writes
+      # `config_only=false`, and `false` runs every job.
+      - id: c
+        name: whether this pull request only moves the yadgarhq/actions hook rev
+        env:
+          UNDER_REVIEW: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -uo pipefail
+          if [ "$UNDER_REVIEW" = "yadgarhq/actions" ]; then dir=.; else dir=.ci-versions; fi
+          if python3 "$dir/scripts/config_only.py" >"$RUNNER_TEMP/config_only.txt" 2>"$RUNNER_TEMP/config_only.why"; then
+            cat "$RUNNER_TEMP/config_only.txt" >> "$GITHUB_OUTPUT"
+          else
+            echo "config_only=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "- $(head -c 400 "$RUNNER_TEMP/config_only.why")" >> "$GITHUB_STEP_SUMMARY"
           rm -rf .ci-versions
 
       - id: d
@@ -508,8 +542,11 @@ jobs:
   # define. These need a runner and network, so they are jobs.
   workflows:
     # Ledger 685: a text-only edit re-reads the body and nothing else.
+    # Yaadgaar 442: a hook rev bump is checked by `precommit` alone.
     needs: detect
-    if: github.event_name != 'push' && needs.detect.outputs.text_edit != 'true'
+    if: >-
+      github.event_name != 'push' && needs.detect.outputs.text_edit != 'true' &&
+      needs.detect.outputs.config_only != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -538,8 +575,11 @@ jobs:
 
   vulnerabilities:
     # Ledger 685: a text-only edit re-reads the body and nothing else.
+    # Yaadgaar 442: a hook rev bump is checked by `precommit` alone.
     needs: detect
-    if: github.event_name != 'push' && needs.detect.outputs.text_edit != 'true'
+    if: >-
+      github.event_name != 'push' && needs.detect.outputs.text_edit != 'true' &&
+      needs.detect.outputs.config_only != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -791,10 +831,12 @@ jobs:
   # VECTOR type the probe checks for.
   test:
     # Ledger 685: a text-only edit re-reads the body and nothing else.
+    # Yaadgaar 442: a hook rev bump is checked by `precommit` alone.
     needs: detect
     if: >-
       github.event_name != 'push' && needs.detect.outputs.rust == 'true' &&
-      needs.detect.outputs.text_edit != 'true'
+      needs.detect.outputs.text_edit != 'true' &&
+      needs.detect.outputs.config_only != 'true'
     runs-on: ubuntu-latest
     services:
       mariadb:
@@ -1315,10 +1357,12 @@ jobs:
   # vendored copy match the pin?
   proto:
     # Ledger 685: a text-only edit re-reads the body and nothing else.
+    # Yaadgaar 442: a hook rev bump is checked by `precommit` alone.
     needs: detect
     if: >-
       needs.detect.outputs.proto == 'true' &&
-      needs.detect.outputs.text_edit != 'true'
+      needs.detect.outputs.text_edit != 'true' &&
+      needs.detect.outputs.config_only != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1476,8 +1520,11 @@ jobs:
   # pull request template's `## Risk` section.
   portability:
     # Ledger 685: a text-only edit re-reads the body and nothing else.
+    # Yaadgaar 442: a hook rev bump is checked by `precommit` alone.
     needs: detect
-    if: github.event_name != 'push' && needs.detect.outputs.text_edit != 'true'
+    if: >-
+      github.event_name != 'push' && needs.detect.outputs.text_edit != 'true' &&
+      needs.detect.outputs.config_only != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1636,8 +1683,11 @@ jobs:
   # already recorded several times.
   service_immutable:
     # Ledger 685: a text-only edit re-reads the body and nothing else.
+    # Yaadgaar 442: a hook rev bump is checked by `precommit` alone.
     needs: detect
-    if: github.event_name != 'push' && needs.detect.outputs.text_edit != 'true'
+    if: >-
+      github.event_name != 'push' && needs.detect.outputs.text_edit != 'true' &&
+      needs.detect.outputs.config_only != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1789,9 +1839,11 @@ jobs:
   # and the script itself narrates the no-op, visibly, rather than a step
   # silently vanishing from the job list.
   pre_pin_parent:
+    # Yaadgaar 442: a hook rev bump is checked by `precommit` alone.
     needs: detect
     if: >-
       github.event_name != 'push' && needs.detect.outputs.text_edit != 'true'
+      && needs.detect.outputs.config_only != 'true'
       && github.repository != 'yadgarhq/chart'
     runs-on: ubuntu-latest
     steps:
@@ -2349,7 +2401,7 @@ jobs:
         pre_pin_parent,
       ]
     runs-on: ubuntu-latest
-    # ADR-1032: a text-only edit may wait here, bounded by
+    # ADR-1033: a text-only edit may wait here, bounded by
     # `ci_verdict.DEFAULT_WAIT_SECONDS` (600 s), for a full run on the same
     # commit. The wait holds a runner slot, so the job carries its own ceiling:
     # the bound plus five minutes for checkout, setup and the gate itself.
@@ -2442,6 +2494,10 @@ jobs:
           # the pull request's head, which is also the commit an `edited` event
           # cannot change. Reading the wrong one would refuse every edit.
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # YAADGAAR 442: the branch the hook rev bump is compared against,
+          # three-dot, so the diff is the pull request's own however far the
+          # base has moved since.
+          BASE_REF: ${{ github.base_ref }}
           # This run's own id, so its own in-progress `ci / passed` — created
           # when this job started, same name, same commit, newest of them all —
           # is not read as the prior verdict it is asking about.
