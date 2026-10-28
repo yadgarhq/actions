@@ -5,9 +5,20 @@
     "MEASURED, NOT CHOSEN: every list below is the hook set the class's consumers carried on 2026-10-21 (fixtures in scripts/tests/fixtures/fan_out/, each with its source commit in test_fan_out.py). S4 records what exists; this file does not decide which hooks a class should carry.",
     "ORDER is part of the class. Where consumers of one class disagreed on order, the majority wins; on a tie, the order the other rust classes share wins. Each class's `order` field says which repositories that moves.",
     "`live` ARMS A TAG PUSH (first-run safety, review of actions#124). While it is false, a pushed tag runs the fan-out DRY; a dispatch from main with dry_run=false is the explicit human path. Set it true only in a reviewed pull request, after a dry run from main; that pull request's own tag is then the first live run.",
-    "Keys on a hook other than `id` are written into the consumer's block as they are (only `exclude` is measured today). `overrides` replaces a hook's keys for one repository."
+    "Keys on a hook other than `id` are written into the consumer's block as they are (only `exclude` is measured today). `overrides` replaces a hook's keys for one repository.",
+    "`sweep` is YAADGAAR 442 (c): `scripts/sweep.py` merges an adoption pull request only when every condition in its docstring holds. `sweep.live` ARMS IT and ships false; set it true only in a reviewed pull request, after dry runs from main. `sweep.soak_hours` is a PLACEHOLDER, decided before arming. `sweep.exclude` names a consumer the sweeper never touches, and why."
   ],
   "live": true,
+  "sweep": {
+    "live": false,
+    "exclude": {
+      "docs": "Private, so GITHUB_TOKEN cannot read it and R1 refuses it; listed so the report says why it is never swept.",
+      "argocd-verify": "Private, so GITHUB_TOKEN cannot read it and R1 refuses it; listed so the report says why it is never swept."
+    },
+    "soak_hours": 24,
+    "max_merges": 1,
+    "max_refreshes_per_pr_per_day": 3
+  },
   "topic_prefix": "yadgar-class-",
   "exempt": {
     "actions": "The producer. Its own .pre-commit-config.yaml runs its hooks from local paths (`repo: local`) at the commit under test, so it pins no rev to adopt."

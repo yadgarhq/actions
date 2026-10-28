@@ -1,0 +1,793 @@
+{
+  "__about__": {
+    "normalised": [],
+    "pull_request": "yadgarhq/yadgar#98",
+    "recorded": "2026-10-28, read-only GETs as m-agahi"
+  },
+  "graphql": {
+    "data": {
+      "repository": {
+        "pullRequest": {
+          "reviewThreads": {
+            "nodes": [],
+            "totalCount": 0
+          }
+        }
+      }
+    }
+  },
+  "repos/yadgarhq/actions/commits/cee08ee2fc3a411ae36fe788b752e2d9147e052f": {
+    "commit": {
+      "committer": {
+        "date": "2026-10-28T10:00:07Z"
+      }
+    },
+    "sha": "cee08ee2fc3a411ae36fe788b752e2d9147e052f"
+  },
+  "repos/yadgarhq/actions/commits/cee08ee2fc3a411ae36fe788b752e2d9147e052f/pulls": [
+    {
+      "base": {
+        "ref": "main"
+      },
+      "merge_commit_sha": "cee08ee2fc3a411ae36fe788b752e2d9147e052f",
+      "merged_at": "2026-10-28T10:00:08Z",
+      "number": 131,
+      "state": "closed"
+    }
+  ],
+  "repos/yadgarhq/actions/compare/cee08ee2fc3a411ae36fe788b752e2d9147e052f...main": {
+    "ahead_by": 0,
+    "behind_by": 0,
+    "status": "identical"
+  },
+  "repos/yadgarhq/actions/git/ref/tags/v1.38.2": {
+    "object": {
+      "sha": "00a0f92422ea8fd388f7e192bf99b818ad1e38e8",
+      "type": "tag"
+    },
+    "ref": "refs/tags/v1.38.2"
+  },
+  "repos/yadgarhq/actions/git/tags/00a0f92422ea8fd388f7e192bf99b818ad1e38e8": {
+    "object": {
+      "sha": "cee08ee2fc3a411ae36fe788b752e2d9147e052f",
+      "type": "commit"
+    },
+    "sha": "00a0f92422ea8fd388f7e192bf99b818ad1e38e8"
+  },
+  "repos/yadgarhq/yadgar": {
+    "archived": false,
+    "default_branch": "main",
+    "disabled": false,
+    "fork": false,
+    "full_name": "yadgarhq/yadgar",
+    "name": "yadgar",
+    "owner": {
+      "login": "yadgarhq"
+    },
+    "private": false,
+    "topics": ["yadgar-class-rust-app"],
+    "visibility": "public"
+  },
+  "repos/yadgarhq/yadgar/actions/runs?head_sha=605ff11effe6d37f705cd38759a6f1b8577f7dc4&per_page=100": {
+    "total_count": 2,
+    "workflow_runs": [
+      {
+        "check_suite_id": 110231503146,
+        "conclusion": "success",
+        "event": "pull_request",
+        "head_branch": "actions-adopt",
+        "head_sha": "605ff11effe6d37f705cd38759a6f1b8577f7dc4",
+        "id": 40668944046,
+        "name": "ci",
+        "path": ".github/workflows/ci.yaml",
+        "referenced_workflows": [
+          {
+            "path": "yadgarhq/actions/.github/workflows/ci-pr.yaml@main",
+            "ref": "refs/heads/main",
+            "sha": "cee08ee2fc3a411ae36fe788b752e2d9147e052f"
+          }
+        ],
+        "status": "completed"
+      },
+      {
+        "check_suite_id": 110231487521,
+        "conclusion": "success",
+        "event": "dynamic",
+        "head_branch": "refs/pull/98/head",
+        "head_sha": "605ff11effe6d37f705cd38759a6f1b8577f7dc4",
+        "id": 40668938932,
+        "name": "PR #98",
+        "path": "dynamic/github-code-scanning/codeql",
+        "referenced_workflows": [],
+        "status": "completed"
+      }
+    ]
+  },
+  "repos/yadgarhq/yadgar/commits/605ff11effe6d37f705cd38759a6f1b8577f7dc4": {
+    "author": {
+      "id": 324366854,
+      "login": "yadgarhq-bot[bot]",
+      "type": "Bot"
+    },
+    "commit": {
+      "committer": {
+        "date": "2026-10-28T10:02:25Z"
+      },
+      "message": "chore(deps): bump yadgarhq/actions hooks from v1.37.0 to v1.38.2",
+      "verification": {
+        "verified": true
+      }
+    },
+    "committer": {
+      "id": 19864447,
+      "login": "web-flow",
+      "type": "User"
+    },
+    "sha": "605ff11effe6d37f705cd38759a6f1b8577f7dc4"
+  },
+  "repos/yadgarhq/yadgar/commits/605ff11effe6d37f705cd38759a6f1b8577f7dc4/check-runs?per_page=100": {
+    "check_runs": [
+      {
+        "app": {
+          "id": 15368,
+          "slug": "github-actions"
+        },
+        "check_suite": {
+          "id": 110231503146
+        },
+        "conclusion": "success",
+        "head_sha": "605ff11effe6d37f705cd38759a6f1b8577f7dc4",
+        "id": 122752906499,
+        "name": "ci / passed",
+        "status": "completed"
+      },
+      {
+        "app": {
+          "id": 15368,
+          "slug": "github-actions"
+        },
+        "check_suite": {
+          "id": 110231503146
+        },
+        "conclusion": "skipped",
+        "head_sha": "605ff11effe6d37f705cd38759a6f1b8577f7dc4",
+        "id": 122751912777,
+        "name": "ci / workflows",
+        "status": "completed"
+      },
+      {
+        "app": {
+          "id": 15368,
+          "slug": "github-actions"
+        },
+        "check_suite": {
+          "id": 110231503146
+        },
+        "conclusion": "skipped",
+        "head_sha": "605ff11effe6d37f705cd38759a6f1b8577f7dc4",
+        "id": 122751912705,
+        "name": "ci / proto",
+        "status": "completed"
+      },
+      {
+        "app": {
+          "id": 15368,
+          "slug": "github-actions"
+        },
+        "check_suite": {
+          "id": 110231503146
+        },
+        "conclusion": "skipped",
+        "head_sha": "605ff11effe6d37f705cd38759a6f1b8577f7dc4",
+        "id": 122751912637,
+        "name": "ci / portability",
+        "status": "completed"
+      },
+      {
+        "app": {
+          "id": 15368,
+          "slug": "github-actions"
+        },
+        "check_suite": {
+          "id": 110231503146
+        },
+        "conclusion": "skipped",
+        "head_sha": "605ff11effe6d37f705cd38759a6f1b8577f7dc4",
+        "id": 122751912403,
+        "name": "ci / test",
+        "status": "completed"
+      },
+      {
+        "app": {
+          "id": 15368,
+          "slug": "github-actions"
+        },
+        "check_suite": {
+          "id": 110231503146
+        },
+        "conclusion": "skipped",
+        "head_sha": "605ff11effe6d37f705cd38759a6f1b8577f7dc4",
+        "id": 122751912290,
+        "name": "ci / vulnerabilities",
+        "status": "completed"
+      },
+      {
+        "app": {
+          "id": 15368,
+          "slug": "github-actions"
+        },
+        "check_suite": {
+          "id": 110231503146
+        },
+        "conclusion": "skipped",
+        "head_sha": "605ff11effe6d37f705cd38759a6f1b8577f7dc4",
+        "id": 122751912037,
+        "name": "ci / pre_pin_parent",
+        "status": "completed"
+      },
+      {
+        "app": {
+          "id": 15368,
+          "slug": "github-actions"
+        },
+        "check_suite": {
+          "id": 110231503146
+        },
+        "conclusion": "skipped",
+        "head_sha": "605ff11effe6d37f705cd38759a6f1b8577f7dc4",
+        "id": 122751911391,
+        "name": "ci / service_immutable",
+        "status": "completed"
+      },
+      {
+        "app": {
+          "id": 15368,
+          "slug": "github-actions"
+        },
+        "check_suite": {
+          "id": 110231503146
+        },
+        "conclusion": "success",
+        "head_sha": "605ff11effe6d37f705cd38759a6f1b8577f7dc4",
+        "id": 122751909298,
+        "name": "ci / precommit",
+        "status": "completed"
+      },
+      {
+        "app": {
+          "id": 57789,
+          "slug": "github-advanced-security"
+        },
+        "check_suite": {
+          "id": 110232238426
+        },
+        "conclusion": "success",
+        "head_sha": "605ff11effe6d37f705cd38759a6f1b8577f7dc4",
+        "id": 122751399933,
+        "name": "CodeQL",
+        "status": "completed"
+      },
+      {
+        "app": {
+          "id": 15368,
+          "slug": "github-actions"
+        },
+        "check_suite": {
+          "id": 110231503146
+        },
+        "conclusion": "skipped",
+        "head_sha": "605ff11effe6d37f705cd38759a6f1b8577f7dc4",
+        "id": 122750574854,
+        "name": "ci / version",
+        "status": "completed"
+      },
+      {
+        "app": {
+          "id": 15368,
+          "slug": "github-actions"
+        },
+        "check_suite": {
+          "id": 110231503146
+        },
+        "conclusion": "skipped",
+        "head_sha": "605ff11effe6d37f705cd38759a6f1b8577f7dc4",
+        "id": 122750517640,
+        "name": "ci / template",
+        "status": "completed"
+      },
+      {
+        "app": {
+          "id": 15368,
+          "slug": "github-actions"
+        },
+        "check_suite": {
+          "id": 110231503146
+        },
+        "conclusion": "skipped",
+        "head_sha": "605ff11effe6d37f705cd38759a6f1b8577f7dc4",
+        "id": 122750517245,
+        "name": "main",
+        "status": "completed"
+      },
+      {
+        "app": {
+          "id": 15368,
+          "slug": "github-actions"
+        },
+        "check_suite": {
+          "id": 110231503146
+        },
+        "conclusion": "success",
+        "head_sha": "605ff11effe6d37f705cd38759a6f1b8577f7dc4",
+        "id": 122750515954,
+        "name": "ci / detect",
+        "status": "completed"
+      },
+      {
+        "app": {
+          "id": 15368,
+          "slug": "github-actions"
+        },
+        "check_suite": {
+          "id": 110231503146
+        },
+        "conclusion": "success",
+        "head_sha": "605ff11effe6d37f705cd38759a6f1b8577f7dc4",
+        "id": 122750515558,
+        "name": "windows",
+        "status": "completed"
+      },
+      {
+        "app": {
+          "id": 15368,
+          "slug": "github-actions"
+        },
+        "check_suite": {
+          "id": 110231503146
+        },
+        "conclusion": "success",
+        "head_sha": "605ff11effe6d37f705cd38759a6f1b8577f7dc4",
+        "id": 122750515214,
+        "name": "stamp",
+        "status": "completed"
+      },
+      {
+        "app": {
+          "id": 15368,
+          "slug": "github-actions"
+        },
+        "check_suite": {
+          "id": 110231487521
+        },
+        "conclusion": "success",
+        "head_sha": "605ff11effe6d37f705cd38759a6f1b8577f7dc4",
+        "id": 122750503882,
+        "name": "Analyze (rust)",
+        "status": "completed"
+      },
+      {
+        "app": {
+          "id": 15368,
+          "slug": "github-actions"
+        },
+        "check_suite": {
+          "id": 110231487521
+        },
+        "conclusion": "success",
+        "head_sha": "605ff11effe6d37f705cd38759a6f1b8577f7dc4",
+        "id": 122750503335,
+        "name": "Analyze (actions)",
+        "status": "completed"
+      }
+    ],
+    "total_count": 18
+  },
+  "repos/yadgarhq/yadgar/compare/2e4aa972fe7cd1cd208489da70e03f0ecadf96d4...605ff11effe6d37f705cd38759a6f1b8577f7dc4": {
+    "ahead_by": 1,
+    "base_commit": {
+      "sha": "2e4aa972fe7cd1cd208489da70e03f0ecadf96d4"
+    },
+    "behind_by": 2,
+    "commits": [
+      {
+        "sha": "605ff11effe6d37f705cd38759a6f1b8577f7dc4"
+      }
+    ],
+    "files": [
+      {
+        "additions": 1,
+        "changes": 2,
+        "deletions": 1,
+        "filename": ".pre-commit-config.yaml",
+        "patch": "@@ -20,7 +20,7 @@ repos:\n   # at first install and never re-resolves it, so a moving tag would silently\n   # freeze each machine at whatever it meant the day it first ran.\n   - repo: https://github.com/yadgarhq/actions\n-    rev: v1.37.0\n+    rev: v1.38.2\n     hooks:\n       - id: gitleaks\n       - id: prettier",
+        "sha": "15a45c1494441267d22f624a636d0b8ab49d75af",
+        "status": "modified"
+      }
+    ],
+    "merge_base_commit": {
+      "sha": "dbd6e7243f8e2b2da6e91ab51e8f5ccd0e155817"
+    },
+    "status": "diverged",
+    "total_commits": 1
+  },
+  "repos/yadgarhq/yadgar/compare/dbd6e7243f8e2b2da6e91ab51e8f5ccd0e155817...605ff11effe6d37f705cd38759a6f1b8577f7dc4": {
+    "ahead_by": 1,
+    "base_commit": {
+      "sha": "dbd6e7243f8e2b2da6e91ab51e8f5ccd0e155817"
+    },
+    "behind_by": 0,
+    "commits": [
+      {
+        "sha": "605ff11effe6d37f705cd38759a6f1b8577f7dc4"
+      }
+    ],
+    "files": [
+      {
+        "additions": 1,
+        "changes": 2,
+        "deletions": 1,
+        "filename": ".pre-commit-config.yaml",
+        "patch": "@@ -20,7 +20,7 @@ repos:\n   # at first install and never re-resolves it, so a moving tag would silently\n   # freeze each machine at whatever it meant the day it first ran.\n   - repo: https://github.com/yadgarhq/actions\n-    rev: v1.37.0\n+    rev: v1.38.2\n     hooks:\n       - id: gitleaks\n       - id: prettier",
+        "sha": "15a45c1494441267d22f624a636d0b8ab49d75af",
+        "status": "modified"
+      }
+    ],
+    "merge_base_commit": {
+      "sha": "dbd6e7243f8e2b2da6e91ab51e8f5ccd0e155817"
+    },
+    "status": "ahead",
+    "total_commits": 1
+  },
+  "repos/yadgarhq/yadgar/git/blobs/15a45c1494441267d22f624a636d0b8ab49d75af": {
+    "content": "IyBFdmVyeSB5YWRnYXJocSByZXBvIGNhcnJpZXMgcHJlLWNvbW1pdCAoRDU5\nKS4gSG9vayBmYWlsdXJlIGlzIHNpZ25hbCwgbm90CiMgb2JzdGFjbGU6IGZp\neCB0aGUgY2F1c2UgYW5kIHJlLXN0YWdlLiBOZXZlciAtLW5vLXZlcmlmeS4K\ncmVwb3M6CiAgLSByZXBvOiBodHRwczovL2dpdGh1Yi5jb20vcHJlLWNvbW1p\ndC9wcmUtY29tbWl0LWhvb2tzCiAgICByZXY6IHY1LjAuMAogICAgaG9va3M6\nCiAgICAgIC0gaWQ6IHRyYWlsaW5nLXdoaXRlc3BhY2UKICAgICAgLSBpZDog\nZW5kLW9mLWZpbGUtZml4ZXIKICAgICAgLSBpZDogbWl4ZWQtbGluZS1lbmRp\nbmcKICAgICAgICBhcmdzOiBbLS1maXg9bGZdCiAgICAgIC0gaWQ6IGNoZWNr\nLW1lcmdlLWNvbmZsaWN0CiAgICAgIC0gaWQ6IGNoZWNrLWFkZGVkLWxhcmdl\nLWZpbGVzCiAgICAgICMgTm8gZXhjbHVzaW9ucy4gVGhlIHNlcnZpY2VzIGV4\nY2x1ZGUgYGNoYXJ0L3RlbXBsYXRlcy9gIGJlY2F1c2UgYSBIZWxtCiAgICAg\nICMgdGVtcGxhdGUgaXMgYSBHbyB0ZW1wbGF0ZSB0aGF0IG9ubHkgbG9va3Mg\nbGlrZSBZQU1MOyB0aGVyZSBpcyBubyBjaGFydAogICAgICAjIGhlcmUsIHNv\nIGV2ZXJ5IFlBTUwgaW4gdGhpcyByZXBvc2l0b3J5IGlzIHJlYWwgWUFNTC4K\nICAgICAgLSBpZDogY2hlY2steWFtbAogICAgICAtIGlkOiBjaGVjay10b21s\nCgogICMgU2hhcmVkLCBmcm9tIHlhZGdhcmhxL2FjdGlvbnMgKEQ2MikuIElN\nTVVUQUJMRSByZXY6IHByZS1jb21taXQgY2FjaGVzIGEgcmV2CiAgIyBhdCBm\naXJzdCBpbnN0YWxsIGFuZCBuZXZlciByZS1yZXNvbHZlcyBpdCwgc28gYSBt\nb3ZpbmcgdGFnIHdvdWxkIHNpbGVudGx5CiAgIyBmcmVlemUgZWFjaCBtYWNo\naW5lIGF0IHdoYXRldmVyIGl0IG1lYW50IHRoZSBkYXkgaXQgZmlyc3QgcmFu\nLgogIC0gcmVwbzogaHR0cHM6Ly9naXRodWIuY29tL3lhZGdhcmhxL2FjdGlv\nbnMKICAgIHJldjogdjEuMzguMgogICAgaG9va3M6CiAgICAgIC0gaWQ6IGdp\ndGxlYWtzCiAgICAgIC0gaWQ6IHByZXR0aWVyCiAgICAgICMgQSBDT05TVU1F\nUiBJUyBOT1QgTElOVEVEIFVOVElMIElUIFJFRkVSRU5DRVMgVEhFIEhPT0ss\nIHdoaWNoIGlzIHdoeSB0aGlzCiAgICAgICMgbGluZSBleGlzdHMgcmF0aGVy\nIHRoYW4gYmVpbmcgaW5oZXJpdGVkLiBUaGlzIHJlcG9zaXRvcnkgaGFzIGEK\nICAgICAgIyBgLmdpdGh1Yi93b3JrZmxvd3MvYCBhbmQgbm90aGluZyByZWFk\nIGl0OiBgY2ktcHIueWFtbGAgaW5zdGFsbHMgdGhlCiAgICAgICMgYGFjdGlv\nbmxpbnRgIGJpbmFyeSB1bmNvbmRpdGlvbmFsbHkgYW5kIGB5YWRnYXJocS9h\nY3Rpb25zYCBwdWJsaXNoZXMgdGhlCiAgICAgICMgaG9vaywgYnV0IHB1Ymxp\nY2F0aW9uIG1ha2VzIGEgY2hlY2sgQVZBSUxBQkxFIHJhdGhlciB0aGFuIHN3\naXRjaGluZyBpdCBvbgogICAgICAjIChsZWRnZXIgNjIwLCBBRFItMDU3Nyku\nCiAgICAgICMKICAgICAgIyBUaGUgaG9vayBSRUZVU0VTIHJhdGhlciB0aGFu\nIHBhc3NlcyB3aGVuIGFjdGlvbmxpbnQncyBzaGVsbGNoZWNrIHJ1bGUKICAg\nICAgIyBjbGFzcyBpcyBub3QgcnVubmluZzogYWN0aW9ubGludCBzaWxlbnRs\neSBkaXNhYmxlcyB0aGF0IHdob2xlIGNsYXNzIHdoZW4KICAgICAgIyB0aGUg\nYmluYXJ5IGlzIGFic2VudCwgYW5kICJQYXNzZWQsIGhhdmluZyBjaGVja2Vk\nIG5vdGhpbmciIGlzIHRoZSBkZWZlY3QKICAgICAgIyB0aGUgZ3VhcmQgY2xv\nc2VzIHJhdGhlciB0aGFuIGEgc3RhdGUgdGhpcyBjaGVjayBtYXkgcmVwb3J0\nLgogICAgICAtIGlkOiBhY3Rpb25saW50CiAgICAgIC0gaWQ6IGNhcmdvLWZt\ndAogICAgICAtIGlkOiBjYXJnby1jbGlwcHkKICAgICAgIyBUaGUgdHdvIGNv\nbXBsZXhpdHkgZ2F0ZXMsIGFkb3B0ZWQgb24gZGF5IG9uZSByYXRoZXIgdGhh\nbiBvbmNlIHNvbWV0aGluZwogICAgICAjIGlzIGFscmVhZHkgb3ZlciB0aGUg\nbGluZTogNTAwIGxpbmVzIGEgZmlsZSBhbmQgMTIwIGEgZnVuY3Rpb24sIHBs\ndXMKICAgICAgIyBjbGlwcHkncyBuZXN0aW5nIGFuZCBicmFuY2hpbmcgbGlu\ndHMsIHdoaWNoIG1lYXN1cmUgd2hhdCBhIGxpbmUgY291bnQKICAgICAgIyBj\nYW5ub3QuIFN0YXJ0aW5nIGEgcmVwb3NpdG9yeSB3aXRoIGFuIGV4ZW1wdGlv\nbiBsaXN0IGlzIGhvdyBhIGNlaWxpbmcKICAgICAgIyBzdG9wcyBtZWFuaW5n\nIGFueXRoaW5nLgogICAgICAtIGlkOiBjb21wbGV4aXR5CiAgICAgIC0gaWQ6\nIGNhcmdvLWNsaXBweS1jb21wbGV4aXR5CiAgICAgIC0gaWQ6IGNhcmdvLWRl\nbnkKICAgICAgIyBLRVBULCB0aG91Z2ggaXQgY3VycmVudGx5IGZpbmRzIG5v\ndGhpbmcgdG8gY2hlY2s6IHRoZSBjbGllbnQgaW1wbGVtZW50cwogICAgICAj\nIG5vIHRvbmljIHNlcnZpY2UgYW5kIHJlZ2lzdGVycyBubyBIVFRQIHJvdXRl\ncywgc28gdGhlcmUgYXJlIG5vIGhhbmRsZXJzCiAgICAgICMgaGVyZSBhbmQg\ndGhlIGhvb2sgcGFzc2VzIHRyaXZpYWxseS4gSXQgc3RheXMgYmVjYXVzZSB0\naGUgZGF5IG9uZSBhcHBlYXJzCiAgICAgICMgaXMgZXhhY3RseSB0aGUgZGF5\nIG5vYm9keSB3b3VsZCB0aGluayB0byBhZGQgaXQgKEQ2NykuCiAgICAgIC0g\naWQ6IG9ic2VydmUtY292ZXJhZ2UKICAgICAgIyBBRFItMDU2OSdzIGdhdGUg\nKGxlZGdlciA2NDgpLCBwdWJsaXNoZWQgaW4gdjEuMTUuMC4gVGhpcyByZXBv\nc2l0b3J5CiAgICAgICMgbmV2ZXIgY2FycmllZCB0aGUgYnl0ZS1pZGVudGlj\nYWwgbG9jYWwgY29weSB0aGUgZml2ZSBzZXJ2aWNlCiAgICAgICMgcmVwb3Np\ndG9yaWVzIGRpZCwgc28gdGhpcyBpcyBhIHBsYWluIG5ldy1pZCBhZG9wdGlv\nbi4KICAgICAgLSBpZDogbm8tY29tcGlsZWQtaW4tZGVmYXVsdHMKICAgICAg\nIyBMRURHRVIgNjU4LiBBZG9wdGVkIHRob3VnaCBpdCBjaGVja3Mgbm90aGlu\nZyB0b2RheTogdGhlIGxhcmdlc3QgYHJ1bjpgCiAgICAgICMgYmxvY2sgb3V0\nc2lkZSB5YWRnYXJocS9hY3Rpb25zIGlzIDMwMyBieXRlcyBhZ2FpbnN0IGFu\nIDgwMDAtYnl0ZSBsaW1pdCwKICAgICAgIyBhbmQgdGhpcyByZXBvc2l0b3J5\nIG1lYXN1cmVzIDAuIEl0IGlzIGEgdHJpcHdpcmUgZm9yIGEgYmxvY2sgc29t\nZW9uZQogICAgICAjIHdyaXRlcyBsYXRlciwgbm90IGEgZml4IGZvciBhbnl0\naGluZyBwcmVzZW50IG5vdy4KICAgICAgLSBpZDogcnVuLWJsb2NrLXNpemUK\nICAgICAgIyBMRURHRVIgODM3LCBhbmQgd29ydGggYmVpbmcgcGxhaW4gYWJv\ndXQgd2hhdCBpdCBhY3R1YWxseSBjYXRjaGVzOiBhCiAgICAgICMgc2tpcCBt\nYXJrZXIsIGFuIHVuc2F0aXNmaWFibGUgYGNmZ2AsIGFuIGVudmlyb25tZW50\nLXByb2JlIGd1YXJkIGFzIGEKICAgICAgIyB0ZXN0J3MgZmlyc3Qgc3RhdGVt\nZW50LCBhIG5hcnJvd2VkIGBjYXJnbyB0ZXN0YC9weXRlc3QgaW52b2NhdGlv\nbiwgb3IKICAgICAgIyBhIGNhcHR1cmVkIHJ1biB3aG9zZSBleGl0IGNvZGUg\naXMgdGhyb3duIGF3YXkuIEFEUi0wNTc3IGFnYWluIOKAlCBhCiAgICAgICMg\ncHVibGlzaGVkIGhvb2sgbm9ib2R5IHJlZmVyZW5jZXMgZ2F0ZXMgbm90aGlu\nZywgYW5kIHRoaXMgaXMgdGhlCiAgICAgICMgcmVmZXJlbmNlIHRoYXQgbWFr\nZXMgaXQgZ2F0ZSB0aGlzIHJlcG9zaXRvcnkuIFRoZSBzYW1lIHJldiBidW1w\nIGFsc28KICAgICAgIyBjYXJyaWVzIHYxLjE5LjAncyBgb2JzZXJ2ZS1jb3Zl\ncmFnZWAgdGlnaHRlbmluZywgd2hpY2ggdGhpcwogICAgICAjIHJlcG9zaXRv\ncnkncyBvd24gaG9vayBydW4gc2hvd3MgcmVmdXNlcyBub3RoaW5nIGhlcmUu\nCiAgICAgIC0gaWQ6IG5vLXRlc3Qtc2tpcHMKCiAgIyBOT1QgYGhhZG9saW50\nYCBhbmQgTk9UIGBoZWxtLWxpbnRgLCBhbmQgdGhlaXIgYWJzZW5jZSBpcyBh\nIGZhY3QgYWJvdXQgdGhpcwogICMgcmVwb3NpdG9yeSByYXRoZXIgdGhhbiBh\nIHJlbGF4YXRpb246IHRoZSBmaXJzdCBtYXRjaGVzIGB0eXBlczogW2RvY2tl\ncmZpbGVdYAogICMgYW5kIHRoZSBzZWNvbmQgYGZpbGVzOiBeY2hhcnQvYCwg\nYW5kIHRoaXMgcmVwb3NpdG9yeSBzaGlwcyBhIHdoZWVsIHJhdGhlcgogICMg\ndGhhbiBhbiBpbWFnZSBvciBhIGNoYXJ0LCBzbyBib3RoIHdvdWxkIGJlIHBl\ncm1hbmVudGx5IGluZXJ0LiBBIGhvb2sgdGhhdCBjYW4KICAjIG5ldmVyIGZp\ncmUgaXMgaW5kaXN0aW5ndWlzaGFibGUgZnJvbSBvbmUgdGhhdCBpcyBicm9r\nZW4uCg==\n",
+    "encoding": "base64",
+    "sha": "15a45c1494441267d22f624a636d0b8ab49d75af",
+    "size": 4144
+  },
+  "repos/yadgarhq/yadgar/git/blobs/e94c6c83b4f581161aa6d08c993cda5e5093b7c8": {
+    "content": "IyBFdmVyeSB5YWRnYXJocSByZXBvIGNhcnJpZXMgcHJlLWNvbW1pdCAoRDU5\nKS4gSG9vayBmYWlsdXJlIGlzIHNpZ25hbCwgbm90CiMgb2JzdGFjbGU6IGZp\neCB0aGUgY2F1c2UgYW5kIHJlLXN0YWdlLiBOZXZlciAtLW5vLXZlcmlmeS4K\ncmVwb3M6CiAgLSByZXBvOiBodHRwczovL2dpdGh1Yi5jb20vcHJlLWNvbW1p\ndC9wcmUtY29tbWl0LWhvb2tzCiAgICByZXY6IHY1LjAuMAogICAgaG9va3M6\nCiAgICAgIC0gaWQ6IHRyYWlsaW5nLXdoaXRlc3BhY2UKICAgICAgLSBpZDog\nZW5kLW9mLWZpbGUtZml4ZXIKICAgICAgLSBpZDogbWl4ZWQtbGluZS1lbmRp\nbmcKICAgICAgICBhcmdzOiBbLS1maXg9bGZdCiAgICAgIC0gaWQ6IGNoZWNr\nLW1lcmdlLWNvbmZsaWN0CiAgICAgIC0gaWQ6IGNoZWNrLWFkZGVkLWxhcmdl\nLWZpbGVzCiAgICAgICMgTm8gZXhjbHVzaW9ucy4gVGhlIHNlcnZpY2VzIGV4\nY2x1ZGUgYGNoYXJ0L3RlbXBsYXRlcy9gIGJlY2F1c2UgYSBIZWxtCiAgICAg\nICMgdGVtcGxhdGUgaXMgYSBHbyB0ZW1wbGF0ZSB0aGF0IG9ubHkgbG9va3Mg\nbGlrZSBZQU1MOyB0aGVyZSBpcyBubyBjaGFydAogICAgICAjIGhlcmUsIHNv\nIGV2ZXJ5IFlBTUwgaW4gdGhpcyByZXBvc2l0b3J5IGlzIHJlYWwgWUFNTC4K\nICAgICAgLSBpZDogY2hlY2steWFtbAogICAgICAtIGlkOiBjaGVjay10b21s\nCgogICMgU2hhcmVkLCBmcm9tIHlhZGdhcmhxL2FjdGlvbnMgKEQ2MikuIElN\nTVVUQUJMRSByZXY6IHByZS1jb21taXQgY2FjaGVzIGEgcmV2CiAgIyBhdCBm\naXJzdCBpbnN0YWxsIGFuZCBuZXZlciByZS1yZXNvbHZlcyBpdCwgc28gYSBt\nb3ZpbmcgdGFnIHdvdWxkIHNpbGVudGx5CiAgIyBmcmVlemUgZWFjaCBtYWNo\naW5lIGF0IHdoYXRldmVyIGl0IG1lYW50IHRoZSBkYXkgaXQgZmlyc3QgcmFu\nLgogIC0gcmVwbzogaHR0cHM6Ly9naXRodWIuY29tL3lhZGdhcmhxL2FjdGlv\nbnMKICAgIHJldjogdjEuMzcuMAogICAgaG9va3M6CiAgICAgIC0gaWQ6IGdp\ndGxlYWtzCiAgICAgIC0gaWQ6IHByZXR0aWVyCiAgICAgICMgQSBDT05TVU1F\nUiBJUyBOT1QgTElOVEVEIFVOVElMIElUIFJFRkVSRU5DRVMgVEhFIEhPT0ss\nIHdoaWNoIGlzIHdoeSB0aGlzCiAgICAgICMgbGluZSBleGlzdHMgcmF0aGVy\nIHRoYW4gYmVpbmcgaW5oZXJpdGVkLiBUaGlzIHJlcG9zaXRvcnkgaGFzIGEK\nICAgICAgIyBgLmdpdGh1Yi93b3JrZmxvd3MvYCBhbmQgbm90aGluZyByZWFk\nIGl0OiBgY2ktcHIueWFtbGAgaW5zdGFsbHMgdGhlCiAgICAgICMgYGFjdGlv\nbmxpbnRgIGJpbmFyeSB1bmNvbmRpdGlvbmFsbHkgYW5kIGB5YWRnYXJocS9h\nY3Rpb25zYCBwdWJsaXNoZXMgdGhlCiAgICAgICMgaG9vaywgYnV0IHB1Ymxp\nY2F0aW9uIG1ha2VzIGEgY2hlY2sgQVZBSUxBQkxFIHJhdGhlciB0aGFuIHN3\naXRjaGluZyBpdCBvbgogICAgICAjIChsZWRnZXIgNjIwLCBBRFItMDU3Nyku\nCiAgICAgICMKICAgICAgIyBUaGUgaG9vayBSRUZVU0VTIHJhdGhlciB0aGFu\nIHBhc3NlcyB3aGVuIGFjdGlvbmxpbnQncyBzaGVsbGNoZWNrIHJ1bGUKICAg\nICAgIyBjbGFzcyBpcyBub3QgcnVubmluZzogYWN0aW9ubGludCBzaWxlbnRs\neSBkaXNhYmxlcyB0aGF0IHdob2xlIGNsYXNzIHdoZW4KICAgICAgIyB0aGUg\nYmluYXJ5IGlzIGFic2VudCwgYW5kICJQYXNzZWQsIGhhdmluZyBjaGVja2Vk\nIG5vdGhpbmciIGlzIHRoZSBkZWZlY3QKICAgICAgIyB0aGUgZ3VhcmQgY2xv\nc2VzIHJhdGhlciB0aGFuIGEgc3RhdGUgdGhpcyBjaGVjayBtYXkgcmVwb3J0\nLgogICAgICAtIGlkOiBhY3Rpb25saW50CiAgICAgIC0gaWQ6IGNhcmdvLWZt\ndAogICAgICAtIGlkOiBjYXJnby1jbGlwcHkKICAgICAgIyBUaGUgdHdvIGNv\nbXBsZXhpdHkgZ2F0ZXMsIGFkb3B0ZWQgb24gZGF5IG9uZSByYXRoZXIgdGhh\nbiBvbmNlIHNvbWV0aGluZwogICAgICAjIGlzIGFscmVhZHkgb3ZlciB0aGUg\nbGluZTogNTAwIGxpbmVzIGEgZmlsZSBhbmQgMTIwIGEgZnVuY3Rpb24sIHBs\ndXMKICAgICAgIyBjbGlwcHkncyBuZXN0aW5nIGFuZCBicmFuY2hpbmcgbGlu\ndHMsIHdoaWNoIG1lYXN1cmUgd2hhdCBhIGxpbmUgY291bnQKICAgICAgIyBj\nYW5ub3QuIFN0YXJ0aW5nIGEgcmVwb3NpdG9yeSB3aXRoIGFuIGV4ZW1wdGlv\nbiBsaXN0IGlzIGhvdyBhIGNlaWxpbmcKICAgICAgIyBzdG9wcyBtZWFuaW5n\nIGFueXRoaW5nLgogICAgICAtIGlkOiBjb21wbGV4aXR5CiAgICAgIC0gaWQ6\nIGNhcmdvLWNsaXBweS1jb21wbGV4aXR5CiAgICAgIC0gaWQ6IGNhcmdvLWRl\nbnkKICAgICAgIyBLRVBULCB0aG91Z2ggaXQgY3VycmVudGx5IGZpbmRzIG5v\ndGhpbmcgdG8gY2hlY2s6IHRoZSBjbGllbnQgaW1wbGVtZW50cwogICAgICAj\nIG5vIHRvbmljIHNlcnZpY2UgYW5kIHJlZ2lzdGVycyBubyBIVFRQIHJvdXRl\ncywgc28gdGhlcmUgYXJlIG5vIGhhbmRsZXJzCiAgICAgICMgaGVyZSBhbmQg\ndGhlIGhvb2sgcGFzc2VzIHRyaXZpYWxseS4gSXQgc3RheXMgYmVjYXVzZSB0\naGUgZGF5IG9uZSBhcHBlYXJzCiAgICAgICMgaXMgZXhhY3RseSB0aGUgZGF5\nIG5vYm9keSB3b3VsZCB0aGluayB0byBhZGQgaXQgKEQ2NykuCiAgICAgIC0g\naWQ6IG9ic2VydmUtY292ZXJhZ2UKICAgICAgIyBBRFItMDU2OSdzIGdhdGUg\nKGxlZGdlciA2NDgpLCBwdWJsaXNoZWQgaW4gdjEuMTUuMC4gVGhpcyByZXBv\nc2l0b3J5CiAgICAgICMgbmV2ZXIgY2FycmllZCB0aGUgYnl0ZS1pZGVudGlj\nYWwgbG9jYWwgY29weSB0aGUgZml2ZSBzZXJ2aWNlCiAgICAgICMgcmVwb3Np\ndG9yaWVzIGRpZCwgc28gdGhpcyBpcyBhIHBsYWluIG5ldy1pZCBhZG9wdGlv\nbi4KICAgICAgLSBpZDogbm8tY29tcGlsZWQtaW4tZGVmYXVsdHMKICAgICAg\nIyBMRURHRVIgNjU4LiBBZG9wdGVkIHRob3VnaCBpdCBjaGVja3Mgbm90aGlu\nZyB0b2RheTogdGhlIGxhcmdlc3QgYHJ1bjpgCiAgICAgICMgYmxvY2sgb3V0\nc2lkZSB5YWRnYXJocS9hY3Rpb25zIGlzIDMwMyBieXRlcyBhZ2FpbnN0IGFu\nIDgwMDAtYnl0ZSBsaW1pdCwKICAgICAgIyBhbmQgdGhpcyByZXBvc2l0b3J5\nIG1lYXN1cmVzIDAuIEl0IGlzIGEgdHJpcHdpcmUgZm9yIGEgYmxvY2sgc29t\nZW9uZQogICAgICAjIHdyaXRlcyBsYXRlciwgbm90IGEgZml4IGZvciBhbnl0\naGluZyBwcmVzZW50IG5vdy4KICAgICAgLSBpZDogcnVuLWJsb2NrLXNpemUK\nICAgICAgIyBMRURHRVIgODM3LCBhbmQgd29ydGggYmVpbmcgcGxhaW4gYWJv\ndXQgd2hhdCBpdCBhY3R1YWxseSBjYXRjaGVzOiBhCiAgICAgICMgc2tpcCBt\nYXJrZXIsIGFuIHVuc2F0aXNmaWFibGUgYGNmZ2AsIGFuIGVudmlyb25tZW50\nLXByb2JlIGd1YXJkIGFzIGEKICAgICAgIyB0ZXN0J3MgZmlyc3Qgc3RhdGVt\nZW50LCBhIG5hcnJvd2VkIGBjYXJnbyB0ZXN0YC9weXRlc3QgaW52b2NhdGlv\nbiwgb3IKICAgICAgIyBhIGNhcHR1cmVkIHJ1biB3aG9zZSBleGl0IGNvZGUg\naXMgdGhyb3duIGF3YXkuIEFEUi0wNTc3IGFnYWluIOKAlCBhCiAgICAgICMg\ncHVibGlzaGVkIGhvb2sgbm9ib2R5IHJlZmVyZW5jZXMgZ2F0ZXMgbm90aGlu\nZywgYW5kIHRoaXMgaXMgdGhlCiAgICAgICMgcmVmZXJlbmNlIHRoYXQgbWFr\nZXMgaXQgZ2F0ZSB0aGlzIHJlcG9zaXRvcnkuIFRoZSBzYW1lIHJldiBidW1w\nIGFsc28KICAgICAgIyBjYXJyaWVzIHYxLjE5LjAncyBgb2JzZXJ2ZS1jb3Zl\ncmFnZWAgdGlnaHRlbmluZywgd2hpY2ggdGhpcwogICAgICAjIHJlcG9zaXRv\ncnkncyBvd24gaG9vayBydW4gc2hvd3MgcmVmdXNlcyBub3RoaW5nIGhlcmUu\nCiAgICAgIC0gaWQ6IG5vLXRlc3Qtc2tpcHMKCiAgIyBOT1QgYGhhZG9saW50\nYCBhbmQgTk9UIGBoZWxtLWxpbnRgLCBhbmQgdGhlaXIgYWJzZW5jZSBpcyBh\nIGZhY3QgYWJvdXQgdGhpcwogICMgcmVwb3NpdG9yeSByYXRoZXIgdGhhbiBh\nIHJlbGF4YXRpb246IHRoZSBmaXJzdCBtYXRjaGVzIGB0eXBlczogW2RvY2tl\ncmZpbGVdYAogICMgYW5kIHRoZSBzZWNvbmQgYGZpbGVzOiBeY2hhcnQvYCwg\nYW5kIHRoaXMgcmVwb3NpdG9yeSBzaGlwcyBhIHdoZWVsIHJhdGhlcgogICMg\ndGhhbiBhbiBpbWFnZSBvciBhIGNoYXJ0LCBzbyBib3RoIHdvdWxkIGJlIHBl\ncm1hbmVudGx5IGluZXJ0LiBBIGhvb2sgdGhhdCBjYW4KICAjIG5ldmVyIGZp\ncmUgaXMgaW5kaXN0aW5ndWlzaGFibGUgZnJvbSBvbmUgdGhhdCBpcyBicm9r\nZW4uCg==\n",
+    "encoding": "base64",
+    "sha": "e94c6c83b4f581161aa6d08c993cda5e5093b7c8",
+    "size": 4144
+  },
+  "repos/yadgarhq/yadgar/git/ref/heads/main": {
+    "object": {
+      "sha": "2e4aa972fe7cd1cd208489da70e03f0ecadf96d4",
+      "type": "commit"
+    },
+    "ref": "refs/heads/main"
+  },
+  "repos/yadgarhq/yadgar/git/trees/2e4aa972fe7cd1cd208489da70e03f0ecadf96d4": {
+    "sha": "2e4aa972fe7cd1cd208489da70e03f0ecadf96d4",
+    "tree": [
+      {
+        "mode": "040000",
+        "path": ".github",
+        "sha": "1094f08be7c72425e6a982593f2db3ceeea4c134",
+        "type": "tree"
+      },
+      {
+        "mode": "100644",
+        "path": ".gitignore",
+        "sha": "5a8482bf08ea5dfd101e0a0d184d77bc935abfd6",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": ".pre-commit-config.yaml",
+        "sha": "e94c6c83b4f581161aa6d08c993cda5e5093b7c8",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": ".prettierignore",
+        "sha": "eb5a316cbd195d26e3f768c7dd8e1b47299e17f8",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": ".prettierrc",
+        "sha": "64182b10f895d77b05bf3c25d932b5b350794744",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": "Cargo.lock",
+        "sha": "e71f8dfd389b166e0142d1e9bd70cbc1919a132e",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": "Cargo.toml",
+        "sha": "4b4e7440fbd3dd114eb6bcb08dae68d2fe584173",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": "Makefile",
+        "sha": "1cc7e4cb8cbe98ae24f38f2acf3a080e16facd1c",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": "README.md",
+        "sha": "1fcfad50742cddc787b863ab4d11b88111e059d1",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": "deny.toml",
+        "sha": "b02cf9e2e910569b5749d80abeb8336afc6bd3f7",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": "pyproject.toml",
+        "sha": "8f61bdb97ae0e41d941adfb464ab2d9ddc646376",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": "rust-toolchain.toml",
+        "sha": "e67b7639d51d0e08f7b60830146464e5e928f0d3",
+        "type": "blob"
+      },
+      {
+        "mode": "040000",
+        "path": "scripts",
+        "sha": "b150ea401437e0dc6b5c3433357f135e6a60fb1d",
+        "type": "tree"
+      },
+      {
+        "mode": "040000",
+        "path": "src",
+        "sha": "d41690acf33efd5769667a5a52d41fc19f2fa968",
+        "type": "tree"
+      },
+      {
+        "mode": "040000",
+        "path": "tests",
+        "sha": "80068d15540a52a3d0545cd79ba555a0b4e89a46",
+        "type": "tree"
+      }
+    ],
+    "truncated": false
+  },
+  "repos/yadgarhq/yadgar/git/trees/605ff11effe6d37f705cd38759a6f1b8577f7dc4": {
+    "sha": "605ff11effe6d37f705cd38759a6f1b8577f7dc4",
+    "tree": [
+      {
+        "mode": "040000",
+        "path": ".github",
+        "sha": "1094f08be7c72425e6a982593f2db3ceeea4c134",
+        "type": "tree"
+      },
+      {
+        "mode": "100644",
+        "path": ".gitignore",
+        "sha": "5a8482bf08ea5dfd101e0a0d184d77bc935abfd6",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": ".pre-commit-config.yaml",
+        "sha": "15a45c1494441267d22f624a636d0b8ab49d75af",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": ".prettierignore",
+        "sha": "eb5a316cbd195d26e3f768c7dd8e1b47299e17f8",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": ".prettierrc",
+        "sha": "64182b10f895d77b05bf3c25d932b5b350794744",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": "Cargo.lock",
+        "sha": "e71f8dfd389b166e0142d1e9bd70cbc1919a132e",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": "Cargo.toml",
+        "sha": "4b4e7440fbd3dd114eb6bcb08dae68d2fe584173",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": "Makefile",
+        "sha": "1cc7e4cb8cbe98ae24f38f2acf3a080e16facd1c",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": "README.md",
+        "sha": "1fcfad50742cddc787b863ab4d11b88111e059d1",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": "deny.toml",
+        "sha": "b02cf9e2e910569b5749d80abeb8336afc6bd3f7",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": "pyproject.toml",
+        "sha": "8f61bdb97ae0e41d941adfb464ab2d9ddc646376",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": "rust-toolchain.toml",
+        "sha": "e67b7639d51d0e08f7b60830146464e5e928f0d3",
+        "type": "blob"
+      },
+      {
+        "mode": "040000",
+        "path": "scripts",
+        "sha": "b150ea401437e0dc6b5c3433357f135e6a60fb1d",
+        "type": "tree"
+      },
+      {
+        "mode": "040000",
+        "path": "src",
+        "sha": "bd9e9ddb814b37809d6ef6d00b03838a19177883",
+        "type": "tree"
+      },
+      {
+        "mode": "040000",
+        "path": "tests",
+        "sha": "80068d15540a52a3d0545cd79ba555a0b4e89a46",
+        "type": "tree"
+      }
+    ],
+    "truncated": false
+  },
+  "repos/yadgarhq/yadgar/git/trees/dbd6e7243f8e2b2da6e91ab51e8f5ccd0e155817": {
+    "sha": "dbd6e7243f8e2b2da6e91ab51e8f5ccd0e155817",
+    "tree": [
+      {
+        "mode": "040000",
+        "path": ".github",
+        "sha": "1094f08be7c72425e6a982593f2db3ceeea4c134",
+        "type": "tree"
+      },
+      {
+        "mode": "100644",
+        "path": ".gitignore",
+        "sha": "5a8482bf08ea5dfd101e0a0d184d77bc935abfd6",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": ".pre-commit-config.yaml",
+        "sha": "e94c6c83b4f581161aa6d08c993cda5e5093b7c8",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": ".prettierignore",
+        "sha": "eb5a316cbd195d26e3f768c7dd8e1b47299e17f8",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": ".prettierrc",
+        "sha": "64182b10f895d77b05bf3c25d932b5b350794744",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": "Cargo.lock",
+        "sha": "e71f8dfd389b166e0142d1e9bd70cbc1919a132e",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": "Cargo.toml",
+        "sha": "4b4e7440fbd3dd114eb6bcb08dae68d2fe584173",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": "Makefile",
+        "sha": "1cc7e4cb8cbe98ae24f38f2acf3a080e16facd1c",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": "README.md",
+        "sha": "1fcfad50742cddc787b863ab4d11b88111e059d1",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": "deny.toml",
+        "sha": "b02cf9e2e910569b5749d80abeb8336afc6bd3f7",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": "pyproject.toml",
+        "sha": "8f61bdb97ae0e41d941adfb464ab2d9ddc646376",
+        "type": "blob"
+      },
+      {
+        "mode": "100644",
+        "path": "rust-toolchain.toml",
+        "sha": "e67b7639d51d0e08f7b60830146464e5e928f0d3",
+        "type": "blob"
+      },
+      {
+        "mode": "040000",
+        "path": "scripts",
+        "sha": "b150ea401437e0dc6b5c3433357f135e6a60fb1d",
+        "type": "tree"
+      },
+      {
+        "mode": "040000",
+        "path": "src",
+        "sha": "bd9e9ddb814b37809d6ef6d00b03838a19177883",
+        "type": "tree"
+      },
+      {
+        "mode": "040000",
+        "path": "tests",
+        "sha": "80068d15540a52a3d0545cd79ba555a0b4e89a46",
+        "type": "tree"
+      }
+    ],
+    "truncated": false
+  },
+  "repos/yadgarhq/yadgar/issues/98/timeline?per_page=100": [
+    {
+      "event": "committed"
+    }
+  ],
+  "repos/yadgarhq/yadgar/pulls/98": {
+    "base": {
+      "ref": "main",
+      "repo": {
+        "full_name": "yadgarhq/yadgar"
+      },
+      "sha": "dbd6e7243f8e2b2da6e91ab51e8f5ccd0e155817"
+    },
+    "body": "## What\n\nMoves the `yadgarhq/actions` hook block of `yadgarhq/yadgar` from `v1.37.0` to `v1.38.2`. The block is regenerated from the `rust-app` class (topic `yadgar-class-rust-app`), as `classes.json` in `yadgarhq/actions` defines it.\n\nThe hook ids, their order and their keys already match the class, so the `rev:` line is the only change.\n\nNo other block of `.pre-commit-config.yaml` changed.\n\n## Why\n\nADR-0982: an `actions` release opens one adoption pull request per consumer, found by its class topic. ADR-0561 rules that a release fires them; ADR-0635 rules that a hook set is generated from its class. Before this, every rev bump was a hand edit and nothing detected drift.\n\nOpened by the `fan-out` workflow in `yadgarhq/actions`, as the `yadgarhq-bot` App. It proposes and never merges (ADR-0690, ADR-0531). ADR-0983: the run's report says which consumers carry `v1.38.2`.\n\n## Changelog\n\nNo release: a hook adoption changes developer tooling only, so this body carries no Conventional Commits entry and the `version` job cuts no tag for it.\n\n## Verification\n\n`ci / passed` on this pull request runs this repository's pre-commit at the new rev; that run IS the verification. Nothing was run before the pull request was opened. A repository with no CI needs `pre-commit run --all-files` on this branch before the merge.\n\nThe release range to read: https://github.com/yadgarhq/actions/compare/v1.37.0...v1.38.2\n\n## Risk\n\nMerging cuts no release of this repository. The hook block is developer tooling and is not part of what the repository ships, so the change waits for the next release a person cuts.\n\nA newer hook can red a check that passed at the old rev. That is the gate working: fix the cause in its own pull request, and never widen the gate to make it pass.\n\nA commit a person adds to this branch lands with no release, because the squash keeps the bot as author. Put such a fix in its own pull request.\n\nReversible: restore `rev: v1.37.0`. A published tag never moves, so the old rev still names the same hooks.\n\nD80: this changes developer tooling only. It renders no resource, names no cloud and no ingress implementation, and adds no trust boundary.\n",
+    "draft": false,
+    "head": {
+      "ref": "actions-adopt",
+      "repo": {
+        "full_name": "yadgarhq/yadgar"
+      },
+      "sha": "605ff11effe6d37f705cd38759a6f1b8577f7dc4"
+    },
+    "html_url": "https://github.com/yadgarhq/yadgar/pull/98",
+    "labels": [],
+    "locked": false,
+    "merge_commit_sha": "f8f20292b31d11a714f316eb2007b6dfdc1c5f52",
+    "mergeable": true,
+    "mergeable_state": "behind",
+    "merged": false,
+    "merged_at": null,
+    "number": 98,
+    "state": "open",
+    "title": "chore(deps): bump yadgarhq/actions hooks from v1.37.0 to v1.38.2",
+    "user": {
+      "id": 324366854,
+      "login": "yadgarhq-bot[bot]",
+      "type": "Bot"
+    }
+  },
+  "repos/yadgarhq/yadgar/pulls/98/commits?per_page=100": [
+    {
+      "sha": "605ff11effe6d37f705cd38759a6f1b8577f7dc4"
+    }
+  ],
+  "repos/yadgarhq/yadgar/pulls/98/reviews?per_page=100": []
+}
