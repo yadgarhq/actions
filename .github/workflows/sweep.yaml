@@ -5,7 +5,9 @@ name: sweep
 # This workflow finds those pull requests and merges one only when every
 # condition in `scripts/sweep.py` holds, read from the GitHub API in this run.
 # A pull request that is only BEHIND its base is refreshed instead: the branch
-# is reset to the base tip and the same file written again, so CI runs fresh.
+# moves in one ref write to a new commit on the base tip carrying the same
+# file, so CI runs fresh. It never passes through the base tip: head == base
+# closes the pull request (yaadgaar 466).
 #
 # DRY UNTIL ARMED. `sweep.py mode` says `live=true` only when `classes.json`
 # has `"sweep": {"live": true}`, the ref is `main`, and the run is the schedule
@@ -16,9 +18,10 @@ name: sweep
 # READS USE GITHUB_TOKEN. R1 admits only public repositories, and the listing
 # asks for public ones only, so no read here needs the App. The App token is
 # minted per `act` leg, scoped by `repositories:` to that leg's one repository,
-# with `contents: write` and nothing else: the squash merge, the ref reset and
-# the file write are the only calls made with it (the REST permission table
-# lists `contents: write` for each of the three).
+# with `contents: write` and nothing else: the squash merge and the branch
+# rewrite (git data API blob, tree, commit and ref, plus two commit reads) are
+# the only calls made with it (the REST permission table lists `contents`
+# for each of them).
 #
 # NOT THE FAN-OUT'S CONCURRENCY GROUP. A queued sweep must never cancel or delay
 # a tag-push fan-out; `sweep.py` instead stops when a fan-out run is in progress

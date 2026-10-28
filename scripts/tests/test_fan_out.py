@@ -446,6 +446,7 @@ class Fake:
         self.actions_tags = list(actions_tags)
         self.next_pr = 100
         self.next_sha = 0
+        self.moves = []
 
     # reads
     def list_repos(self, owner):
@@ -489,25 +490,27 @@ class Fake:
             raise AssertionError(f"a write in a dry run: {what}")
         self.writes.append(what)
 
-    def create_ref(self, owner, repo, branch, sha):
-        self._write("create_ref", repo, branch)
-        self.repos[repo]["branches"][branch] = sha
-
-    def reset_ref(self, owner, repo, branch, sha):
-        self._write("reset_ref", repo, branch)
-        self.repos[repo]["branches"][branch] = sha
-
-    def put_file(self, owner, repo, path, branch, text, blob, message):
-        self._write("put_file", repo, branch)
+    def _move(self, repo, branch, sha):
+        """Every ref write lands here, as GitHub would see it: a pull request
+        whose head becomes its base is CLOSED (yaadgaar 466)."""
         r = self.repos[repo]
-        parent = r["branches"][branch]
-        assert blob == f"blob-{parent}-{path}", "stale blob sha"
+        self.moves.append((repo, branch, sha, r["branches"]["main"]))
+        r["branches"][branch] = sha
+        if sha == r["branches"]["main"]:
+            for p in r.get("prs", []):
+                if p["head"] == branch and p["state"] == "open":
+                    p["state"] = "closed"
+
+    def rewrite_branch(self, owner, repo, branch, parent, path, text, message, exists):
+        self._write("rewrite_branch", repo, branch, parent, exists)
+        r = self.repos[repo]
+        assert (branch in r["branches"]) == exists, "exists disagrees with the branch"
         self.next_sha += 1
         sha = f"c{self.next_sha}"
         r["commits"][sha] = {**r["commits"][parent], path: text}
         r.setdefault("meta", {})[sha] = {"parent": parent, "author": fan_out.BOT,
                                           "message": message}
-        r["branches"][branch] = sha
+        self._move(repo, branch, sha)
 
     def create_pr(self, owner, repo, base, branch, title, body):
         self._write("create_pr", repo, branch)
@@ -612,7 +615,7 @@ def test_a_rerun_after_main_moved_updates_the_same_branch_and_pull_request():
     rows, _ = fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=True)
     assert by_repo(rows)["docs"]["status"] == "updated"
     kinds = [w[0] for w in gh.writes]
-    assert kinds == ["reset_ref", "put_file"]
+    assert kinds == ["rewrite_branch"]
     assert len(r["prs"]) == 1
     head = r["commits"][r["branches"]["actions-adopt"]]
     assert head[".pre-commit-config.yaml"].endswith("# later\n")
@@ -631,11 +634,12 @@ def moved_to_a_new_tag():
                              ".pre-commit-config.yaml": fixture("docs") + "# later\n"}
     r["branches"]["main"] = "base2"
     gh.writes.clear()
+    gh.moves.clear()
     return gh, r
 
 
 def test_the_pull_request_is_edited_before_its_branch_moves():
-    """YAADGAAR 440 / ADR-1033: `update_pr` comes BEFORE `reset_ref` and `put_file`.
+    """YAADGAAR 440 / ADR-1033: `update_pr` comes BEFORE the branch moves.
 
     An `edited` event's payload carries the head at edit time. Edited first, the
     text-only run lands on the OLD head, which already carries a verdict, and
@@ -646,7 +650,7 @@ def test_the_pull_request_is_edited_before_its_branch_moves():
     rows, _ = fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=True)
     assert by_repo(rows)["docs"]["status"] == "updated"
     kinds = [w[0] for w in gh.writes if w[1] == "docs"]
-    assert kinds == ["update_pr", "reset_ref", "put_file"]
+    assert kinds == ["update_pr", "rewrite_branch"]
     assert fan_out.target_of(r["prs"][0]["title"]) == "v1.35.0"
 
 
@@ -669,7 +673,7 @@ def test_a_branch_left_without_a_pull_request_is_reused_not_duplicated():
     gh.repos["argocd"]["branches"]["actions-adopt"] = "base"
     rows, _ = fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=True)
     writes = [w for w in gh.writes if w[1] == "argocd"]
-    assert [w[0] for w in writes] == ["reset_ref", "put_file", "create_pr"]
+    assert [w[0] for w in writes] == ["rewrite_branch", "create_pr"]
     assert by_repo(rows)["argocd"]["status"] == "opened"
 
 
@@ -1454,3 +1458,224 @@ def test_the_workflow_runs_on_main_in_dry_mode_as_report_only():
     text = WORKFLOW.read_text()
     assert 'on-main --tag "$tag" --report-only' in text
     assert "--classes" not in text or "mode" in text
+
+
+# --------------------------------------------------------------------------
+# the branch moves ONCE, never through its base (yaadgaar 466)
+# --------------------------------------------------------------------------
+# v1.39.0 (run 40736970261) reset `actions-adopt` to the base tip and then put
+# the file. While head equalled base GitHub CLOSED the pull request, 10 of 21
+# times, and a closed adoption pull request reads as "declined" forever.
+
+
+def test_no_ref_write_ever_points_the_branch_at_its_base():
+    gh, r = moved_to_a_new_tag()
+    fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=True)
+    fresh = Fake(estate())
+    fresh.repos["argocd"]["branches"]["actions-adopt"] = "base"
+    fan_out.run(fresh, "yadgarhq", "v1.35.0", CLASSES, live=True)
+    moves = gh.moves + fresh.moves
+    assert moves
+    assert [m for m in moves if m[2] == m[3]] == []
+
+
+def test_an_open_adoption_pull_request_stays_open_through_a_rewrite():
+    gh, r = moved_to_a_new_tag()
+    rows, code = fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=True)
+    assert code == 0
+    assert by_repo(rows)["docs"]["status"] == "updated"
+    assert [p["state"] for p in r["prs"]] == ["open"]
+
+
+def test_the_one_ref_write_lands_a_commit_whose_parent_is_the_base_tip():
+    gh, r = moved_to_a_new_tag()
+    fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=True)
+    docs = [m for m in gh.moves if m[0] == "docs"]
+    assert len(docs) == 1
+    _, branch, sha, _ = docs[0]
+    assert branch == "actions-adopt"
+    assert r["meta"][sha]["parent"] == "base2"
+    assert fan_out.current_rev(r["commits"][sha][".pre-commit-config.yaml"]) == "v1.35.0"
+
+
+def test_a_new_branch_is_created_at_the_new_commit_not_at_the_base():
+    gh = Fake(estate())
+    fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=True)
+    docs = [w for w in gh.writes if w[1] == "docs"]
+    assert docs[0] == ("rewrite_branch", "docs", "actions-adopt", "base", False)
+    assert [m[2] for m in gh.moves if m[0] == "docs"] != ["base"]
+
+
+def test_an_unverified_commit_stops_the_whole_fan_out():
+    """Signing breaks for every repository at once, so the first refusal ends the run."""
+    gh = Fake(estate())
+
+    def unsigned(*args, **kwargs):
+        gh.writes.append(("rewrite_branch", args[1]))
+        raise fan_out.Unverified("not verified")
+
+    gh.rewrite_branch = unsigned
+    with pytest.raises(fan_out.Unverified):
+        fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=True)
+    assert len([w for w in gh.writes if w[0] == "rewrite_branch"]) == 1
+
+
+BASE = "b" * 40
+OLD = "0" * 40
+NEW = "c" * 40
+BOT_EMAIL = "324366854+yadgarhq-bot[bot]@users.noreply.github.com"
+
+
+class GitHub(fan_out.Gh):
+    """`fan_out.Gh` with `_api` answered by a tiny GitHub: refs, commit objects,
+    and one open pull request that GitHub CLOSES whenever its head equals its base.
+    `signed` and `committer_id` decide what the commits it creates look like."""
+
+    def __init__(self, signed=True, committer_id=19864447, branch=OLD):
+        super().__init__()
+        self.refs = {"main": BASE} | ({"actions-adopt": branch} if branch else {})
+        self.objects = {BASE: {"tree": "tree-base", "parents": []},
+                        OLD: {"tree": "tree-old", "parents": [BASE]}}
+        self.pr = "open"
+        self.signed, self.committer_id = signed, committer_id
+        self.calls = []
+        self.ref_writes = []
+
+    def _api(self, *args, payload=None, missing_ok=False):
+        method, path = (args[1], args[2]) if args[0] == "-X" else ("GET", args[0])
+        self.calls.append((method, path, payload))
+        prefix = "repos/yadgarhq/docs/"
+        assert path.startswith(prefix), path
+        path = path[len(prefix):]
+        if method == "GET" and path.startswith("git/commits/"):
+            sha = path.rsplit("/", 1)[1]
+            return json.dumps({"sha": sha, "tree": {"sha": self.objects[sha]["tree"]}})
+        if method == "POST" and path == "git/blobs":
+            return json.dumps({"sha": "blob-new"})
+        if method == "POST" and path == "git/trees":
+            return json.dumps({"sha": "tree-new"})
+        if method == "POST" and path == "git/commits":
+            self.objects[NEW] = {"tree": payload["tree"], "parents": payload["parents"]}
+            return json.dumps({"sha": NEW, "verification": {"verified": self.signed},
+                               "author": {"email": BOT_EMAIL, "name": "yadgarhq-bot[bot]"},
+                               "committer": {"email": "noreply@github.com", "name": "GitHub"}})
+        if method in ("PATCH", "POST") and path.startswith("git/refs"):
+            name = (path.split("git/refs/heads/", 1)[1] if method == "PATCH"
+                    else payload["ref"].removeprefix("refs/heads/"))
+            self.ref_writes.append((method, name, payload["sha"]))
+            self.refs[name] = payload["sha"]
+            if self.refs[name] == self.refs["main"]:
+                self.pr = "closed"
+            return json.dumps({"object": {"sha": payload["sha"]}})
+        if method == "GET" and path.startswith("commits/"):
+            return json.dumps({
+                "sha": path.split("/", 1)[1], "commit": {"verification": {"verified": self.signed}},
+                "author": {"id": 324366854, "type": "Bot", "login": "yadgarhq-bot[bot]"},
+                "committer": {"id": self.committer_id, "login": "web-flow"}})
+        raise AssertionError(f"unexpected call {method} {path}")
+
+
+def rewrite(gh, exists=True, branch="actions-adopt"):
+    gh.rewrite_branch("yadgarhq", "docs", branch, BASE, ".pre-commit-config.yaml",
+                      "repos: []\n", "chore(deps): bump yadgarhq/actions hooks from v1 to v2",
+                      exists)
+
+
+def test_rewrite_branch_moves_the_ref_once_to_a_new_commit_on_the_base_tip():
+    gh = GitHub()
+    rewrite(gh)
+    assert gh.ref_writes == [("PATCH", "actions-adopt", NEW)]
+    assert gh.objects[NEW]["parents"] == [BASE]
+    assert gh.pr == "open"
+    trees = [p for m, path, p in gh.calls if path.endswith("git/trees")]
+    assert trees == [{"base_tree": "tree-base", "tree": [
+        {"path": ".pre-commit-config.yaml", "mode": "100644", "type": "blob",
+         "sha": "blob-new"}]}]
+    made = [p for m, path, p in gh.calls if m == "POST" and path.endswith("git/commits")]
+    assert made == [{"message": "chore(deps): bump yadgarhq/actions hooks from v1 to v2",
+                     "tree": "tree-new", "parents": [BASE]}]
+    blobs = [p for m, path, p in gh.calls if path.endswith("git/blobs")]
+    assert blobs == [{"content": "cmVwb3M6IFtdCg==", "encoding": "base64"}]
+
+
+def test_the_ref_write_is_the_last_write_and_the_commit_is_read_back_after_it():
+    gh = GitHub()
+    rewrite(gh)
+    assert [m for m, _, _ in gh.calls if m != "GET"] == ["POST", "POST", "POST", "PATCH"]
+    assert gh.calls[-1][:2] == ("GET", "repos/yadgarhq/docs/commits/" + NEW)
+
+
+def test_rewrite_branch_creates_a_missing_branch_at_the_new_commit():
+    gh = GitHub(branch=None)
+    rewrite(gh, exists=False)
+    assert gh.ref_writes == [("POST", "actions-adopt", NEW)]
+
+
+def test_an_unsigned_commit_is_refused_before_the_ref_moves():
+    gh = GitHub(signed=False)
+    with pytest.raises(fan_out.Unverified):
+        rewrite(gh)
+    assert gh.ref_writes == []
+    assert gh.refs["actions-adopt"] == OLD
+
+
+def test_a_commit_the_commits_api_disowns_is_refused_after_the_move():
+    gh = GitHub(committer_id=12345)
+    with pytest.raises(fan_out.Unverified, match="web-flow"):
+        rewrite(gh)
+
+
+def test_rewrite_branch_refuses_any_other_branch_before_any_call():
+    gh = GitHub()
+    with pytest.raises(fan_out.Refusal):
+        rewrite(gh, branch="main")
+    assert gh.calls == []
+
+
+@pytest.mark.parametrize("answer, why", [
+    ({"verification": {"verified": True}, "author": {"email": "x@y"},
+      "committer": {"email": "noreply@github.com"}}, "author"),
+    ({"verification": {"verified": True}, "author": {"email": BOT_EMAIL},
+      "committer": {"email": "me@example.com"}}, "committer"),
+    ({"author": {"email": BOT_EMAIL}, "committer": {"email": "noreply@github.com"}},
+     "verified"),
+    ({"verification": {"verified": "true"}, "author": {"email": BOT_EMAIL},
+      "committer": {"email": "noreply@github.com"}}, "verified"),
+])
+def test_the_created_commit_is_checked_field_by_field(answer, why):
+    good = {"verification": {"verified": True}, "author": {"email": BOT_EMAIL},
+            "committer": {"email": "noreply@github.com"}}
+    fan_out.check_created(good)
+    with pytest.raises(fan_out.Unverified, match=why):
+        fan_out.check_created(answer)
+
+
+@pytest.mark.parametrize("change, why", [
+    ({"sha": "d" * 40}, "another sha"),
+    ({"commit": {"verification": {"verified": False}}}, "verified"),
+    ({"author": {"id": 324366854, "type": "User"}}, "App"),
+    ({"author": {"id": 1, "type": "Bot"}}, "App"),
+    ({"committer": {"id": 1}}, "web-flow"),
+])
+def test_the_moved_commit_is_checked_like_sweep_k2(change, why):
+    good = {"sha": NEW, "commit": {"verification": {"verified": True}},
+            "author": {"id": 324366854, "type": "Bot"}, "committer": {"id": 19864447}}
+    fan_out.check_landed(good, NEW)
+    with pytest.raises(fan_out.Unverified, match=why):
+        fan_out.check_landed(good | change, NEW)
+
+
+def test_each_repository_outcome_is_one_inert_stdout_line():
+    rows = [{"repo": "docs", "status": "updated", "url": "https://github.com/yadgarhq/docs/pull/1",
+             "note": "", "patch": "::add-mask::x", "changes": ["::stop-commands::t"]},
+            {"repo": "::evil\n::error::x", "status": "error", "url": "", "note": "::error::boom",
+             "patch": "", "changes": []},
+            {"repo": ":::", "status": "error", "url": "", "note": "", "patch": "", "changes": []}]
+    lines = fan_out.outcomes(rows, "yadgarhq")
+    assert lines[0] == ("fan-out yadgarhq/docs: updated "
+                        "https://github.com/yadgarhq/docs/pull/1")
+    assert len(lines) == 3
+    for line in lines:
+        assert "\n" not in line
+        assert "::" not in line
+        assert "add-mask" not in line and "stop-commands" not in line and "boom" not in line
