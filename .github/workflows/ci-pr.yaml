@@ -2091,6 +2091,14 @@ jobs:
       # ADR-0848 retired that write; its history still holds them.) Those
       # commits are authored by `yadgarhq-bot[bot]`.
       #
+      # THE NAME IS A CLAIM, THE API IS THE PROOF (yaadgaar 456). A commit
+      # author is whatever `git commit --author=` was told. `pr_body.is_bot`
+      # exempts a `[bot]` name only when `GET commits/{sha}` reports it
+      # verified, authored by yadgarhq-bot (324366854) or dependabot
+      # (49699333), and committed by `web-flow` or that bot. Any API error
+      # reads as a person. `contents: read`, which every caller grants, is
+      # enough for the call.
+      #
       # WHAT IT CANNOT SEE, said here rather than implied away: an edit that
       # keeps the body parseable but changes what it means — `feat:` to `fix:`,
       # or a dropped `!` — passes both this and the pull-request check, because
@@ -2115,6 +2123,7 @@ jobs:
           # arrives as a bullet plus continuations. Measured, not assumed:
           # `yadgarhq/store` pull request 15 against commit `2198a4f`.
           WRAPPED: "true"
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # THE REPOSITORY NAME DECIDES, never the presence of the file, so that
@@ -2131,7 +2140,8 @@ jobs:
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
           BODY=$(git log -1 --format=%B)
           AUTHOR=$(git log -1 --format='%an <%ae>')
-          export BODY AUTHOR
+          SHA=$(git rev-parse HEAD)
+          export BODY AUTHOR SHA
           python3 "$dir/pr_body.py"
 
       # THE DERIVATION, and it is a CHECKED-IN SCRIPT rather than the heredoc it
@@ -2168,6 +2178,9 @@ jobs:
           # regex would be two things to keep in agreement by hand, and the
           # disagreement would surface as a version nobody can explain.
           GATE_DIR: ${{ steps.gate.outputs.dir }}
+          # Each commit's bot claim is checked against the commits API, as in
+          # the step above (yaadgaar 456).
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           python3 "$GATE_DIR/next_version.py"

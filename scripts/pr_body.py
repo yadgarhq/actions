@@ -48,9 +48,11 @@ sentence would turn a reviewed patch into a major.
 Tests: `python3 -m pytest scripts/tests/ -q`.
 """
 
+import json
 import os
 import re
 import sys
+import urllib.request
 
 # Conventional Commits. The set is closed: a type outside it does not parse, and
 # a bullet nobody can parse is a release nobody can version.
@@ -243,15 +245,96 @@ def commit_entries(lines):
 # robotics team.
 BOT = re.compile(r"\[bot\]\s*(<|@|$)")
 
+# YAADGAAR 456: THE NAME IS A CLAIM, AND THESE ARE WHAT PROVE IT. A commit author
+# is whatever `git commit --author=` was told, so `x[bot]` costs nothing to type.
+# The commits API's `author.id`, `committer.id` and `verification.verified` are
+# set by GitHub. Two bots are trusted, by the id GitHub assigned them:
+# `yadgarhq-bot[bot]`, the release App behind `parent_bump.py`, `fan_out.py` and
+# `example_pins.py`, and `dependabot[bot]`, whose merges `next_version.derive`
+# turns into a `fix(deps)` release. Any other App reads as a person here.
+BOT_IDS = frozenset({324366854, 49699333})
 
-def is_bot(author):
-    """Whether a commit author is a bot, matching `template`'s own exemption.
+# `verified` VOUCHES FOR THE COMMITTER'S KEY, NOT THE AUTHOR. A person can set the
+# App's noreply address as author, sign with their own key, and read back the
+# App's `author.id` beside `verified: true`. So the committer must be GitHub's
+# own `web-flow` (id 19864447), which signed every squash merge and every
+# contents-API write measured for this change, or one of the trusted bots.
+COMMITTERS = BOT_IDS | {19864447}
+
+SHA = re.compile(r"^[0-9a-f]{40}$")
+# Exactly one `/`, and neither half may start with `.`, so `..` cannot be a path
+# segment and the URL below cannot be steered off `repos/{owner}/{name}`.
+REPOSITORY = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]*/[A-Za-z0-9_-][A-Za-z0-9_.-]*$")
+
+
+def claims_bot(author):
+    """Whether a commit author's NAME claims a bot. Necessary, never sufficient."""
+    return bool(BOT.search((author or "").strip()))
+
+
+def fetch_commit(repo, sha, token):
+    """`GET /repos/{repo}/commits/{sha}` as JSON, or None on ANY failure.
+
+    None reads as a person in `confirms_bot`, so every error here fails closed.
+    `contents: read` on the job's token is enough. The repository and the sha
+    go into a URL that carries the token, so neither may steer it.
+    """
+    if not (token and SHA.match(sha or "") and REPOSITORY.match(repo or "")):
+        return None
+    req = urllib.request.Request(
+        f"https://api.github.com/repos/{repo}/commits/{sha}",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "yadgarhq-actions/pr_body",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception:  # every failure gives the same answer: a person
+        return None
+
+
+def confirms_bot(commit, sha):
+    """Whether a commits-API response proves `sha` is a trusted bot's commit."""
+    try:
+        author, committer = commit["author"], commit["committer"]
+        return (
+            commit["sha"] == sha
+            and commit["commit"]["verification"]["verified"] is True
+            and author["type"] == "Bot"
+            and type(author["id"]) is int
+            and author["id"] in BOT_IDS
+            and type(committer["id"]) is int
+            and committer["id"] in COMMITTERS
+        )
+    except (KeyError, TypeError, IndexError):
+        return False
+
+
+def is_bot(author, sha, repo, token):
+    """Whether a commit is a trusted bot's, matching `template`'s own exemption.
 
     A bot writes its own body and cannot be taught the template. The
-    pull-request check exempts `user.type == 'Bot'`; a push to `main` has only
-    the commit author to go on.
+    pull-request check exempts `user.type == 'Bot'`, which GitHub sets. A push
+    to `main` reads the same kind of fact from the commits API. The name claim
+    is a precondition, so this can only NARROW the name-only gate it replaced,
+    and a person's commit never costs an API call.
     """
-    return bool(BOT.search((author or "").strip()))
+    if not claims_bot(author):
+        return False
+    if not (sha and repo and token):
+        return False
+    if confirms_bot(fetch_commit(repo, sha, token), sha):
+        return True
+    print(
+        f"::warning::{sha[:7]} names a bot author ({author}) that the commits "
+        "API does not confirm as a verified commit by yadgarhq-bot or "
+        "dependabot, so it is read as a person's."
+    )
+    return False
 
 
 def sections(text):
@@ -417,7 +500,13 @@ def main():
     # one into `yadgarhq/argocd` too until ADR-0848 retired that write.) A skip
     # nobody can attribute is the thing this
     # gate exists to refuse, so the attribution is the output.
-    if is_bot(author):
+    #
+    # YAADGAAR 456: the author name alone no longer exempts. `SHA`, the
+    # repository and `GH_TOKEN` let `is_bot` ask the commits API, and any of
+    # them missing reads as a person.
+    if is_bot(author, os.environ.get("SHA") or "",
+              os.environ.get("GITHUB_REPOSITORY") or "",
+              os.environ.get("GH_TOKEN") or ""):
         finding = f"{subject} is bot-authored ({author}), which the template exempts."
         if summary:
             with open(summary, "a") as fh:

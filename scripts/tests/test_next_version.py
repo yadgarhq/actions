@@ -55,11 +55,15 @@ def message(changelog="- fix: a thing that was wrong", what="a thing"):
     )
 
 
-def call(last="v0.2.17", tags=("v0.2.17",), messages=(), authors=None, files=()):
-    """`derive` with the arguments a caller would have read out of git."""
-    if authors is None:
-        authors = [HUMAN] * len(messages)
-    return next_version.derive(last, list(tags), list(messages), list(authors), list(files))
+def call(last="v0.2.17", tags=("v0.2.17",), messages=(), bots=None, files=()):
+    """`derive` with the arguments a caller would have read out of git.
+
+    `bots` is one boolean per commit: whether `pr_body.is_bot` confirmed it
+    through the commits API (yaadgaar 456). A person by default.
+    """
+    if bots is None:
+        bots = [False] * len(messages)
+    return next_version.derive(last, list(tags), list(messages), list(bots), list(files))
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +80,7 @@ def test_no_baseline_at_all_stays_green():
     from `main`, and a release model they never opted into must not redden every
     merge. This is the branch that keeps them quiet.
     """
-    v = call(last="", tags=(), messages=[message()], authors=[HUMAN])
+    v = call(last="", tags=(), messages=[message()], bots=[False])
     assert v.rc == 0
     assert v.nxt == ""
     assert "no baseline" in "\n".join(v.lines).lower()
@@ -96,19 +100,19 @@ def test_head_already_released_stays_green():
     the PRE-A tag and carries one commit rather than zero, so it derives a version
     and is absorbed by the `tag it` step's 422 `Reference already exists` arm.
     """
-    v = call(messages=[], authors=[], files=[])
+    v = call(messages=[], bots=[], files=[])
     assert v.rc == 0
     assert v.nxt == ""
     assert "already" in "\n".join(v.lines).lower()
 
 
 def test_an_empty_range_is_not_a_bot_range():
-    """`all(is_bot(a) for a in [])` is True, and that must not synthesise.
+    """`all(b for b in [])` is True, and that must not synthesise.
 
     A vacuous truth would let an empty range satisfy "every commit is
     bot-authored" and cut a second tag on a commit that already carries one.
     """
-    v = call(messages=[], authors=[], files=["Cargo.lock"])
+    v = call(messages=[], bots=[], files=["Cargo.lock"])
     assert v.nxt == ""
     assert v.rc == 0
 
@@ -204,7 +208,7 @@ def test_a_bot_only_dependency_merge_synthesises_a_patch(files):
         last="v0.2.17",
         tags=("v0.2.17",),
         messages=["build(deps): bump sha2 from 0.10.9 to 0.11.0 (#24)"],
-        authors=[BOT],
+        bots=[True],
         files=files,
     )
     assert v.rc == 0
@@ -220,7 +224,7 @@ def test_the_synthesised_entry_reaches_the_tag_message():
     """
     v = call(
         messages=["build(deps): bump sha2 from 0.10.9 to 0.11.0 (#24)"],
-        authors=[BOT],
+        bots=[True],
         files=["Cargo.lock"],
     )
     assert len(v.entries) == 1
@@ -238,7 +242,7 @@ def test_synthesis_survives_bump_for():
         last="v1.22.0",
         tags=("v1.22.0",),
         messages=["chore(deps): bump library/rust (#74)"],
-        authors=[BOT],
+        bots=[True],
         files=["containers/rust-build/Containerfile"],
     )
     assert v.nxt == "1.22.1", "at major >= 1 a patch entry bumps patch, unshifted"
@@ -257,7 +261,7 @@ def test_a_bot_merge_touching_no_artifact_manifest_stays_green():
     """
     v = call(
         messages=["chore(deps): bump the actions group (#81)"],
-        authors=[BOT],
+        bots=[True],
         files=[".github/workflows/ci.yaml"],
     )
     assert v.rc == 0
@@ -276,7 +280,7 @@ def test_a_human_merge_with_no_changelog_still_refuses():
     """
     v = call(
         messages=["a commit message with no Changelog at all"],
-        authors=[HUMAN],
+        bots=[False],
         files=["Cargo.toml", "Cargo.lock"],
     )
     assert v.rc == 1
@@ -292,7 +296,7 @@ def test_one_human_commit_in_a_bot_range_blocks_synthesis():
     """
     v = call(
         messages=["build(deps): bump sha2 (#24)", "an unclassified human commit"],
-        authors=[BOT, HUMAN],
+        bots=[True, False],
         files=["Cargo.lock"],
     )
     assert v.rc == 1
@@ -302,7 +306,7 @@ def test_a_real_changelog_is_never_overwritten_by_synthesis():
     """Synthesis fires only where entries would OTHERWISE be empty."""
     v = call(
         messages=[message("- feat: a new thing")],
-        authors=[BOT],
+        bots=[True],
         files=["Cargo.toml"],
     )
     assert v.rc == 0
@@ -485,11 +489,86 @@ def test_the_fixture_harness_ignores_the_ambient_git_repository(tmp_path, monkey
     assert outer_commits() == before
 
 
-def test_a_real_bot_only_cargo_merge_tags_end_to_end(tmp_path):
+def dependabot_confirmed(monkeypatch, seen=None):
+    """The commits API's answer for a squash-merged dependabot PR, for any sha.
+
+    Shape read off `GET /repos/yadgarhq/yadgar/commits/f1a149e` on 2026-10-28:
+    verified, author id 49699333 (`Bot`), committer `web-flow` (19864447).
+    """
+    def fetch(repo, sha, token):
+        if seen is not None:
+            seen.append((repo, sha, token))
+        return {
+            "sha": sha,
+            "commit": {"verification": {"verified": True}},
+            "author": {"id": 49699333, "type": "Bot"},
+            "committer": {"id": 19864447, "type": "User"},
+        }
+
+    monkeypatch.setattr(pr_body, "fetch_commit", fetch)
+
+
+def run_in_process(tmp_path, monkeypatch):
+    """`main()` against the fixture, in-process so the commits API can be stubbed.
+
+    A subprocess cannot take a stub without an injection point that any caller
+    of the real script could also use, and in a security gate that is a bypass.
+    """
+    for name in [k for k in os.environ if k.startswith("GIT_")]:
+        monkeypatch.delenv(name)
+    (tmp_path / "out.txt").touch()
+    (tmp_path / "summary.md").touch()
+    for name, value in dict(GITHUB_OUTPUT=str(tmp_path / "out.txt"),
+                            GITHUB_STEP_SUMMARY=str(tmp_path / "summary.md"),
+                            RUNNER_TEMP=str(tmp_path),
+                            GITHUB_REPOSITORY="yadgarhq/lifecycle",
+                            GH_TOKEN="t").items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.chdir(tmp_path)
+    rc = next_version.main()
+    return rc, (tmp_path / "out.txt").read_text(encoding="utf-8")
+
+
+def test_a_bot_name_string_is_not_a_confirmed_bot():
+    """`derive` takes booleans. A leftover author string must not read as True."""
+    v = call(messages=["build(deps): bump sha2 (#24)"], bots=[BOT], files=["Cargo.lock"])
+    assert (v.rc, v.nxt) == (1, "")
+
+
+def test_state_asks_the_api_about_each_bot_claim_by_its_own_sha(tmp_path, monkeypatch):
+    build(tmp_path, [(message(), HUMAN, "src/main.rs"),
+                     ("build(deps): bump sha2 (#24)", BOT, "Cargo.lock")], tag="v0.2.17")
+    for name in [k for k in os.environ if k.startswith("GIT_")]:
+        monkeypatch.delenv(name)
+    monkeypatch.chdir(tmp_path)
+    seen = []
+    dependabot_confirmed(monkeypatch, seen)
+    last, _, messages, bots, _ = next_version.state("yadgarhq/lifecycle", "t")
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True,
+                          capture_output=True, text=True, env=_git_env()).stdout.strip()
+    assert last == "v0.2.17"
+    # Newest first, as `git log` lists them; only the bot claim is looked up.
+    assert bots == [True, False]
+    assert messages[0].startswith("build(deps)")
+    assert seen == [("yadgarhq/lifecycle", head, "t")]
+
+
+def test_state_reads_an_unconfirmed_bot_claim_as_a_person(tmp_path, monkeypatch):
+    build(tmp_path, [("build(deps): bump sha2 (#24)", BOT, "Cargo.lock")], tag="v0.2.17")
+    for name in [k for k in os.environ if k.startswith("GIT_")]:
+        monkeypatch.delenv(name)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(pr_body, "fetch_commit", lambda repo, sha, token: None)
+    _, _, _, bots, _ = next_version.state("yadgarhq/lifecycle", "t")
+    assert bots == [False]
+
+
+def test_a_real_bot_only_cargo_merge_tags_end_to_end(tmp_path, monkeypatch):
     """`lifecycle`'s stranded commit, replayed against real git."""
     build(tmp_path, [("build(deps): bump sha2 (#24)", BOT, "Cargo.lock")], tag="v0.2.17")
-    done, out = run(tmp_path)
-    assert done.returncode == 0, done.stderr
+    dependabot_confirmed(monkeypatch)
+    rc, out = run_in_process(tmp_path, monkeypatch)
+    assert rc == 0
     assert "next=0.2.18" in out
 
     # THE TAG MESSAGE IS THE ONE ARTIFACT THAT CANNOT BE CORRECTED LATER. The
@@ -502,6 +581,17 @@ def test_a_real_bot_only_cargo_merge_tags_end_to_end(tmp_path):
     assert written.startswith("v0.2.18\n")
     assert "since v0.2.17." in written
     assert "fix(deps)" in written
+
+
+def test_a_real_bot_merge_the_api_cannot_confirm_fails_closed(tmp_path):
+    """The same commit as the script runs it, with no token: the claim cannot be
+    checked, the range is a person's, and a person's range with no Changelog is
+    a red run and no tag. Never a synthesised release on a name alone."""
+    build(tmp_path, [("build(deps): bump sha2 (#24)", BOT, "Cargo.lock")], tag="v0.2.17")
+    done, out = run(tmp_path)
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "next=0.2.18" not in out
+    assert not (tmp_path / "tag_message.txt").exists()
 
 
 def test_a_real_non_semver_baseline_exits_nonzero(tmp_path):
