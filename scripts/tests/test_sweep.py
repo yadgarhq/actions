@@ -89,11 +89,8 @@ class Fake:
         pr = self.data[f"repos/{owner}/{name}/pulls/{n}"]
         pr.update(merged=True, state="closed", merge_commit_sha="f" * 40)
 
-    def reset_ref(self, owner, name, branch, sha):
-        self.writes.append(("reset", owner, name, branch, sha))
-
-    def put_file(self, owner, name, path, branch, text, blob, message):
-        self.writes.append(("put", owner, name, path, branch, blob, message, text))
+    def rewrite_branch(self, owner, name, branch, parent, path, text, message, exists):
+        self.writes.append(("rewrite", owner, name, branch, parent, path, text, message, exists))
 
 
 class Case:
@@ -213,7 +210,6 @@ def test_the_behind_baseline_refreshes_onto_the_base_tip():
     got = case.judge()
     assert got["action"] == "refresh", got
     assert got["tip"] == case.tip
-    assert got["blob"] == case.entry(case.tip)["sha"]
     assert got["text"] == case.text(case.head)
 
 
@@ -644,16 +640,17 @@ def refresh_case():
     return Case("yadgar-98")
 
 
-def test_a_refresh_resets_to_the_tip_and_writes_the_same_file():
+def test_a_refresh_is_one_rewrite_onto_the_tip_with_the_same_file():
+    """YAADGAAR 466: no reset to the tip first. Head == base closes the pull request."""
     case = refresh_case()
     writes = []
     sweep.act(Fake(case.data, writes), Fake(case.data, writes), OWNER, "yadgar", 98, case.head,
               "refresh", classes(), NOW)
     assert writes == [
-        ("reset", OWNER, "yadgar", "actions-adopt", case.tip),
-        ("put", OWNER, "yadgar", ".pre-commit-config.yaml", "actions-adopt",
-         case.entry(case.tip)["sha"], case.pr["title"], case.text(case.head)),
+        ("rewrite", OWNER, "yadgar", "actions-adopt", case.tip, ".pre-commit-config.yaml",
+         case.text(case.head), case.pr["title"], True),
     ]
+    assert case.tip != case.head
 
 
 def test_a_foreign_commit_is_never_reset():
@@ -698,13 +695,21 @@ def test_a_behind_pull_request_is_never_merged():
     assert case.judge(classes(max_refreshes_per_pr_per_day=0))["action"] == "skip"
 
 
-def test_reset_ref_refuses_any_other_branch_before_any_call():
+def test_rewrite_branch_refuses_any_other_branch_before_any_call():
     gh = sweep.SweepGh("token")
     calls = []
     gh._api = lambda *a, **k: calls.append(a)
     with pytest.raises(Refusal):
-        gh.reset_ref(OWNER, "yadgar", "main", "a" * 40)
+        gh.rewrite_branch(OWNER, "yadgar", "main", "a" * 40, ".pre-commit-config.yaml", "x",
+                          "m", True)
     assert calls == []
+
+
+def test_the_sweeper_writes_through_the_fan_outs_one_helper():
+    assert sweep.SweepGh.rewrite_branch is fan_out.Gh.rewrite_branch
+    assert not hasattr(sweep.SweepGh, "reset_ref") and not hasattr(sweep.SweepGh, "put_file")
+    assert (sweep.BOT_ID, sweep.WEB_FLOW_ID) == (fan_out.BOT_ID, fan_out.WEB_FLOW_ID) \
+        == (BOT, WEB_FLOW)
 
 
 def test_the_real_client_merges_with_exactly_the_four_fields(monkeypatch):
@@ -821,13 +826,20 @@ def test_an_ordinary_skip_keeps_the_evaluate_run_green(tmp_path, monkeypatch, ca
     assert "::error::" not in capsys.readouterr().err
 
 
-def test_a_failed_put_after_reset_reds_the_act_run(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("failure, message", [
+    (Refusal("gh api git/refs: HTTP 500"), "gh api git/refs: HTTP 500"),
+    (fan_out.Unverified("the new commit is not verified; no ref was moved"),
+     "the new commit is not verified"),
+])
+def test_a_failed_rewrite_reds_the_act_run(tmp_path, monkeypatch, capsys, failure, message):
+    """A failed rewrite is never a Skip (which exits 0). An unverified commit
+    least of all: every later refresh would make another one."""
     case = refresh_case()
     writes = []
 
     class Broken(Fake):
-        def put_file(self, *args):
-            raise Refusal("gh api contents: HTTP 500")
+        def rewrite_branch(self, *args, **kwargs):
+            raise failure
 
     monkeypatch.setenv("EVENT", "schedule")
     monkeypatch.setenv("REF", "refs/heads/main")
@@ -840,9 +852,8 @@ def test_a_failed_put_after_reset_reds_the_act_run(tmp_path, monkeypatch, capsys
     code = sweep.main(["act", "--owner", OWNER, "--repo", "yadgar", "--n", "98",
                        "--head", case.head, "--action", "refresh"])
     assert code == 1
-    assert writes == [("reset", OWNER, "yadgar", "actions-adopt", case.tip)]
-    assert ("::error::refresh of yadgarhq/yadgar#98 left the branch at base tip; "
-            "next fan-out or a human must re-put") in capsys.readouterr().err
+    assert writes == []
+    assert f"::error::{message}" in capsys.readouterr().err
 
 
 def test_live_flags_refuse_while_unarmed(monkeypatch):

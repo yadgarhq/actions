@@ -32,8 +32,10 @@ reason, never a merge. The conditions, by the letters the design gives them:
        it, and `mergeable` true
 
 A BEHIND pull request whose base did not touch `.pre-commit-config.yaml` is
-REFRESHED instead: `actions-adopt` is reset to the base tip and the same file
-written again, so CI runs fresh and a later sweep can merge it. Never through
+REFRESHED instead: `actions-adopt` is moved, in one ref write, to a new commit
+on the base tip carrying the same file (`fan_out.Gh.rewrite_branch`; never
+through the base tip itself, which closes the pull request, yaadgaar 466), so
+CI runs fresh and a later sweep can merge it. Never through
 `update-branch` (ADR-0693) and never through `fan_out.one`, which no-ops on a
 behind pull request whose config is unchanged.
 
@@ -45,8 +47,8 @@ DRY BY DEFAULT. `classes.json` ships `"sweep": {"live": false}`; while it is
 false the workflow mints no write token and runs no `act` job, and `evaluate`
 writes its verdict table to the step summary only. Reads go through
 `GITHUB_TOKEN`: R1 admits only public repositories, so nothing here needs to
-read a private one. The merge, the ref reset and the file write are the only
-calls made with the App token, minted per repository with `contents: write`.
+read a private one. The merge and the branch rewrite, with the two reads the
+rewrite makes, are the only calls made with the App token, minted per repository with `contents: write`.
 
 Commands:
 
@@ -74,8 +76,8 @@ import pr_body
 from repin import Refusal
 
 API = "https://api.github.com/"
-BOT_ID = 324366854  # yadgarhq-bot[bot], the release App. NOT pr_body.BOT_IDS: that admits dependabot.
-WEB_FLOW_ID = 19864447  # GitHub's `web-flow`, which signs every contents-API write
+BOT_ID = fan_out.BOT_ID  # yadgarhq-bot[bot], the release App. NOT pr_body.BOT_IDS: that admits dependabot.
+WEB_FLOW_ID = fan_out.WEB_FLOW_ID  # GitHub's `web-flow`, which signs the App's API commits
 CI_APP_ID = 15368  # GitHub Actions
 PASSED = "ci / passed"
 PRECOMMIT = "ci / precommit"
@@ -94,10 +96,6 @@ DAY = datetime.timedelta(hours=24)
 
 class Skip(Exception):
     """This pull request is not merged or refreshed. The message says why."""
-
-
-class Stranded(Exception):
-    """A refresh reset the branch and then failed to write the file back."""
 
 
 def need(fact, reason):
@@ -358,14 +356,6 @@ def fetcher(api):
     return fetch
 
 
-def config_blob(api, owner, name, commit):
-    """The blob sha of `.pre-commit-config.yaml` at `commit` (mode is checked by `config_at`)."""
-    tree = api.get(f"repos/{owner}/{name}/git/trees/{commit}")
-    hits = [e for e in dig(tree, "tree") if dig(e, "path") == config_only.CONFIG]
-    need(len(hits) == 1, f"no single {config_only.CONFIG} at {commit}")
-    return dig(hits[0], "sha")
-
-
 def evaluate(api, owner, name, n, classes, now):
     """The verdict for pull request `n` of `owner/name`, or a Skip. Never writes."""
     sweep = classes["sweep"]
@@ -416,8 +406,7 @@ def evaluate(api, owner, name, n, classes, now):
     check_tag(api, owner, to, sweep["soak_hours"], now)
     need(refreshes_today(timeline, now) < sweep["max_refreshes_per_pr_per_day"],
          "behind, and the refresh cap for today is reached")
-    return dict(verdict, action="refresh", tip=tip, text=head_text,
-                blob=config_blob(api, owner, name, tip))
+    return dict(verdict, action="refresh", tip=tip, text=head_text)
 
 
 def ci_verdict_text(fetch, repo, commit):
@@ -517,16 +506,12 @@ def act(reader, writer, owner, name, n, head, action, classes, now):
     # A REFRESH. The branch must still be where evaluate read it.
     ref = reader.get(f"repos/{owner}/{name}/git/ref/heads/{fan_out.BRANCH}", fresh=True)
     need(dig(ref, "object", "sha") == head, "the branch moved since it was read: no reset")
-    writer.reset_ref(owner, name, fan_out.BRANCH, verdict["tip"])
-    try:
-        writer.put_file(owner, name, config_only.CONFIG, fan_out.BRANCH, verdict["text"],
-                        verdict["blob"], verdict["title"])
-    except Exception as exc:
-        # TWO WRITES, NOT ONE. The reset landed and the file did not, so the
-        # branch now sits at the base tip with nothing ahead. That is no Skip:
-        # the next sweep skips it on K1 forever, so it reds the run.
-        raise Stranded(f"refresh of {owner}/{name}#{n} left the branch at base tip; "
-                       "next fan-out or a human must re-put") from exc
+    # ONE REF WRITE (yaadgaar 466). The new commit is built on the tip first and
+    # the branch then moves straight to it: a reset to the tip first would make
+    # head == base, and GitHub closes the pull request. A failure leaves the
+    # branch where it was; a Refusal (an `Unverified` one included) reds the run.
+    writer.rewrite_branch(owner, name, fan_out.BRANCH, verdict["tip"], config_only.CONFIG,
+                          verdict["text"], verdict["title"], exists=True)
     return f"refreshed {owner}/{name}#{n} onto {verdict['tip']}"
 
 
@@ -675,7 +660,7 @@ def main(argv):
         fan_out.summary(fan_out.clean(done, 500) + "\n")
         print(fan_out.annotation(done))
         return 0
-    except (OSError, ValueError, Refusal, Skip, Stranded) as refusal:
+    except (OSError, ValueError, Refusal, Skip) as refusal:
         print(f"::error::{fan_out.annotation(refusal)}", file=sys.stderr)
         return 1
 

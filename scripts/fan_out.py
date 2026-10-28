@@ -71,6 +71,15 @@ BRANCH = "actions-adopt"
 # The App every generated commit is authored by, and the subjects it writes.
 # A commit on BRANCH that is not both is somebody's work, and is never reset.
 BOT = "yadgarhq-bot[bot]"
+# What a commit the App makes through the git data API, with no author or
+# committer sent, looks like. Measured 2026-10-28 on ten `ci: pin` commits of
+# yadgarhq/chart (6c2a5b2 and the nine before it), which this same App makes the
+# same way: verified, author 324366854 (a Bot), committer `web-flow`. `sweep.py`
+# K2 requires exactly this, so `rewrite_branch` refuses anything else.
+BOT_ID = 324366854
+BOT_EMAIL = f"{BOT_ID}+{BOT}@users.noreply.github.com"
+WEB_FLOW_ID = 19864447
+WEB_FLOW_EMAIL = "noreply@github.com"
 GENERATED = re.compile(r"chore\(deps\): (bump|reorder|regenerate) yadgarhq/actions hooks ")
 MAX_BRANCH_COMMITS = 50
 DEPLOYABLE = "yadgar-deployable"
@@ -587,6 +596,38 @@ def body(template, repository, cls, current, tag, changes, deployable):
 # --------------------------------------------------------------------------
 
 
+class Unverified(Refusal):
+    """A commit the App made is not verified, bot-authored and `web-flow`-committed.
+
+    Signing does not fail for one repository: it fails for all of them. So this
+    is NOT a per-row refusal. It ends the run, before the next repository gets
+    another commit the sweeper would refuse on K2.
+    """
+
+
+def check_created(made):
+    """The `POST git/commits` answer, checked BEFORE any ref points at it."""
+    if (made.get("verification") or {}).get("verified") is not True:
+        raise Unverified("the new commit is not verified; no ref was moved")
+    if (made.get("author") or {}).get("email") != BOT_EMAIL:
+        raise Unverified("the new commit's author is not the App; no ref was moved")
+    if (made.get("committer") or {}).get("email") != WEB_FLOW_EMAIL:
+        raise Unverified("the new commit's committer is not GitHub; no ref was moved")
+
+
+def check_landed(commit, sha):
+    """`commits/{sha}` after the ref moved: the same facts `sweep.py` K2 demands."""
+    if commit.get("sha") != sha:
+        raise Unverified("the commits API answered for another sha")
+    if ((commit.get("commit") or {}).get("verification") or {}).get("verified") is not True:
+        raise Unverified(f"{sha} is not verified")
+    author = commit.get("author") or {}
+    if author.get("id") != BOT_ID or author.get("type") != "Bot":
+        raise Unverified(f"{sha} is not authored by the release App")
+    if (commit.get("committer") or {}).get("id") != WEB_FLOW_ID:
+        raise Unverified(f"{sha} is not committed by web-flow")
+
+
 def unified(old, new, repo):
     return "".join(difflib.unified_diff(
         old.splitlines(keepends=True), new.splitlines(keepends=True),
@@ -599,7 +640,7 @@ def one(client, owner, meta, cls, tag, classes, live, row):
     got = client.read_file(owner, name, CONFIG, base_sha)
     if got is None:
         raise Refusal(f"no {CONFIG} on `{base}`")
-    text, blob = got
+    text = got[0]
     current = parse(text).rev
     if not TAG.fullmatch(current):
         # The value is untrusted and is NOT echoed: it would reach the summary.
@@ -669,12 +710,12 @@ def one(client, owner, meta, cls, tag, classes, live, row):
     if open_pr is not None and (open_pr["title"], open_pr["body"]) != (title, text_body):
         client.update_pr(owner, name, open_pr["number"], title, text_body)
         wrote = True
-    if head is None:
-        client.create_ref(owner, name, branch, base_sha)
+    # ONE REF WRITE, NEVER THROUGH THE BASE (yaadgaar 466). Resetting to the
+    # base tip and then putting the file let GitHub see head == base, and it
+    # CLOSED the open pull request: 10 of 21 at v1.39.0.
     if rewrite:
-        if head is not None:
-            client.reset_ref(owner, name, branch, base_sha)
-        client.put_file(owner, name, CONFIG, branch, new, blob, title)
+        client.rewrite_branch(owner, name, branch, base_sha, CONFIG, new, title,
+                              exists=head is not None)
         wrote = True
     if open_pr is None:
         row.update(status="opened",
@@ -751,6 +792,8 @@ def run(client, owner, tag, classes, live, manifest_text=None):
             continue
         try:
             one(client, owner, meta, names[0], tag, classes, live, row)
+        except Unverified:
+            raise
         except Refusal as refusal:
             row.update(status="error", note=str(refusal))
     return rows, 1 if any(r["status"] == "error" for r in rows) else 0
@@ -887,20 +930,40 @@ class Gh:
                  "url": p["html_url"], "title": p["title"], "body": p["body"] or ""}
                 for p in json.loads(out)]
 
-    def create_ref(self, owner, repo, branch, sha):
-        self._api("-X", "POST", f"repos/{q(owner)}/{q(repo)}/git/refs",
-                  payload={"ref": f"refs/heads/{branch}", "sha": sha})
+    def rewrite_branch(self, owner, repo, branch, parent, path, text, message, exists):
+        """`branch` becomes ONE new commit on `parent` that carries `text` at `path`.
 
-    def reset_ref(self, owner, repo, branch, sha):
+        The commit is built first (blob, tree on `parent`'s tree, commit), and
+        only then does the branch move, in one ref write, straight from its old
+        head to the new commit. It never passes through `parent`: a pull
+        request whose head equals its base is closed by GitHub (yaadgaar 466).
+        `exists` false creates the branch at the new commit instead.
+
+        No author or committer is sent, so GitHub signs the commit as the App
+        with `web-flow` as committer. That is checked twice: on the create
+        answer before the ref moves, and on the commits API after it, which is
+        what `sweep.py` K2 reads. Either failing raises `Unverified`.
+        """
         if branch != BRANCH:
             raise Refusal(f"refusing to force-move `{branch}`: only `{BRANCH}` is ours")
-        self._api("-X", "PATCH", f"repos/{q(owner)}/{q(repo)}/git/refs/heads/{q(branch)}",
-                  payload={"sha": sha, "force": True})
-
-    def put_file(self, owner, repo, path, branch, text, blob, message):
-        self._api("-X", "PUT", f"repos/{q(owner)}/{q(repo)}/contents/{path}", payload={
-            "message": message, "branch": branch, "sha": blob,
-            "content": base64.b64encode(text.encode()).decode()})
+        at = f"repos/{q(owner)}/{q(repo)}"
+        tree = json.loads(self._api(f"{at}/git/commits/{q(parent, '')}"))["tree"]["sha"]
+        blob = json.loads(self._api("-X", "POST", f"{at}/git/blobs", payload={
+            "content": base64.b64encode(text.encode()).decode(), "encoding": "base64"}))["sha"]
+        new_tree = json.loads(self._api("-X", "POST", f"{at}/git/trees", payload={
+            "base_tree": tree,
+            "tree": [{"path": path, "mode": "100644", "type": "blob", "sha": blob}]}))["sha"]
+        made = json.loads(self._api("-X", "POST", f"{at}/git/commits", payload={
+            "message": message, "tree": new_tree, "parents": [parent]}))
+        check_created(made)
+        sha = made["sha"]
+        if exists:
+            self._api("-X", "PATCH", f"{at}/git/refs/heads/{q(branch)}",
+                      payload={"sha": sha, "force": True})
+        else:
+            self._api("-X", "POST", f"{at}/git/refs",
+                      payload={"ref": f"refs/heads/{branch}", "sha": sha})
+        check_landed(json.loads(self._api(f"{at}/commits/{q(sha, '')}")), sha)
 
     def create_pr(self, owner, repo, base, branch, title, body_text):
         out = self._api("-X", "POST", f"repos/{q(owner)}/{q(repo)}/pulls", payload={
@@ -921,11 +984,28 @@ def summary(text):
     """The report goes to the step summary and NOWHERE ELSE (review of
     actions#124). It carries consumer diff context, and the runner reads any
     stdout line that starts, after leading whitespace, with `::` as a
-    workflow command."""
+    workflow command. `outcomes` is the one stdout copy, and it carries no
+    consumer text."""
     path = os.environ.get("GITHUB_STEP_SUMMARY")
     if path:
         with open(path, "a", encoding="utf-8") as handle:
             handle.write(text)
+
+
+def outcomes(rows, owner):
+    """One stdout line per repository: name, status, pull request (yaadgaar 466).
+
+    The step summary is not readable through the API; the job log is. Only the
+    repository name, the status and the url are printed, never a patch, a
+    change or a note, and each line starts with `fan-out ` and holds no `::`.
+    """
+    lines = []
+    for r in rows:
+        line = annotation(f"{owner}/{r['repo']}: {r['status']} {r['url']}".rstrip())
+        while "::" in line:  # `annotation` leaves `::` behind in `:::`
+            line = line.replace("::", ": :")
+        lines.append("fan-out " + line)
+    return lines
 
 
 def output(key, value):
@@ -1026,6 +1106,8 @@ def main(argv):
         return 1
     summary(report(rows, tag, args.live))
     print(f"{len(rows)} repositories reported to the step summary ({'live' if args.live else 'dry'}).")
+    for line in outcomes(rows, args.owner):
+        print(line)
     for r in rows:
         if r["status"] == "error":
             print(f"::error::{annotation(args.owner + '/' + r['repo'] + ': ' + r['note'])}",
