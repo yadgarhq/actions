@@ -153,14 +153,18 @@ def ships(files):
     return any(os.path.basename(name) in SHIPS for name in files)
 
 
-def bot_only(authors):
-    """Whether EVERY commit in the range is bot-authored.
+def bot_only(bots):
+    """Whether EVERY commit in the range is a confirmed bot commit.
+
+    `bots` holds one verdict per commit from `pr_body.is_bot`, which asks the
+    commits API (yaadgaar 456). Only the boolean `True` counts, so an author
+    STRING passed here by mistake reads as a person, never as a bot.
 
     `all(... for a in [])` is True, so the emptiness is tested explicitly. A
     vacuous truth here would let an empty range satisfy the synthesis condition
     and cut a second tag on a commit that already carries one.
     """
-    return bool(authors) and all(is_bot(author) for author in authors)
+    return bool(bots) and all(bot is True for bot in bots)
 
 
 def refuse_baseline(last, tags):
@@ -210,7 +214,7 @@ def refuse_baseline(last, tags):
     return lines
 
 
-def refuse_entries(last, authors, files):
+def refuse_entries(last, bots, files):
     """No parseable entries: green where nothing ships, red otherwise.
 
     WITH A GREEN GATE THIS IMPLIES A BOT. The `gate` step ahead of this reddens a
@@ -220,7 +224,7 @@ def refuse_entries(last, authors, files):
     a condition anybody hits today: it fires if the gate's reader and this one
     ever disagree about what a body contains, instead of shipping nothing quietly.
     """
-    if bot_only(authors) and not ships(files):
+    if bot_only(bots) and not ships(files):
         return 0, [
             f"No parseable Changelog entries since `{last}`, and every commit in",
             "the range is bot-authored and touches nothing that **ships** — no",
@@ -261,8 +265,11 @@ def compute(last, base, entries, matches):
     return nxt, note, lines
 
 
-def derive(last, tags, messages, authors, files):
+def derive(last, tags, messages, bots, files):
     """The whole branch table, as a verdict a test can read.
+
+    `bots` is one boolean per message: whether `pr_body.is_bot` confirmed that
+    commit as a trusted bot's through the commits API.
 
     Every path that cannot be CERTAIN yields an empty version and the tagging
     steps skip. There is no default and no best guess — a tag cannot be withdrawn
@@ -274,7 +281,7 @@ def derive(last, tags, messages, authors, files):
     # fix used to reach a release only if some LATER human merge happened to cut a
     # tag covering its range, which is indistinguishable from working until the
     # day nothing follows. Two are sitting un-released right now.
-    if not entries and bot_only(authors) and ships(files):
+    if not entries and bot_only(bots) and ships(files):
         entries.append(SYNTHETIC)
         # THE STRINGS AND THE MATCH OBJECTS GO TO DIFFERENT LISTS. `entries`
         # carries text to the tag message; `matches` and `lenient` carry parsed
@@ -303,7 +310,7 @@ def derive(last, tags, messages, authors, files):
         return Verdict(1, "", "", entries, out + refuse_baseline(last, tags))
 
     if not entries:
-        rc, lines = refuse_entries(last, authors, files)
+        rc, lines = refuse_entries(last, bots, files)
         return Verdict(rc, "", "", entries, out + lines)
 
     if bump_for(matches) != bump_for(lenient):
@@ -324,31 +331,40 @@ def derive(last, tags, messages, authors, files):
     return Verdict(0, nxt, note, entries, out + lines)
 
 
-def state():
-    """What git says, paired so a message can never be read against another's author."""
+def state(repo, token):
+    """What git says, paired so a message can never be read against another's author.
+
+    Each commit's bot verdict comes from `pr_body.is_bot`, asked with that
+    commit's OWN sha (yaadgaar 456): the author name is only a claim, and the
+    commits API is the proof. No repository or token reads every commit as a
+    person's.
+    """
     last = sh("git", "describe", "--tags", "--abbrev=0", "--match", "v*")
     tags = [t for t in sh("git", "tag", "--list", "v*").splitlines() if t.strip()]
     rng = f"{last}..HEAD" if last else "HEAD"
     # ONE CALL RATHER THAN TWO. Splitting the authors out into their own `git log`
     # pairs them by INDEX, and any commit git chose to omit from one list and not
-    # the other would silently shift every author by one.
-    log = sh("git", "log", rng, "--format=%an <%ae>%x1f%B%x00")
-    messages, authors = [], []
+    # the other would silently shift every author by one. The sha rides in the
+    # same record for the same reason.
+    log = sh("git", "log", rng, "--format=%H%x1f%an <%ae>%x1f%B%x00")
+    messages, bots = [], []
     for record in log.split("\0"):
         if not record.strip():
             continue
-        author, _, message = record.partition("\x1f")
-        authors.append(author.strip())
+        sha, _, rest = record.partition("\x1f")
+        author, _, message = rest.partition("\x1f")
+        bots.append(is_bot(author.strip(), sha.strip(), repo, token))
         messages.append(message)
     files = []
     if last:
         files = [f for f in sh("git", "diff", "--name-only", rng).splitlines() if f.strip()]
-    return last, tags, messages, authors, files
+    return last, tags, messages, bots, files
 
 
 def main():
-    last, tags, messages, authors, files = state()
-    verdict = derive(last, tags, messages, authors, files)
+    last, tags, messages, bots, files = state(
+        os.environ.get("GITHUB_REPOSITORY") or "", os.environ.get("GH_TOKEN") or "")
+    verdict = derive(last, tags, messages, bots, files)
     text = "\n".join(verdict.lines)
 
     if verdict.nxt:

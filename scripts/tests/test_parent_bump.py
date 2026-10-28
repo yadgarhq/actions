@@ -403,7 +403,7 @@ def test_the_commit_message_makes_the_parent_derive_nothing():
     assert bump(api) == 0
     message = api.puts[0]["message"]
     verdict = next_version.derive(
-        "v0.1.0", ["v0.1.0"], [message], [BOT], ["chart/Chart.yaml"]
+        "v0.1.0", ["v0.1.0"], [message], [True], ["chart/Chart.yaml"]
     )
     assert verdict.rc == 0, "\n".join(verdict.lines)
     assert verdict.nxt == ""
@@ -414,8 +414,19 @@ def test_the_author_github_stamps_is_one_pr_body_reads_as_a_bot():
 
     `refuse_entries` returns rc=1 for a non-bot range with no Changelog, and its
     message says "Cut the intended tag by hand" — advice that would be wrong.
+
+    YAADGAAR 456: the name is now only the claim. The proof is the commits API's
+    answer for a pin commit, read off `GET /repos/yadgarhq/chart/commits/359fae8`
+    on 2026-10-28 and trimmed to the fields `pr_body.confirms_bot` reads.
     """
-    assert pr_body.is_bot(BOT)
+    sha = "359fae8b7de6dfbb9fca3c206786c2141d5a1898"
+    assert pr_body.claims_bot(BOT)
+    assert pr_body.confirms_bot({
+        "sha": sha,
+        "commit": {"verification": {"verified": True, "reason": "valid"}},
+        "author": {"login": "yadgarhq-bot[bot]", "id": 324366854, "type": "Bot"},
+        "committer": {"login": "web-flow", "id": 19864447, "type": "User"},
+    }, sha)
 
 
 def test_the_commit_message_carries_no_bullet_at_all():
@@ -580,7 +591,7 @@ def test_a_lost_tag_race_restamps_before_it_tags_the_next_number():
     assert api.puts[1]["files"] == sorted(["example/application.yaml",
                                            "example/kind/application.yaml"])
     verdict = next_version.derive(
-        "v0.1.0", ["v0.1.0"], [api.puts[1]["message"]], [BOT], api.puts[1]["files"]
+        "v0.1.0", ["v0.1.0"], [api.puts[1]["message"]], [True], api.puts[1]["files"]
     )
     assert verdict.rc == 0 and verdict.nxt == "", "\n".join(verdict.lines)
 
@@ -629,7 +640,7 @@ def test_the_combined_commit_derives_nothing_in_the_parent():
     api = with_examples()
     assert bump(api) == 0
     verdict = next_version.derive(
-        "v0.1.0", ["v0.1.0"], [api.puts[0]["message"]], [BOT], api.puts[0]["files"]
+        "v0.1.0", ["v0.1.0"], [api.puts[0]["message"]], [True], api.puts[0]["files"]
     )
     assert verdict.rc == 0 and verdict.nxt == "", "\n".join(verdict.lines)
     for line in api.puts[0]["message"].splitlines():
@@ -678,7 +689,7 @@ def test_a_deferred_human_merge_is_released_by_the_parent_tag():
     verdict = next_version.derive(
         "v0.4.0", ["v0.3.8", "v0.4.0"],
         ["fix: y\n\n## Changelog\n\n- fix: a later merge\n"],
-        ["Max <max@example.com>"], ["chart/values.yaml"],
+        [False], ["chart/values.yaml"],
     )
     assert verdict.nxt == "0.4.1"
 

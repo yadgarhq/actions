@@ -349,7 +349,7 @@ def test_a_leading_v_is_refused():
 def test_the_stamp_message_makes_the_repository_derive_nothing():
     message = example_pins.message("0.3.9")
     verdict = next_version.derive(
-        "v0.3.8", ["v0.3.8"], [message], [BOT], sorted(FILES)
+        "v0.3.8", ["v0.3.8"], [message], [True], sorted(FILES)
     )
     assert verdict.rc == 0, "\n".join(verdict.lines)
     assert verdict.nxt == ""

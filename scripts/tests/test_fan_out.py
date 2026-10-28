@@ -817,7 +817,7 @@ def human_body(changelog):
 def test_a_merged_adoption_cuts_no_release(repo, deployable):
     body = generated_body(repo, deployable=deployable)
     for message in (squash(body), f"title (#180)\n\n{body}"):
-        verdict = next_version.derive("v1.4.0", ["v1.4.0"], [message], [FAN_OUT_BOT], ADOPTED)
+        verdict = next_version.derive("v1.4.0", ["v1.4.0"], [message], [True], ADOPTED)
         assert (verdict.rc, verdict.nxt) == (0, ""), verdict.lines
 
 
@@ -860,10 +860,28 @@ def test_the_body_says_a_commit_added_to_the_branch_lands_unreleased():
     assert "fix the cause in its own pull request" in risk
 
 
+def confirmed_by_the_api(monkeypatch):
+    """The commits API's answer for a squash-merged adoption, for any sha.
+
+    Shape read off `GET /repos/yadgarhq/docs/commits/2a370c8` on 2026-10-28:
+    verified, author id 324366854 (`Bot`), committer `web-flow` (19864447).
+    """
+    monkeypatch.setattr(pr_body, "fetch_commit", lambda repo, sha, token: {
+        "sha": sha,
+        "commit": {"verification": {"verified": True}},
+        "author": {"id": 324366854, "type": "Bot"},
+        "committer": {"id": 19864447, "type": "User"},
+    })
+
+
 def test_the_merge_time_gate_exempts_the_bot_author(monkeypatch, capsys):
+    confirmed_by_the_api(monkeypatch)
     monkeypatch.setenv("BODY", squash(generated_body()))
     monkeypatch.setenv("WRAPPED", "true")
     monkeypatch.setenv("AUTHOR", FAN_OUT_BOT)
+    monkeypatch.setenv("SHA", "a" * 40)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "yadgarhq/docs")
+    monkeypatch.setenv("GH_TOKEN", "t")
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     assert pr_body.main() == 0
     assert "bot-authored" in capsys.readouterr().out
@@ -886,7 +904,7 @@ def test_the_human_template_still_refuses_a_body_with_no_bullet():
 ])
 def test_a_human_bullet_still_releases(changelog, expected):
     verdict = next_version.derive("v1.4.0", ["v1.4.0"], [squash(human_body(changelog), "t")],
-                                  [HUMAN], ["src/main.rs"])
+                                  [False], ["src/main.rs"])
     assert (verdict.rc, verdict.nxt) == (0, expected)
 
 
@@ -894,12 +912,49 @@ def test_the_adoption_body_under_a_human_author_fails_closed():
     # Not reachable today (every adoption merge is bot-authored); if it ever is,
     # the job reds rather than tagging or staying silently green.
     verdict = next_version.derive("v1.4.0", ["v1.4.0"], [squash(generated_body())],
-                                  [HUMAN], ADOPTED)
+                                  [False], ADOPTED)
     assert (verdict.rc, verdict.nxt) == (1, "")
 
 
-def test_a_real_adoption_merge_cuts_no_tag_end_to_end(tmp_path):
+def test_a_real_adoption_merge_cuts_no_tag_end_to_end(tmp_path, monkeypatch):
+    # IN-PROCESS, because the bot verdict now comes from the commits API and a
+    # subprocess cannot be handed a stub without an injection point a caller
+    # could also use. The git history is still real.
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    for name in [k for k in os.environ if k.startswith("GIT_")]:
+        monkeypatch.delenv(name)
+
+    def git(*args):
+        subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "user.name=t",
+                        "-c", "user.email=t@t", *args],
+                       cwd=tmp_path, check=True, capture_output=True, text=True, env=env)
+
+    git("init", "-q", "-b", "main")
+    git("commit", "-q", "--allow-empty", "-m", "root")
+    git("tag", "-a", "v1.4.0", "-m", "v1.4.0")
+    (tmp_path / fan_out.CONFIG).write_text("repos: []\n")
+    git("add", "--", fan_out.CONFIG)
+    git("commit", "-q", f"--author={FAN_OUT_BOT}", "-m", squash(generated_body()))
+    out, summary = tmp_path / "out.txt", tmp_path / "summary.md"
+    out.touch()
+    summary.touch()
+    for name, value in dict(GITHUB_OUTPUT=str(out), GITHUB_STEP_SUMMARY=str(summary),
+                            RUNNER_TEMP=str(tmp_path), GITHUB_REPOSITORY="yadgarhq/docs",
+                            GH_TOKEN="t").items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.chdir(tmp_path)
+    confirmed_by_the_api(monkeypatch)
+    assert next_version.main() == 0
+    assert out.read_text() == "next=\n"
+    assert not (tmp_path / "tag_message.txt").exists()
+
+
+def test_a_real_adoption_merge_the_api_cannot_confirm_fails_closed(tmp_path):
+    # The same history as a subprocess with no token: the bot claim cannot be
+    # checked, the range reads as a person's, and a person's range with no
+    # Changelog reds the job rather than staying silently green.
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("GIT_") and k != "GH_TOKEN"}
 
     def git(*args):
         subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "user.name=t",
@@ -916,10 +971,10 @@ def test_a_real_adoption_merge_cuts_no_tag_end_to_end(tmp_path):
     out.touch()
     summary.touch()
     env.update(GITHUB_OUTPUT=str(out), GITHUB_STEP_SUMMARY=str(summary),
-               RUNNER_TEMP=str(tmp_path))
+               RUNNER_TEMP=str(tmp_path), GITHUB_REPOSITORY="yadgarhq/docs")
     done = subprocess.run([sys.executable, str(REPO / "scripts" / "next_version.py")],
                           cwd=tmp_path, env=env, capture_output=True, text=True)
-    assert done.returncode == 0, done.stdout + done.stderr
+    assert done.returncode == 1, done.stdout + done.stderr
     assert out.read_text() == "next=\n"
     assert not (tmp_path / "tag_message.txt").exists()
 

@@ -206,41 +206,258 @@ def test_a_continuation_beginning_with_a_dash_is_not_read_as_a_bullet():
 
 
 # ------------------------------------------------------------- the bot escape
+#
+# YAADGAAR 456. The name is a CLAIM and the commits API is the PROOF. A commit
+# author is whatever `git commit --author=` was told, so `x[bot]` costs nothing
+# to type; `author.id`, `committer.id` and `verification.verified` are set by
+# GitHub. A commit is a bot's only when BOTH say so, and any failure to read the
+# proof reads as a person.
+#
+# The fixtures are real responses, trimmed to the fields read:
+# `GET /repos/yadgarhq/chart/commits/359fae8` (a `parent_bump.py` pin) and
+# `GET /repos/yadgarhq/yadgar/commits/f1a149e` (a squash-merged dependabot PR),
+# both read on 2026-10-28.
+
+APP = "yadgarhq-bot[bot] <324366854+yadgarhq-bot[bot]@users.noreply.github.com>"
+DEPENDABOT = "dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>"
+APP_SHA = "359fae8b7de6dfbb9fca3c206786c2141d5a1898"
+DEPENDABOT_SHA = "f1a149e5b0746b810558030d62c97862ec2f7315"
 
 
-def test_a_bot_author_is_exempt_in_all_three_shapes():
+def api_commit(sha=APP_SHA, author_id=324366854, author_type="Bot",
+               committer_id=19864447, verified=True):
+    """One `commits/{sha}` response, real by default, so a test bends one field."""
+    return {
+        "sha": sha,
+        "commit": {"verification": {"verified": verified, "reason": "valid"}},
+        "author": {"login": "yadgarhq-bot[bot]", "id": author_id, "type": author_type},
+        "committer": {"login": "web-flow", "id": committer_id, "type": "User"},
+    }
+
+
+def serve(monkeypatch, response):
+    """Stand in for the commits API. A callable raises, as the network can."""
+    seen = []
+
+    def fetch(repo, sha, token):
+        seen.append((repo, sha, token))
+        if callable(response):
+            return response()
+        return response
+
+    monkeypatch.setattr(pr_body, "fetch_commit", fetch)
+    return seen
+
+
+def test_the_name_claim_is_matched_in_all_three_shapes():
     """Name, noreply address, and the `%an <%ae>` form the workflow passes."""
-    assert pr_body.is_bot("dependabot[bot]")
-    assert pr_body.is_bot("49699333+dependabot[bot]@users.noreply.github.com")
-    assert pr_body.is_bot("dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>")
+    assert pr_body.claims_bot("dependabot[bot]")
+    assert pr_body.claims_bot("49699333+dependabot[bot]@users.noreply.github.com")
+    assert pr_body.claims_bot(DEPENDABOT)
+    assert pr_body.claims_bot("yadgarhq-bot[bot] <releases@example.invalid>")
 
 
-def test_a_bot_name_alone_is_enough_when_the_address_is_not_a_noreply():
-    """The exemption must not depend on the address happening to carry `[bot]`."""
-    assert pr_body.is_bot("yadgarhq-bot[bot] <releases@example.invalid>")
+def test_a_person_makes_no_claim():
+    assert not pr_body.claims_bot("Max Agahi")
+    assert not pr_body.claims_bot("64974579+m-agahi@users.noreply.github.com")
+    assert not pr_body.claims_bot("Robotics Team")
 
 
-def test_a_person_is_not_exempt():
-    assert not pr_body.is_bot("Max Agahi")
-    assert not pr_body.is_bot("64974579+m-agahi@users.noreply.github.com")
+def test_a_verified_commit_by_the_release_app_is_a_bot(monkeypatch):
+    seen = serve(monkeypatch, api_commit())
+    assert pr_body.is_bot(APP, APP_SHA, "yadgarhq/chart", "t")
+    assert seen == [("yadgarhq/chart", APP_SHA, "t")]
 
 
-def test_a_name_merely_containing_bot_is_not_exempt():
-    assert not pr_body.is_bot("Robotics Team")
+def test_a_verified_commit_by_dependabot_is_a_bot(monkeypatch):
+    """Dependabot is kept: its id is as unforgeable as the App's, and dropping it
+    would redden `version` on every dependency merge and end the `fix(deps)`
+    synthesis in `next_version.derive`."""
+    serve(monkeypatch, api_commit(sha=DEPENDABOT_SHA, author_id=49699333))
+    assert pr_body.is_bot(DEPENDABOT, DEPENDABOT_SHA, "yadgarhq/yadgar", "t")
 
 
-def test_the_release_app_is_a_bot():
-    """`parent_bump.py` writes a commit per module release into `chart`.
+def test_a_forged_bot_name_on_an_unverified_commit_is_a_person(monkeypatch):
+    serve(monkeypatch, api_commit(verified=False))
+    assert not pr_body.is_bot(APP, APP_SHA, "yadgarhq/chart", "t")
 
-    It is a subject plus a short prose body: no template sections and no
-    Changelog bullet.
 
-    The same shape of commit was read off `argocd`'s history, where
-    `ci-release.yaml` wrote one per release until ADR-0848 retired that write.
-    Without the exemption every module release would redden chart's push to main.
-    """
-    author = "yadgarhq-bot[bot] <324366854+yadgarhq-bot[bot]@users.noreply.github.com>"
-    assert pr_body.is_bot(author)
+def test_a_forged_bot_name_resolving_to_another_user_is_a_person(monkeypatch):
+    """`git commit --author='x[bot] <me@example.com>'`, signed and verified."""
+    serve(monkeypatch, api_commit(author_id=64974579, author_type="User"))
+    assert not pr_body.is_bot("x[bot] <me@example.com>", APP_SHA, "yadgarhq/chart", "t")
+
+
+def test_a_forged_bot_name_resolving_to_no_user_is_a_person(monkeypatch):
+    serve(monkeypatch, {**api_commit(), "author": None})
+    assert not pr_body.is_bot(APP, APP_SHA, "yadgarhq/chart", "t")
+
+
+def test_another_bot_is_a_person(monkeypatch):
+    """Any GitHub App can be installed by somebody; only the two named are trusted."""
+    serve(monkeypatch, api_commit(author_id=41898282))
+    assert not pr_body.is_bot("github-actions[bot] <x@y>", APP_SHA, "yadgarhq/chart", "t")
+
+
+def test_the_app_id_as_a_user_type_is_a_person(monkeypatch):
+    serve(monkeypatch, api_commit(author_type="User"))
+    assert not pr_body.is_bot(APP, APP_SHA, "yadgarhq/chart", "t")
+
+
+def test_the_app_email_verified_by_a_person_committing_is_a_person(monkeypatch):
+    """`verified` vouches for the COMMITTER's key, not the author. A person can
+    set the App's noreply address as author, sign with their own key, and read
+    back `author.id == 324366854` and `verified == true`. The committer gives it
+    away: GitHub's merge commits carry `web-flow`."""
+    serve(monkeypatch, api_commit(committer_id=64974579))
+    assert not pr_body.is_bot(APP, APP_SHA, "yadgarhq/chart", "t")
+
+
+def test_a_response_for_another_commit_is_a_person(monkeypatch):
+    serve(monkeypatch, api_commit(sha="0" * 40))
+    assert not pr_body.is_bot(APP, APP_SHA, "yadgarhq/chart", "t")
+
+
+def test_verified_must_be_the_boolean_true(monkeypatch):
+    serve(monkeypatch, api_commit(verified="true"))
+    assert not pr_body.is_bot(APP, APP_SHA, "yadgarhq/chart", "t")
+
+
+def test_an_id_must_be_an_integer(monkeypatch):
+    """A string never matches the set; a float DOES (`324366854.0 in {324366854}`
+    is True), and `json.loads` yields one for `324366854.0`. Booleans are ints to
+    `in`, so `True` must not pass for an id of 1 either."""
+    for author_id, committer_id in (("324366854", 19864447), (324366854.0, 19864447),
+                                    (324366854, 19864447.0)):
+        serve(monkeypatch, api_commit(author_id=author_id, committer_id=committer_id))
+        assert not pr_body.is_bot(APP, APP_SHA, "yadgarhq/chart", "t"), (author_id, committer_id)
+
+
+def test_an_api_error_is_a_person(monkeypatch):
+    """`fetch_commit` returns None for every failure; that is never a bot."""
+    serve(monkeypatch, None)
+    assert not pr_body.is_bot(APP, APP_SHA, "yadgarhq/chart", "t")
+
+
+def test_a_malformed_response_is_a_person(monkeypatch):
+    for response in ({}, [], "x", {"sha": APP_SHA}, {**api_commit(), "commit": None}):
+        serve(monkeypatch, response)
+        assert not pr_body.is_bot(APP, APP_SHA, "yadgarhq/chart", "t"), response
+
+
+def test_no_token_sha_or_repository_is_a_person_and_asks_nothing(monkeypatch):
+    seen = serve(monkeypatch, api_commit())
+    assert not pr_body.is_bot(APP, APP_SHA, "yadgarhq/chart", "")
+    assert not pr_body.is_bot(APP, "", "yadgarhq/chart", "t")
+    assert not pr_body.is_bot(APP, APP_SHA, "", "t")
+    assert seen == []
+
+
+def test_a_person_is_never_looked_up(monkeypatch):
+    """The name claim is a precondition, so the API can only narrow the old gate."""
+    seen = serve(monkeypatch, api_commit())
+    assert not pr_body.is_bot("Max Agahi <x@y>", APP_SHA, "yadgarhq/chart", "t")
+    assert seen == []
+
+
+def test_fetch_commit_fails_closed_on_every_error(monkeypatch):
+    import urllib.error
+
+    def boom(*_a, **_k):
+        raise urllib.error.HTTPError("u", 403, "Forbidden", {}, None)
+
+    monkeypatch.setattr(pr_body.urllib.request, "urlopen", boom)
+    assert pr_body.fetch_commit("yadgarhq/chart", APP_SHA, "t") is None
+
+    def down(*_a, **_k):
+        raise urllib.error.URLError("down")
+
+    monkeypatch.setattr(pr_body.urllib.request, "urlopen", down)
+    assert pr_body.fetch_commit("yadgarhq/chart", APP_SHA, "t") is None
+
+    class NotJson:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def read(self):
+            return b"<html>"
+
+    monkeypatch.setattr(pr_body.urllib.request, "urlopen", lambda *_a, **_k: NotJson())
+    assert pr_body.fetch_commit("yadgarhq/chart", APP_SHA, "t") is None
+
+
+def test_fetch_commit_reads_the_commit_with_the_token(monkeypatch):
+    import json
+
+    seen = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def read(self):
+            return json.dumps(api_commit()).encode()
+
+    def urlopen(req, timeout):
+        seen.append((req.full_url, req.get_header("Authorization"), timeout))
+        return Response()
+
+    monkeypatch.setattr(pr_body.urllib.request, "urlopen", urlopen)
+    assert pr_body.fetch_commit("yadgarhq/chart", APP_SHA, "t") == api_commit()
+    assert seen == [(f"https://api.github.com/repos/yadgarhq/chart/commits/{APP_SHA}",
+                     "Bearer t", 30)]
+
+
+def test_fetch_commit_refuses_a_malformed_sha_or_repository(monkeypatch):
+    """Both go into a URL that carries the token; neither may steer it."""
+    # RECORDED rather than raised: `fetch_commit` swallows every exception by
+    # design, so an assertion raised in here would read as a pass.
+    reached = []
+    monkeypatch.setattr(pr_body.urllib.request, "urlopen",
+                        lambda req, **_k: reached.append(req.full_url))
+    for repo, sha in (("yadgarhq/chart", "HEAD"),
+                      ("yadgarhq/chart", APP_SHA.upper()),
+                      ("yadgarhq/chart", APP_SHA + "/../../x"),
+                      ("yadgarhq/chart/../../x", APP_SHA),
+                      ("yadgarhq/..", APP_SHA),
+                      ("../x", APP_SHA),
+                      ("evil.example/x?", APP_SHA)):
+        assert pr_body.fetch_commit(repo, sha, "t") is None, (repo, sha)
+    assert reached == []
+
+
+def test_the_gate_exempts_a_verified_bot_and_says_which(monkeypatch, capsys):
+    serve(monkeypatch, api_commit())
+    for name, value in {"BODY": "ci: gateway 0.9.3", "WRAPPED": "true",
+                        "AUTHOR": APP, "SHA": APP_SHA,
+                        "GITHUB_REPOSITORY": "yadgarhq/chart", "GH_TOKEN": "t"}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    assert pr_body.main() == 0
+    assert "yadgarhq-bot[bot]" in capsys.readouterr().out
+
+
+def test_the_gate_refuses_a_forged_bot_with_the_same_body(monkeypatch):
+    serve(monkeypatch, api_commit(verified=False))
+    for name, value in {"BODY": "ci: gateway 0.9.3", "WRAPPED": "true",
+                        "AUTHOR": APP, "SHA": APP_SHA,
+                        "GITHUB_REPOSITORY": "yadgarhq/chart", "GH_TOKEN": "t"}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    assert pr_body.main() == 1
+
+
+def test_the_gate_refuses_a_bot_name_it_cannot_check():
+    """No token, as a subprocess with nothing stubbed: the API is unreachable
+    and the claim alone no longer exempts."""
+    result = run("ci: gateway 0.9.3", author="yadgarhq-bot[bot] <x@y>")
+    assert result.returncode == 1
 
 
 # ------------------------------------------------------------------- the gate
@@ -286,12 +503,6 @@ def test_the_gate_refuses_an_empty_body_rather_than_passing_it():
     """The degenerate input. An absent body proves nothing and must not pass."""
     result = run("")
     assert result.returncode == 1
-
-
-def test_the_gate_exempts_a_bot_author_and_says_which():
-    result = run("ci: gateway 0.9.3", author="yadgarhq-bot[bot] <x@y>")
-    assert result.returncode == 0
-    assert "yadgarhq-bot[bot]" in result.stdout
 
 
 def test_the_gate_does_not_exempt_a_person_with_the_same_body():
