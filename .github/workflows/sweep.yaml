@@ -1,0 +1,152 @@
+name: sweep
+
+# YAADGAAR 442 (c). The other half of `fan-out.yaml`. The fan-out PROPOSES one
+# `actions-adopt` pull request per consumer and never merges one (ADR-0982).
+# This workflow finds those pull requests and merges one only when every
+# condition in `scripts/sweep.py` holds, read from the GitHub API in this run.
+# A pull request that is only BEHIND its base is refreshed instead: the branch
+# is reset to the base tip and the same file written again, so CI runs fresh.
+#
+# DRY UNTIL ARMED. `sweep.py mode` says `live=true` only when `classes.json`
+# has `"sweep": {"live": true}`, the ref is `main`, and the run is the schedule
+# or a dispatch with `dry_run` false. `live` ships false. While it is false the
+# `act` job never runs and no write token is minted; `evaluate` writes its
+# verdict table to the step summary and nothing else.
+#
+# READS USE GITHUB_TOKEN. R1 admits only public repositories, and the listing
+# asks for public ones only, so no read here needs the App. The App token is
+# minted per `act` leg, scoped by `repositories:` to that leg's one repository,
+# with `contents: write` and nothing else: the squash merge, the ref reset and
+# the file write are the only calls made with it (the REST permission table
+# lists `contents: write` for each of the three).
+#
+# NOT THE FAN-OUT'S CONCURRENCY GROUP. A queued sweep must never cancel or delay
+# a tag-push fan-out; `sweep.py` instead stops when a fan-out run is in progress
+# or queued.
+#
+# ROLLBACK: set `sweep.live` false in classes.json, or disable this workflow.
+on:
+  schedule:
+    - cron: "13,43 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "report only; merge nothing (live also needs main and sweep.live)"
+        type: boolean
+        default: true
+
+permissions: {}
+
+concurrency:
+  group: sweep
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read # the checkout of this repository
+      actions: read # whether a fan-out run is in progress or queued here
+    outputs:
+      live: ${{ steps.mode.outputs.live }}
+      plan: ${{ steps.evaluate.outputs.plan }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: the tool versions this job installs (versions.yaml)
+        id: versions
+        run: python3 scripts/tool_versions.py versions.yaml >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ steps.versions.outputs.python }}
+      # `ci_verdict.parsed_agrees` parses the consumer's config with PyYAML.
+      - name: install PyYAML
+        env:
+          PYYAML_VERSION: ${{ steps.versions.outputs.pyyaml }}
+        run: pip install --disable-pip-version-check "pyyaml==${PYYAML_VERSION}"
+      - name: live or dry
+        id: mode
+        env:
+          EVENT: ${{ github.event_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          REF: ${{ github.ref }}
+        run: python3 scripts/sweep.py mode
+      # The plan is empty unless live. The table goes to the step summary only.
+      - name: evaluate every open adoption pull request
+        id: evaluate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LIVE: ${{ steps.mode.outputs.live }}
+          OWNER: ${{ github.repository_owner }}
+          EVENT: ${{ github.event_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          args=(evaluate --owner "$OWNER")
+          if [ "$LIVE" = true ]; then
+            args+=(--live)
+          fi
+          python3 scripts/sweep.py "${args[@]}"
+
+  # ONE LEG PER PULL REQUEST, and each one evaluates again from scratch before
+  # it writes (M1): the plan is a list of candidates, never a licence.
+  act:
+    needs: evaluate
+    if: needs.evaluate.outputs.live == 'true' && needs.evaluate.outputs.plan != '[]' && needs.evaluate.outputs.plan != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read # the checkout of this repository
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include: ${{ fromJSON(needs.evaluate.outputs.plan) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: the tool versions this job installs (versions.yaml)
+        id: versions
+        run: python3 scripts/tool_versions.py versions.yaml >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ steps.versions.outputs.python }}
+      - name: install PyYAML
+        env:
+          PYYAML_VERSION: ${{ steps.versions.outputs.pyyaml }}
+        run: pip install --disable-pip-version-check "pyyaml==${PYYAML_VERSION}"
+      # An empty `repositories:` beside `owner:` mints for EVERY repository, so
+      # the leg's name is checked before the mint ever sees it.
+      - name: the leg names exactly one repository
+        id: leg
+        env:
+          REPO: ${{ matrix.repo }}
+        run: python3 scripts/sweep.py check-name -- "$REPO"
+      - name: mint the write token for this one repository
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ matrix.repo }}
+          permission-contents: write
+      - name: merge or refresh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SWEEP_WRITE_TOKEN: ${{ steps.app.outputs.token }}
+          OWNER: ${{ github.repository_owner }}
+          EVENT: ${{ github.event_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          REF: ${{ github.ref }}
+          REPO: ${{ matrix.repo }}
+          NUMBER: ${{ matrix.n }}
+          HEAD: ${{ matrix.head }}
+          ACTION: ${{ matrix.action }}
+        run: >-
+          python3 scripts/sweep.py act --owner "$OWNER" --repo "$REPO"
+          --n "$NUMBER" --head "$HEAD" --action "$ACTION"
