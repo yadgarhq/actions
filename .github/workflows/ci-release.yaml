@@ -326,7 +326,20 @@ jobs:
           # trustworthy: the habit is what protects the one case that is not.
           IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}@${{ steps.push.outputs.digest }}
         run: |
-          cosign sign --yes "$IMAGE"
+          # Rekor can accept a log entry and lose the response, so the next
+          # POST answers 409 createLogEntryConflict (2026-10-28, 2 of 9
+          # releases). Every `cosign sign` call makes a new ephemeral key and
+          # a new Rekor entry, so a retry clears it. Three attempts, then fail.
+          for attempt in 1 2 3; do
+            if cosign sign --yes "$IMAGE"; then
+              exit 0
+            fi
+            echo "::warning::cosign sign failed (attempt ${attempt} of 3)"
+            if [ "$attempt" -eq 1 ]; then sleep 10; fi
+            if [ "$attempt" -eq 2 ]; then sleep 30; fi
+          done
+          echo "::error::cosign sign failed after 3 attempts"
+          exit 1
 
       # A push reports success without saying whether anybody else can pull what
       # it pushed. Visibility is a GitHub-side property this job never sets, and
