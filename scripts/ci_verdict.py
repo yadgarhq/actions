@@ -58,9 +58,11 @@ not been taught refuses the run with a message naming what it saw. A gate that
 guessed would be worse than the loop it replaces: it would report a verdict about
 a condition nobody had read.
 
-That refusal is also the interlock this file was written for, and ledger 685 is
-what came through it. Pull request 52 short-circuits a text-only pull request
-edit by giving seven jobs a `needs.detect.outputs.text_edit != 'true'` conjunct.
+That refusal is also the interlock this file was written for, and legacy ledger
+L685 is what came through it. Pull request 52 short-circuits a text-only pull
+request edit by giving jobs a `needs.detect.outputs.text_edit != 'true'`
+conjunct — seven then, more since; `text_edit_sentinels` reads the set off the
+workflow, so no count here has to be kept true by hand.
 Under the shell loop above the resulting skips read as success — a red
 `ci / passed` superseded by a green one on the same head sha, with no code change
 and no human. Under this file they do not, because `text_edit` resolves through
@@ -73,7 +75,7 @@ absence, a red predecessor and an unreadable API all redden the merge gate.
 WHAT THAT COSTS, stated here because it is the trade rather than a detail. The
 read is `GET /repos/{owner}/{repo}/commits/{sha}/check-runs`, which needs
 `checks: read`. `ci-pr.yaml` declares it at the workflow block, so every job in
-the shared workflow carries it in all eighteen repositories that call the file.
+the shared workflow carries it in all twenty repositories that call the file.
 A called workflow's token can only be NARROWED by its caller, never widened, so
 each caller must grant it on its own `uses:` line as well — which is why the
 assertion is inert, and refuses loudly rather than passing quietly, in any
@@ -84,7 +86,7 @@ JSON handed to this script contains every one of them. A condition that reads
 another job's result makes "should this job have run" depend on whether an
 upstream job passed, and then a skip caused by an upstream FAILURE reads as a job
 that legitimately had nothing to do. That is the same defect one level up, and
-`ci-release.yaml` carried a live instance of it until ledger 729: `chart` ran on
+`ci-release.yaml` carried a live instance of it until legacy ledger L729: `chart` ran on
 `always() && ... && needs.image.result != 'failure'`, so a CANCELLED image job
 published a chart with no digest pinned. Its skip arm now asks
 `needs.detect.outputs.image` — the absent `Containerfile` that made the image job
@@ -301,7 +303,7 @@ def evaluate(expr, resolve):
 # pattern. A rule of the shape "any `needs.detect.outputs.*`" reads whatever
 # `detect` happens to emit, so the day a new output is added the gate starts
 # honouring a condition nobody decided it should honour. That is precisely
-# ledger 685's `text_edit`, and it is how this file was written the first time.
+# L685's `text_edit`, and it is how this file was written the first time.
 #
 # Each entry is a fact about the CHANGE or the EVENT that the gate can check for
 # itself, which is what distinguishes it from a job result. Adding one is a
@@ -321,11 +323,11 @@ _DEFERRED = {}
 def register_deferred_reference(ref, resolver):
     """Teach the gate one further reference, with the assertion that earns it.
 
-    LEDGER 685 LANDED HERE, and the shape it landed in is the one this hook was
+    L685 LANDED HERE, and the shape it landed in is the one this hook was
     written for: the resolver does not report what `text_edit` says, it reports
     what `text_edit` has EARNED. `make_text_edit_resolver` below returns the
     value only after establishing that the standing `ci / passed` on this commit
-    concluded success, and raises `Refused` otherwise — so the seven skips a
+    concluded success, and raises `Refused` otherwise — so the skips a
     text-only edit produces are accepted only on a run that has a green verdict
     to carry forward.
 
@@ -337,15 +339,15 @@ def register_deferred_reference(ref, resolver):
 
 
 # ---------------------------------------------------------------------------
-# Ledger 685: the fact that earns a text-only edit's skips
+# L685: the fact that earns a text-only edit's skips
 # ---------------------------------------------------------------------------
 
-# THE REFERENCE THE SEVEN CONDITIONS READ. Written once here rather than spelled
+# THE REFERENCE THE SHORT-CIRCUITED CONDITIONS READ. Written once rather than spelled
 # out at each use, because the string is the join between `ci-pr.yaml`'s job
 # conditions and this gate's whitelist and a typo in either is a silent refusal.
 TEXT_EDIT_REF = "needs.detect.outputs.text_edit"
 
-# THE ONE CONTEXT THE RULESET REQUIRES, in this repository and in all eighteen
+# THE ONE CONTEXT THE RULESET REQUIRES, in this repository and in all twenty
 # consumers: `<caller job id> / <callee job id>`, where the caller job is named
 # `ci` precisely so that one ruleset serves every repository. A repository that
 # renamed it would not be gated by this name at all, so its pull requests block
@@ -705,8 +707,8 @@ def make_text_edit_resolver(
 
     THE VALUE IS RETURNED ONLY WHEN IT HAS BEEN EARNED. `text_edit` is `true`
     exactly when this run is a pull request edit that changed the title or the
-    body and not the base, and the seven conditions that read it then evaluate
-    FALSE — which tells this gate that seven `skipped` results are what the
+    body and not the base, and every condition that reads it then evaluates
+    FALSE — which tells this gate that those `skipped` results are what the
     workflow asked for. That is the merge-gate bypass pull request 52 was held
     on, and it stops being one here: the value is handed back only after the
     standing `ci / passed` on this same commit is shown to have concluded
@@ -774,8 +776,9 @@ def make_text_edit_resolver(
 #
 # `detect` reports `config_only=true` when the whole pull request is one
 # forward move of the `yadgarhq/actions` hook rev (`config_only.py` says what
-# that means exactly). Seven jobs then skip, and `precommit` runs the hooks at
-# the new rev. This gate does not take `detect`'s word for it. It reads the
+# that means exactly). Every job carrying the `config_only` conjunct then
+# skips, and `precommit` runs the hooks at the new rev. This gate does not
+# take `detect`'s word for it. It reads the
 # change again from the API — `passed` has no checkout of the consumer — and
 # runs the SAME `config_only.classify` over both versions of the file. Any
 # failure to read, any doubt, and any disagreement with `detect` refuses.
@@ -1161,15 +1164,17 @@ def main(argv=None):
     if not event:
         raise Refused("EVENT is empty; every condition here keys off the event.")
 
-    # LEDGER 685, REGISTERED PER RUN. The resolver closes over this run's
+    # L685, REGISTERED PER RUN. The resolver closes over this run's
     # commit, this run's id and this run's token, so there is no way for one
     # run's answer to be read by another — and `_DEFERRED` never holds a
     # resolver built from facts that have gone stale.
     #
     # `REQUIRED_CHECK` IS AN OVERRIDE RATHER THAN A SETTING, and it is SAFE BY
-    # DIRECTION rather than by who can write it. In the eighteen consumers the
-    # value comes from `ci-pr.yaml@main`, which a pull request under review
-    # cannot edit for the run that gates it. In THIS repository it can: the
+    # DIRECTION rather than by who can write it. In the twenty consumers the
+    # value comes from `ci-pr.yaml` at the commit the caller's `@main` resolved
+    # to when the run started (`job.workflow_sha`, ADR-0981) — the same commit
+    # the conditions are read from — which a pull request under review cannot
+    # edit for the run that gates it. In THIS repository it can: the
     # caller uses a local path, exactly so a change to a shared workflow is
     # gated by the version in the pull request. What that buys an author is
     # nothing, because every wrong value fails CLOSED — a check name with no

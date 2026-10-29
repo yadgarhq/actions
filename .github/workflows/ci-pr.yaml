@@ -39,10 +39,10 @@ permissions:
   # CHECKS: READ IS LEDGER 685'S PRICE, AND IT IS PAID BY EVERY JOB IN THIS FILE.
   # Said here rather than left to be discovered: this block is the workflow's,
   # so the permission reaches `precommit`, `test`, `proto` and the rest in all
-  # eighteen repositories that call this file, not only the `passed` job that
+  # twenty repositories that call this file, not only the `passed` job that
   # reads it. That is a real widening and it was accepted deliberately.
   #
-  # WHAT IT BUYS. On a text-only pull request edit seven jobs skip and the body
+  # WHAT IT BUYS. On a text-only pull request edit most jobs skip and the body
   # is the only thing re-read, so `ci / passed` would otherwise report success
   # having checked almost nothing — and GitHub gates on the LATEST check run for
   # a context, so that report SUPERSEDES the red one on the same commit. The
@@ -816,6 +816,87 @@ jobs:
             exit 1
           fi
           python3 "$dir/pr_body.py"
+
+  # YAADGAAR 324 / ADR-1076: RELEASE READINESS, BEFORE THE MERGE. The `version`
+  # job runs only after a merge, so a baseline it cannot count from is found
+  # when the release is already missed. This job asks the same baseline
+  # question on the pull request, where a red still blocks the merge:
+  #
+  #   no `v*` tag at all                         notice, green (argocd, docs,
+  #                                              estate: not on the model)
+  #   tags, none reachable from HEAD             red
+  #   nearest `v*` tag is not plain semver       red (the `yadgar` and stray
+  #                                              `v1` shapes)
+  #   plain semver baseline                      green; the summary names the
+  #                                              version this body would cut
+  #
+  # THE VERSION IS A REPORT, NEVER A VERDICT. `template` already reddens a body
+  # that does not parse; a second reader able to redden it would be a second
+  # gate over the same text in every consumer. `next_version.ready` says why.
+  #
+  # NO SECRET REACHES THIS JOB. ADR-1076 takes option C for the secrets-present
+  # half: an organisation audit lists repositories missing the release App
+  # secrets, and no pull request run is handed the App key or its id.
+  #
+  # The `text_edit` and `config_only` conjuncts are the other PR-time jobs'
+  # (ADR-0638, yaadgaar 442): a body edit or a hook rev bump moves no tag.
+  release_ready:
+    needs: detect
+    if: >-
+      github.event_name != 'push' && needs.detect.outputs.text_edit != 'true'
+      && needs.detect.outputs.config_only != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+          # The tags ARE the input. At the default depth there are none, and a
+          # tagged repository would read as one whose tags are unreachable.
+          fetch-depth: 0
+      # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
+      # the commit THIS workflow file runs at, never `main`. Read through
+      # `fromJSON(toJSON(job))` because actionlint types `job` strictly; checked
+      # here, fail-closed, before anything consumes it.
+      - name: the actions commit this job runs (ADR-0981)
+        id: own_sha
+        env:
+          OWN_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$OWN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::job.workflow_sha is not a 40-hex commit SHA: '${OWN_SHA}'. There is no fallback to main (ADR-0981)."
+            exit 1
+          fi
+          echo "sha=${OWN_SHA}" >> "$GITHUB_OUTPUT"
+      - if: github.repository != 'yadgarhq/actions'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: yadgarhq/actions
+          ref: ${{ steps.own_sha.outputs.sha }}
+          path: .ci-actions
+
+      - name: the baseline this merge would release from
+        env:
+          # Through the environment, never interpolated into the script: a pull
+          # request body is attacker-controlled text.
+          BODY: ${{ github.event.pull_request.body }}
+          UNDER_REVIEW: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # THE REPOSITORY NAME DECIDES, never the presence of the file, so that
+          # no repository under review can supply its own check.
+          if [ "$UNDER_REVIEW" = "yadgarhq/actions" ]; then
+            dir=scripts
+          else
+            dir=.ci-actions/scripts
+          fi
+          if [ ! -f "$dir/next_version.py" ]; then
+            echo "::error::the readiness check is missing at $dir/next_version.py"
+            exit 1
+          fi
+          python3 "$dir/next_version.py" --pr
 
   # A REAL ENGINE, not a mock. D69's capability probe establishes what an engine
   # can do by executing against it, so a test suite with no engine cannot
@@ -2176,7 +2257,10 @@ jobs:
       # AND WHAT IT DOES NOT CARRY. `version` is not in the `passed` job's
       # `needs:` and there is no required check on a push to `main`, so a refusal
       # here BLOCKS NOTHING — it converts silence into a red run and a failure
-      # notification. Overstating that would repeat the mistake it fixes.
+      # notification. Overstating that would repeat the mistake it fixes. The
+      # baseline half now has a PR-time counterpart that DOES block: the
+      # `release_ready` job (yaadgaar 324, ADR-1076). The Changelog, App and
+      # tag-race outcomes are still found here only.
       - name: what the next version is
         id: v
         env:
@@ -2249,7 +2333,7 @@ jobs:
           # A DERIVED VERSION THAT CANNOT BE TAGGED IS A FAILURE, not a skip.
           # Ledger 580 flagged this as a silent success that is merely
           # UNREACHABLE today rather than absent — both organisation secrets are
-          # `visibility=all` and all nineteen callers pass them — and an
+          # `visibility=all` and every caller passes them — and an
           # unreachable silent success is still a silent success.
           echo "::error::v$NEXT was derived from the Changelog and cannot be tagged: no release App is configured for this repository. See the version job in yadgarhq/actions."
           echo "_\`v$NEXT\` was derived and **not tagged**: no release App is configured here._" >> "$GITHUB_STEP_SUMMARY"
@@ -2400,11 +2484,15 @@ jobs:
   #   'refs/heads/main'" reads github.ref, which this gate has not been taught.
   #
   # So adding the job without teaching the resolver would refuse `ci / passed`
-  # in this repository and in all eighteen consumers — an estate-wide red in
+  # in this repository and in all twenty consumers — an estate-wide red in
   # place of a post-merge annotation. Teaching it changes what "may merge" means
   # everywhere, and the gate's own docstring requires a new reference to arrive
   # "together with the assertion that makes it a reason". That is a decision,
   # not a defect fix, and it is left to the operator.
+  #
+  # THE ENFORCEMENT HALF IS `release_ready` (yaadgaar 324, ADR-1076). It runs on
+  # the pull request and asks `version`'s baseline question before the merge,
+  # under a condition this gate already reads, so it is in the list below.
   passed:
     if: always()
     needs:
@@ -2419,6 +2507,7 @@ jobs:
         portability,
         service_immutable,
         pre_pin_parent,
+        release_ready,
       ]
     runs-on: ubuntu-latest
     # ADR-1033: a text-only edit may wait here, bounded by
