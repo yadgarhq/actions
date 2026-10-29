@@ -380,6 +380,19 @@ jobs:
       # same mechanism, sourced from the environment instead, which is the one
       # place the token already is.
       #
+      # THE SCHEME MUST BE BASIC, WITH `x-access-token` AS THE USER. GitHub's git
+      # smart-HTTP endpoint does not accept `Authorization: Bearer` (it answers
+      # 401, and git then reports `could not read Username for
+      # 'https://github.com'`); that scheme is for the REST API only, which is
+      # why the `gh` calls below are fine. Measured: Basic of
+      # `x-access-token:<token>` answers 200. The header value is therefore
+      # `basic <base64(x-access-token:TOKEN)>`, the same form `actions/checkout`
+      # writes. The runner already registers base64 encodings of every
+      # registered secret, so the encoded value is masked anyway; the explicit
+      # `::add-mask::` of the full header value, BEFORE it is used, is
+      # belt-and-braces.
+      # `scripts/tests/test_git_extraheader_basic.py` holds both rules.
+      #
       # `actions/checkout` IS NOT THE PRECEDENT FOR THE ARGV FORM, and an earlier
       # revision of this comment wrongly said it was: checkout writes the header
       # into `.git/config` with `git config --local` and removes it afterwards
@@ -411,9 +424,11 @@ jobs:
             git add Cargo.lock
           fi
           git commit --message "$TITLE"
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::${auth}"
           GIT_CONFIG_COUNT=1 \
           GIT_CONFIG_KEY_0=http.extraheader \
-          GIT_CONFIG_VALUE_0="Authorization: Bearer ${GH_TOKEN}" \
+          GIT_CONFIG_VALUE_0="Authorization: basic ${auth}" \
             git push --force origin "HEAD:refs/heads/${BRANCH}"
           url=$(gh pr create --repo "$GITHUB_REPOSITORY" --base "$base" \
                   --head "$BRANCH" --title "$TITLE" \
