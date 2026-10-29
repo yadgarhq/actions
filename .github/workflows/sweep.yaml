@@ -11,9 +11,9 @@ name: sweep
 #
 # DRY UNTIL ARMED. `sweep.py mode` says `live=true` only when `classes.json`
 # has `"sweep": {"live": true}`, the ref is `main`, and the run is the schedule
-# or a dispatch with `dry_run` false. `live` ships false. While it is false the
-# `act` job never runs and no write token is minted; `evaluate` writes its
-# verdict table to the step summary and nothing else.
+# or a dispatch with `dry_run` false. `live` is true since yaadgaar 465. While
+# it is false the `act` job never runs and no write token is minted;
+# `evaluate` writes its verdict table to the step summary and nothing else.
 #
 # READS USE GITHUB_TOKEN. R1 admits only public repositories, and the listing
 # asks for public ones only, so no read here needs the App. The App token is

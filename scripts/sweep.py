@@ -45,9 +45,9 @@ The body carries no Conventional Commits bullet (P7), so the consumer's
 a skip; a merge it DENIES (401, 403) is the write token misconfigured, and
 reds the `act` job.
 
-DRY BY DEFAULT. `classes.json` ships `"sweep": {"live": false}`; while it is
-false the workflow mints no write token and runs no `act` job, and `evaluate`
-writes its verdict table to the step summary only. Reads go through
+DRY UNTIL ARMED. `classes.json` arms the sweep with `"sweep": {"live": true}`
+(yaadgaar 465). While it is false the workflow mints no write token and runs
+no `act` job, and `evaluate` writes its verdict table to the step summary only. Reads go through
 `GITHUB_TOKEN`: R1 admits only public repositories, so nothing here needs to
 read a private one. The merge and the branch rewrite, with the two reads the
 rewrite makes, are the only calls made with the App token, minted per repository with `contents: write`.
