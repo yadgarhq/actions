@@ -581,7 +581,8 @@ def estate(*names):
 
 
 def test_the_sweep_plans_one_merge_and_every_refresh():
-    rows, todo = sweep.sweep(Fake(estate("store-45", "chart-75", "yadgar-98")), OWNER, classes(), NOW)
+    rows, todo = sweep.sweep(Fake(estate("store-45", "chart-75", "yadgar-98")), OWNER,
+                             classes(max_merges=1), NOW)
     by = {r["repo"]: r for r in rows}
     assert by["argocd-verify"]["reason"] == "excluded"
     assert "actions" not in by  # no class topic, so not a consumer
@@ -779,11 +780,12 @@ def test_the_sweep_ships_armed_with_the_half_hour_soak():
     """ADR-1068: Max ruled the soak at 0.5 h on 2026-10-29, and armed the
     sweeper on 2026-10-29 after a dry run passed all 19 adoption pull requests
     (yaadgaar 465). Rollback is a pull request that sets `live` back to false
-    and changes this assertion with it."""
+    and changes this assertion with it. Max raised the cap from 1 to 10 merges
+    per run on 2026-10-29, after the first live merge (argocd#189) proved out."""
     shipped = sweep.load(CLASSES_TEXT)["sweep"]
     assert shipped["live"] is True
     assert shipped["soak_hours"] == 0.5
-    assert shipped["max_merges"] == 1
+    assert shipped["max_merges"] == 10
     assert shipped["max_refreshes_per_pr_per_day"] == 3
 
 
