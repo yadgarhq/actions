@@ -414,10 +414,11 @@ def fetch_check_runs(url, token, permission="checks"):
         headers={
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
-            "Authorization": f"Bearer {token}",
             "User-Agent": "yadgarhq-actions/ci_verdict",
         },
     )
+    # Unredirected, so urllib never copies the token onto a redirect hop.
+    req.add_unredirected_header("Authorization", f"Bearer {token}")
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             body = resp.read().decode("utf-8")

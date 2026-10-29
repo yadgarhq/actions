@@ -1027,3 +1027,23 @@ def test_review_judges_wrapping_over_the_comment_stripped_text():
 
 def test_strip_comments_is_non_greedy():
     assert pr_body.strip_comments("a<!-- x -->b<!-- y -->c") == "abc"
+
+
+def test_fetch_commit_token_is_not_forwarded_on_redirect(monkeypatch):
+    """The bearer rides `unredirected_hdrs`, so urllib drops it on a redirect hop."""
+    import urllib.request
+    seen = []
+
+    def urlopen(req, timeout):
+        seen.append(req)
+        raise OSError("stop")
+
+    monkeypatch.setattr(pr_body.urllib.request, "urlopen", urlopen)
+    pr_body.fetch_commit("yadgarhq/chart", APP_SHA, "secret-token")
+    req = seen[0]
+    assert req.get_header("Authorization") == "Bearer secret-token"
+    assert "Authorization" not in req.headers
+    hop = urllib.request.HTTPRedirectHandler().redirect_request(
+        req, None, 302, "Found", {}, "https://elsewhere.example/x")
+    assert hop is not None
+    assert hop.get_header("Authorization") is None
