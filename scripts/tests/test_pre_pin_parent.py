@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -73,15 +74,33 @@ if argv[0] == "package":
     sys.stderr.write(os.environ.get("STUB_PACKAGE_STDERR", ""))
     sys.exit(code)
 
+
+def phase_prefix():
+    # Baseline = the parent as checked out, before the candidate tarball is vendored.
+    for tgz in pathlib.Path(argv[2]).glob("charts/*.tgz"):
+        if tgz.read_bytes() == b"stub-tarball":
+            return ""
+    return "BASELINE_"
+
+
+def verdict(verb, example):
+    key = "STUB_" + phase_prefix() + ("EXAMPLE_" if example else "") + verb
+    sys.stdout.write(os.environ.get(key + "_STDOUT", ""))
+    sys.stderr.write(os.environ.get(key + "_STDERR", ""))
+    sys.exit(int(os.environ.get(key + "_EXIT", "0")))
+
+
+for flag, value in zip(argv, argv[1:]):
+    # The seeder render-check refuses chart's example placeholder by design.
+    if flag == "-f" and "REPLACE-WITH-A-UUIDV7-YOU-MINT" in pathlib.Path(value).read_text():
+        sys.stderr.write("Error: administrators must be a uuidv7, got a placeholder\n")
+        sys.exit(1)
+
 if argv[0] == "lint":
-    sys.stdout.write(os.environ.get("STUB_LINT_STDOUT", ""))
-    sys.stderr.write(os.environ.get("STUB_LINT_STDERR", ""))
-    sys.exit(int(os.environ.get("STUB_LINT_EXIT", "0")))
+    verdict("LINT", False)
 
 if argv[0] == "template":
-    sys.stdout.write(os.environ.get("STUB_TEMPLATE_STDOUT", ""))
-    sys.stderr.write(os.environ.get("STUB_TEMPLATE_STDERR", ""))
-    sys.exit(int(os.environ.get("STUB_TEMPLATE_EXIT", "0")))
+    verdict("TEMPLATE", any(a.endswith("example/values.yaml") for a in argv))
 
 sys.exit(2)
 '''
@@ -122,7 +141,7 @@ def repository(tmp_path: Path) -> Path:
 def run(root: Path, **stub) -> tuple[subprocess.CompletedProcess, list[list[str]]]:
     log = root.parent / "helm.log"
     environment = {
-        "PATH": str(root.parent / "bin") + ":/usr/bin:/bin",
+        "PATH": str(root.parent / "bin") + ":/usr/bin:/bin:" + os.path.dirname(shutil.which("git") or "/usr/bin/git"),
         "STUB_LOG": str(log),
         "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
         **{k: str(v) for k, v in stub.items()},
@@ -187,7 +206,7 @@ def test_the_candidate_is_packaged_at_the_parents_pin_and_vendored_by_name(tmp_p
     parent(root / ".pre-pin-parent" / "chart", dependencies={"widget": "1.2.3"})
     result, calls = run(root)
     assert result.returncode == 0, result.stderr
-    package_call = calls[0]
+    package_call = calls[2]
     assert package_call[:2] == ["package", "chart"]
     assert "-u" in package_call
     assert package_call[package_call.index("--version") + 1] == "1.2.3"
@@ -203,7 +222,7 @@ def test_a_failed_package_refuses_before_any_lint_or_template(tmp_path):
     parent(root / ".pre-pin-parent" / "chart", dependencies={"widget": "1.2.3"})
     result, calls = run(root, STUB_PACKAGE_EXIT="5", STUB_PACKAGE_STDERR="chart.yaml: bad\n")
     assert result.returncode != 0
-    assert len(calls) == 1
+    assert [c[0] for c in calls] == ["lint", "template", "package"]
     assert "chart.yaml: bad" in result.stdout + result.stderr
 
 
@@ -218,8 +237,8 @@ def test_bare_lint_and_render_with_no_parent_fixture(tmp_path):
     parent(root / ".pre-pin-parent" / "chart", dependencies={"widget": "1.2.3"})
     result, calls = run(root)
     assert result.returncode == 0, result.stderr
-    assert calls[1] == ["lint", "--strict", ".pre-pin-parent/chart"]
-    assert calls[2] == ["template", "ci-render", ".pre-pin-parent/chart"]
+    assert calls[3] == ["lint", "--strict", ".pre-pin-parent/chart"]
+    assert calls[4] == ["template", "ci-render", ".pre-pin-parent/chart"]
 
 
 def test_the_parents_own_ci_values_file_reaches_both_lint_and_render(tmp_path):
@@ -230,8 +249,8 @@ def test_the_parents_own_ci_values_file_reaches_both_lint_and_render(tmp_path):
     (parent_dir / "ci" / "values.yaml").write_text("tls:\n  enabled: true\n")
     result, calls = run(root)
     assert result.returncode == 0, result.stderr
-    assert calls[1] == ["lint", "--strict", ".pre-pin-parent/chart", "-f", ".pre-pin-parent/chart/ci/values.yaml"]
-    assert calls[2] == [
+    assert calls[3] == ["lint", "--strict", ".pre-pin-parent/chart", "-f", ".pre-pin-parent/chart/ci/values.yaml"]
+    assert calls[4] == [
         "template", "ci-render", ".pre-pin-parent/chart",
         "-f", ".pre-pin-parent/chart/ci/values.yaml",
     ]
@@ -245,8 +264,8 @@ def test_the_parents_declared_api_versions_reach_the_render_and_not_the_lint(tmp
     (parent_dir / "ci" / "api-versions.txt").write_text("keda.sh/v1alpha1\ncert-manager.io/v1\n")
     result, calls = run(root)
     assert result.returncode == 0, result.stderr
-    assert calls[1] == ["lint", "--strict", ".pre-pin-parent/chart"]
-    assert calls[2] == [
+    assert calls[3] == ["lint", "--strict", ".pre-pin-parent/chart"]
+    assert calls[4] == [
         "template", "ci-render", ".pre-pin-parent/chart",
         "--api-versions", "keda.sh/v1alpha1",
         "--api-versions", "cert-manager.io/v1",
@@ -275,7 +294,7 @@ def test_a_refused_lint_names_k8_order_and_the_pin(tmp_path):
     assert "K-8 order" in result.stdout
     assert "chart/ci/values.yaml, example/ values, and the parent chart test" in result.stdout
     assert "values don't meet the specifications of the schema(s)" in result.stdout
-    assert len(calls) == 2  # package, lint -- template never runs after a refused lint
+    assert [c[0] for c in calls] == ["lint", "template", "package", "lint"]  # template never runs after a refused lint
 
 
 def test_a_passing_lint_and_template_let_the_job_succeed(tmp_path):
@@ -289,7 +308,7 @@ def test_a_passing_lint_and_template_let_the_job_succeed(tmp_path):
     parent(root / ".pre-pin-parent" / "chart", dependencies={"widget": "1.2.3"})
     result, calls = run(root)
     assert result.returncode == 0, result.stderr
-    assert len(calls) == 3  # package, lint, template -- all three ran
+    assert [c[0] for c in calls] == ["lint", "template", "package", "lint", "template"]
 
 
 def test_a_refused_template_also_names_k8_order(tmp_path):
@@ -305,7 +324,185 @@ def test_a_refused_template_also_names_k8_order(tmp_path):
     assert "yadgarhq/chart main refuses to template with 'widget' vendored at 1.2.3" in result.stdout
     assert "K-8 order" in result.stdout
     assert "feature.enabled must be set" in result.stdout
-    assert len(calls) == 3  # package, lint (passed), template (refused)
+    assert [c[0] for c in calls] == ["lint", "template", "package", "lint", "template"]
+
+
+# --------------------------------------------- baseline: parent main rendered before vendoring (yaadgaar 342)
+
+BASELINE_SENTENCE = (
+    "yadgarhq/chart main is red at abc1234 before this pull request's chart was "
+    "vendored; not this PR's K-8 order"
+)
+
+
+def onboarded(root: Path) -> Path:
+    chart(root / "chart", "widget")
+    return parent(root / ".pre-pin-parent" / "chart", dependencies={"widget": "1.2.3"})
+
+
+def test_a_red_parent_main_is_named_and_not_blamed_on_the_pull_request(tmp_path):
+    root = repository(tmp_path)
+    onboarded(root)
+    result, calls = run(
+        root,
+        PARENT_SHA="abc1234",
+        STUB_BASELINE_LINT_EXIT="1",
+        STUB_BASELINE_LINT_STDERR="Error: bad pin\n",
+        STUB_LINT_EXIT="1",
+    )
+    assert result.returncode == 1
+    assert BASELINE_SENTENCE in result.stdout
+    assert "Error: bad pin" in result.stdout
+    assert "refuses to lint with" in result.stdout  # the vendored result is printed too
+    assert [c[0] for c in calls] == ["lint", "package", "lint"]  # vendored and rendered again
+
+
+def test_both_renders_red_prints_the_baseline_and_the_vendored_failure(tmp_path):
+    root = repository(tmp_path)
+    onboarded(root)
+    result, _ = run(
+        root, PARENT_SHA="abc1234",
+        STUB_BASELINE_LINT_EXIT="1", STUB_BASELINE_LINT_STDERR="Error: old red\n",
+        STUB_LINT_EXIT="1", STUB_LINT_STDERR="Error: new red\n",
+    )
+    assert result.returncode == 1
+    assert BASELINE_SENTENCE in result.stdout
+    assert "Error: old red" in result.stdout
+    assert "refuses to lint with 'widget' vendored at 1.2.3" in result.stdout
+    assert "Error: new red" in result.stdout
+
+
+def test_a_red_parent_main_template_is_also_named(tmp_path):
+    root = repository(tmp_path)
+    onboarded(root)
+    result, calls = run(root, PARENT_SHA="abc1234", STUB_BASELINE_TEMPLATE_EXIT="1", STUB_TEMPLATE_EXIT="1")
+    assert result.returncode == 1
+    assert BASELINE_SENTENCE in result.stdout
+    assert [c[0] for c in calls] == ["lint", "template", "package", "lint", "template"]
+
+
+def test_a_red_baseline_that_this_pull_request_repairs_passes_with_a_warning(tmp_path):
+    """The deadlock: a chart PR that fixes a red parent main must not be
+    blocked by that red. Vendored and rendered again, green -> pass, loudly."""
+    root = repository(tmp_path)
+    onboarded(root)
+    result, calls = run(root, PARENT_SHA="abc1234", STUB_BASELINE_LINT_EXIT="1")
+    assert result.returncode == 0, result.stdout
+    assert "::warning::" in result.stdout
+    assert "abc1234" in result.stdout
+    assert "repairs" in result.stdout
+    assert "::error::" not in result.stdout
+    assert [c[0] for c in calls] == ["lint", "package", "lint", "template"]
+
+
+def test_a_failure_only_after_vendoring_keeps_the_k8_wording(tmp_path):
+    root = repository(tmp_path)
+    onboarded(root)
+    result, _ = run(root, PARENT_SHA="abc1234", STUB_LINT_EXIT="1")
+    assert result.returncode == 1
+    assert "K-8 order" in result.stdout
+    assert "is red at" not in result.stdout
+
+
+def test_the_baseline_sha_falls_back_to_the_checkouts_head(tmp_path):
+    root = repository(tmp_path)
+    parent_dir = onboarded(root)
+    git = ["git", "-C", str(parent_dir.parent)]
+    env = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull, "PATH": os.environ["PATH"]}
+    subprocess.run([*git, "init", "-q"], check=True, env=env)
+    subprocess.run([*git, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                    "--allow-empty", "-m", "x"], check=True, env=env)
+    head = subprocess.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True, env=env).stdout.strip()
+    result, _ = run(root, STUB_BASELINE_LINT_EXIT="1")
+    assert f"red at {head} before" in result.stdout
+
+
+# --------------------------------------------- example/values.yaml render (yaadgaar 345)
+
+
+def with_example(parent_dir: Path) -> None:
+    example = parent_dir.parent / "example"
+    example.mkdir()
+    (example / "values.yaml").write_text("gateway:\n  enabled: true\n")
+
+
+def test_the_example_values_are_rendered_after_the_ci_values(tmp_path):
+    root = repository(tmp_path)
+    with_example(onboarded(root))
+    result, calls = run(root)
+    assert result.returncode == 0, result.stderr
+    assert [c[0] for c in calls[:3]] == ["lint", "template", "template"]  # baseline: ci, example
+    assert calls[4] == ["lint", "--strict", ".pre-pin-parent/chart"]
+    assert calls[5] == ["template", "ci-render", ".pre-pin-parent/chart"]
+    assert calls[6][:4] == ["template", "ci-render-example", ".pre-pin-parent/chart", "-f"]
+    assert calls[6][4].endswith("example/values.yaml") and len(calls[6]) == 5
+
+
+def test_no_example_values_means_no_example_render(tmp_path):
+    root = repository(tmp_path)
+    onboarded(root)
+    _, calls = run(root)
+    assert not any(c[:2] == ["template", "ci-render-example"] for c in calls)
+
+
+def test_a_refused_example_render_names_the_file_and_k8_step_2(tmp_path):
+    root = repository(tmp_path)
+    with_example(onboarded(root))
+    result, _ = run(
+        root,
+        PARENT_SHA="abc1234",
+        STUB_EXAMPLE_TEMPLATE_EXIT="1",
+        STUB_EXAMPLE_TEMPLATE_STDERR="Error: feature.enabled must be set\n",
+    )
+    assert result.returncode == 1
+    assert "example/values.yaml" in result.stdout
+    assert "K-8 step 2" in result.stdout
+    assert "feature.enabled must be set" in result.stdout
+    assert "is red at" not in result.stdout
+
+
+def test_a_red_example_on_parent_main_is_the_baseline_not_the_pull_request(tmp_path):
+    root = repository(tmp_path)
+    with_example(onboarded(root))
+    result, calls = run(
+        root, PARENT_SHA="abc1234",
+        STUB_BASELINE_EXAMPLE_TEMPLATE_EXIT="1", STUB_EXAMPLE_TEMPLATE_EXIT="1",
+    )
+    assert result.returncode == 1
+    assert BASELINE_SENTENCE in result.stdout
+    assert "package" in [c[0] for c in calls]
+
+
+PLACEHOLDER = "REPLACE-WITH-A-UUIDV7-YOU-MINT"
+CI_ADMINISTRATOR = "01900000-0000-7000-8000-000000000001"
+
+
+def test_the_example_placeholder_is_replaced_in_a_temp_copy_before_rendering(tmp_path):
+    """chart's example/values.yaml ships a placeholder the seeder render-check
+    refuses by design; chart's own tests render it with a fixed uuidv7."""
+    root = repository(tmp_path)
+    parent_dir = onboarded(root)
+    example = parent_dir.parent / "example"
+    example.mkdir()
+    original = f"administrators:\n  - {PLACEHOLDER}\n"
+    (example / "values.yaml").write_text(original)
+    # the stub reads the -f file at call time; capture what it was handed
+    result, calls = run(root)
+    assert result.returncode == 0, result.stdout
+    example_calls = [c for c in calls if c[:2] == ["template", "ci-render-example"]]
+    assert len(example_calls) == 2  # baseline and vendored
+    for call in example_calls:
+        handed = call[call.index("-f") + 1]
+        assert handed != ".pre-pin-parent/example/values.yaml"
+        assert handed.endswith("example/values.yaml")
+    assert (example / "values.yaml").read_text() == original  # the checkout is untouched
+
+
+def test_the_placeholder_free_example_content_is_passed_through_unchanged(tmp_path):
+    root = repository(tmp_path)
+    with_example(onboarded(root))
+    result, _ = run(root)
+    assert result.returncode == 0, result.stdout
 
 
 # --------------------------------------------- the pure failure_message helper
@@ -447,3 +644,30 @@ def test_ci_verdict_can_evaluate_the_real_condition():
 
     assert evaluate_as("yadgarhq/gateway") is True
     assert evaluate_as("yadgarhq/chart") is False
+
+
+# --------------------------------------------- retry on every `helm dependency update` (yaadgaar 345)
+
+
+def test_every_helm_dependency_update_site_retries_three_times():
+    """OCI pulls from GHCR flake; a bare call reds `ci / passed` in the PR's
+    repo. Every `run:` block anywhere in the workflows that resolves
+    dependencies must loop, and keep the literal ADR-0725's static gate greps."""
+    import yaml
+
+    sites = 0
+    for path in (REPO / ".github" / "workflows").glob("*.yaml"):
+        for job in (yaml.safe_load(path.read_text()).get("jobs") or {}).values():
+            for step in job.get("steps") or []:
+                run_text = step.get("run")
+                if isinstance(run_text, str) and re.search(r"helm\s+dependency\s+update\b", run_text):
+                    sites += 1
+                    assert "for i in 1 2 3" in run_text, (path.name, run_text)
+                    assert "sleep" in run_text, (path.name, run_text)
+    assert sites >= 5, sites
+
+
+def test_the_render_step_exports_the_parents_head_for_the_baseline_message():
+    steps = workflow_jobs()["pre_pin_parent"]["steps"]
+    gate = next(s for s in steps if "pre_pin_parent.py" in str(s.get("run", "")) and "python3" in s["run"])
+    assert "PARENT_SHA" in gate["run"] or "PARENT_SHA" in str(gate.get("env", ""))

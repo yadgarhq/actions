@@ -489,7 +489,8 @@ jobs:
       # dependency update chart` there fails outright rather than no-opping.
       - name: resolve chart dependencies
         if: needs.detect.outputs.chart == 'true'
-        run: helm dependency update chart
+        # Three attempts: GHCR OCI pulls flake (yaadgaar 345).
+        run: for i in 1 2 3; do helm dependency update chart && break; [ "$i" = 3 ] && exit 1; sleep $((i * 10)); done
 
       # protoc, for repositories that generate types from the contract (D16).
       # Gated on the same PROTO_VERSION detection as the drift check, so a repo
@@ -627,7 +628,8 @@ jobs:
           version: v${{ needs.detect.outputs.helm }}
       - name: resolve chart dependencies
         if: needs.detect.outputs.chart == 'true'
-        run: helm dependency update chart
+        # Three attempts: GHCR OCI pulls flake (yaadgaar 345).
+        run: for i in 1 2 3; do helm dependency update chart && break; [ "$i" = 3 ] && exit 1; sleep $((i * 10)); done
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -1551,7 +1553,8 @@ jobs:
       # simply skip.
       - name: resolve chart dependencies
         if: needs.detect.outputs.chart == 'true'
-        run: helm dependency update chart
+        # Three attempts: GHCR OCI pulls flake (yaadgaar 345).
+        run: for i in 1 2 3; do helm dependency update chart && break; [ "$i" = 3 ] && exit 1; sleep $((i * 10)); done
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ needs.detect.outputs.python }}
@@ -1716,7 +1719,8 @@ jobs:
       # a directory the script creates at run time.
       - name: resolve chart dependencies
         if: needs.detect.outputs.chart == 'true'
-        run: helm dependency update chart
+        # Three attempts: GHCR OCI pulls flake (yaadgaar 345).
+        run: for i in 1 2 3; do helm dependency update chart && break; [ "$i" = 3 ] && exit 1; sleep $((i * 10)); done
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ needs.detect.outputs.python }}
@@ -1881,7 +1885,8 @@ jobs:
       - name: resolve the parent chart's own dependencies
         if: needs.detect.outputs.chart == 'true'
         working-directory: .pre-pin-parent
-        run: helm dependency update chart
+        # Three attempts: GHCR OCI pulls flake (yaadgaar 345).
+        run: for i in 1 2 3; do helm dependency update chart && break; [ "$i" = 3 ] && exit 1; sleep $((i * 10)); done
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -1973,6 +1978,8 @@ jobs:
           PYTHONPATH: ${{ runner.temp }}
         run: |
           set -euo pipefail
+          PARENT_SHA="$(git -C .pre-pin-parent rev-parse HEAD)"
+          export PARENT_SHA
           # THE SUMMARY IS WRITTEN ON THE FAILING PATH TOO, the same reasoning
           # the `service_immutable` copy gives: this gate's whole value is the
           # K-8 order explanation in its refusal, so that text has to reach
