@@ -56,11 +56,16 @@ def real_jobs():
     return yaml.safe_load(real_text())["jobs"]
 
 
+def lower_keys(mapping):
+    """GitHub reads `with:` keys case-insensitively, so `Owner:` is `owner:`."""
+    return {str(k).lower(): v for k, v in (mapping or {}).items()}
+
+
 def repositories_of(step):
     """`with.repositories` can be a single name, or several separated by a
     comma, a newline, or both, exactly as `actions/create-github-app-token`
     accepts it."""
-    repos = (step.get("with") or {}).get("repositories")
+    repos = lower_keys(step.get("with")).get("repositories")
     if repos is None:
         return []
     if isinstance(repos, str):
@@ -390,3 +395,307 @@ def test_mutation_each_estate_tell_reddens_on_its_own():
         jobs = copy.deepcopy(real_jobs())
         jobs["parent"]["steps"].append(extra)
         assert not nothing_asks_estate_for_a_verdict(jobs), extra
+
+
+# ---------------------------------------------------------------------------
+# YAADGAAR 414. STRUCTURAL GUARDS. The substring checks above miss the repo
+# name passed through an env var, a `git push https://.../argocd`, a third-party
+# `uses:` handed the token, and an unscoped mint (the worst: installation
+# 158692002 has repository_selection all). These check the SHAPE of the nudge
+# job and of every mint in every workflow. Each is paired with a mutation.
+# ---------------------------------------------------------------------------
+
+import json
+
+WORKFLOWS = ROOT / ".github" / "workflows"
+NUDGE_STEP_IDS = ["cred", "app", "mint_failed", "nudge"]
+PINNED_MINT = re.compile(r"^actions/create-github-app-token@[0-9a-f]{40}$")
+TOKEN_REF = "steps.app.outputs.token"
+# Every spelling of a read of the minted token, plus `toJSON(steps` which dumps
+# every step output at once.
+TOKEN_READ = re.compile(
+    r"""steps\s*(?:\.\s*app\b|\[\s*['"]app['"]\s*\])\s*(?:\.\s*outputs\b|\[\s*['"]outputs['"]\s*\])"""
+    r"""|outputs\s*\[\s*['"]token['"]\s*\]"""
+    r"""|steps\s*\.\s*\*"""
+    r"""|tojson\s*\(\s*steps""",
+    re.IGNORECASE,
+)
+
+
+def blob(node):
+    """The node as one string, with JSON's quote escaping undone so a
+    `steps["app"]` in a script still reads as written."""
+    return json.dumps(node, sort_keys=True).replace('\\"', '"')
+
+
+def nudge_job_violations(job):
+    """Empty when the nudge job has exactly its shipped shape."""
+    bad = []
+    steps = job.get("steps", [])
+    if [s.get("id") for s in steps] != NUDGE_STEP_IDS:
+        bad.append("step ids are not exactly %s" % NUDGE_STEP_IDS)
+    for s in steps:
+        uses = s.get("uses")
+        if uses is not None and not PINNED_MINT.match(str(uses)):
+            bad.append("uses %r is not the SHA-pinned create-github-app-token" % uses)
+        reads = bool(TOKEN_READ.search(blob(s)))
+        if s.get("id") == "app":
+            reads = False  # the mint step produces it; it does not read it
+        if reads and s.get("id") != "nudge":
+            bad.append("step %r reads the minted token" % s.get("id"))
+    if TOKEN_READ.search(blob({k: v for k, v in job.items() if k != "steps"})):
+        bad.append("job-level key reads the minted token")
+    return bad
+
+
+def secret_key_violations(jobs):
+    """`secrets.RELEASE_APP_PRIVATE_KEY` is read only by a mint step's
+    `with: private-key` and by a `cred` step's `env:`, nowhere else."""
+    bad = []
+    for job_id, job in jobs.items():
+        if "RELEASE_APP_PRIVATE_KEY" in json.dumps({k: v for k, v in job.items() if k != "steps"}):
+            bad.append(job_id + ": job-level key names the private key")
+        for s in job.get("steps", []):
+            if "secrets.RELEASE_APP_PRIVATE_KEY" not in json.dumps(s):
+                continue
+            rest = {k: v for k, v in s.items() if k not in ("with", "env", "uses")}
+            if "create-github-app-token" in str(s.get("uses", "")):
+                ok = "secrets.RELEASE_APP_PRIVATE_KEY" in str(lower_keys(s.get("with")).get("private-key"))
+                ok = ok and "secrets.RELEASE_APP_PRIVATE_KEY" not in json.dumps(rest) + json.dumps(s.get("env"))
+                ok = ok and sum(
+                    "secrets.RELEASE_APP_PRIVATE_KEY" in str(v) for v in (s.get("with") or {}).values()
+                ) == 1
+            else:
+                ok = s.get("id") == "cred" and "secrets.RELEASE_APP_PRIVATE_KEY" not in json.dumps(rest)
+            if not ok:
+                bad.append("%s/%s reads the private key outside its allowed place" % (job_id, s.get("id")))
+    return bad
+
+
+def test_the_private_key_is_read_only_by_mints_and_cred():
+    jobs = real_jobs()
+    assert secret_key_violations(jobs) == []
+    # NOT VACUOUS: two mints and two cred steps do read it.
+    assert json.dumps(jobs).count("secrets.RELEASE_APP_PRIVATE_KEY") == 4
+
+
+def test_mutation_the_private_key_read_elsewhere_reddens():
+    for where in ("env", "run", "mint_other_input", "nudge"):
+        jobs = copy.deepcopy(real_jobs())
+        if where == "env":
+            jobs[NUDGE]["steps"][2]["env"] = {"K": "${{ secrets.RELEASE_APP_PRIVATE_KEY }}"}
+        elif where == "run":
+            jobs[NUDGE]["steps"][3]["run"] += "echo ${{ secrets.RELEASE_APP_PRIVATE_KEY }}\n"
+        elif where == "mint_other_input":
+            jobs[NUDGE]["steps"][1]["with"]["client-id"] = "${{ secrets.RELEASE_APP_PRIVATE_KEY }}"
+        else:
+            jobs[NUDGE]["steps"][3]["env"]["K"] = "${{ secrets.RELEASE_APP_PRIVATE_KEY }}"
+        assert secret_key_violations(jobs), where
+    jobs = copy.deepcopy(real_jobs())
+    jobs["parent"]["steps"][0]["run"] = "echo ${{ secrets.RELEASE_APP_PRIVATE_KEY }}"
+    assert secret_key_violations(jobs)
+
+
+def test_reading_only_the_outcome_of_the_mint_is_not_a_token_read():
+    job = _nudge()
+    job["steps"][2]["if"] = "steps['app'].outcome == 'failure'"
+    assert nudge_job_violations(job) == []
+
+
+def test_mutation_every_token_read_spelling_reddens():
+    for spelling in (
+        "${{ steps.app.outputs.token }}",
+        "${{ steps['app'].outputs.token }}",
+        '${{ steps["app"].outputs.token }}',
+        "${{ steps.app.outputs['token'] }}",
+        "${{ STEPS.APP.OUTPUTS.TOKEN }}",
+        "${{ fromJSON(toJSON(x)).outputs['token'] }}",
+        "${{ steps.*.outputs.token }}",
+        "${{ steps .  * .outputs.token }}",
+        "${{ toJSON(steps) }}",
+        "${{ toJson( steps ) }}",
+    ):
+        job = _nudge()
+        job["steps"][2]["env"] = {"T": spelling}
+        assert nudge_job_violations(job), spelling
+        # ... and the nudge step itself may read it in any spelling.
+        job = _nudge()
+        job["steps"][3]["env"]["T"] = spelling
+        assert nudge_job_violations(job) == [], spelling
+
+
+def test_nudge_job_has_exactly_its_shipped_shape():
+    job = real_jobs()[NUDGE]
+    assert nudge_job_violations(job) == []
+    # NOT VACUOUS: the nudge step really does read the token.
+    nudge = next(s for s in job["steps"] if s["id"] == "nudge")
+    assert TOKEN_REF in json.dumps(nudge)
+
+
+def _nudge():
+    return copy.deepcopy(real_jobs()[NUDGE])
+
+
+def test_mutation_an_extra_nudge_step_reddens():
+    job = _nudge()
+    job["steps"].append({"id": "push", "run": "true\n"})
+    assert nudge_job_violations(job)
+
+
+def test_mutation_a_missing_or_renamed_nudge_step_reddens():
+    job = _nudge()
+    job["steps"] = [s for s in job["steps"] if s["id"] != "mint_failed"]
+    assert nudge_job_violations(job)
+    job = _nudge()
+    job["steps"][3]["id"] = "other"
+    assert nudge_job_violations(job)
+
+
+def test_mutation_a_third_party_uses_in_the_nudge_job_reddens():
+    for uses in ("someone/else@bcd2ba49218906704ab6c1aa796996da409d3eb1", "actions/checkout@v4"):
+        job = _nudge()
+        job["steps"][0]["uses"] = uses
+        assert nudge_job_violations(job), uses
+
+
+def test_mutation_an_unpinned_mint_reddens():
+    job = _nudge()
+    job["steps"][1]["uses"] = "actions/create-github-app-token@v3"
+    assert nudge_job_violations(job)
+
+
+def test_mutation_another_step_reading_the_token_reddens():
+    job = _nudge()
+    job["steps"][2]["env"] = {"GH_TOKEN": "${{ steps.app.outputs.token }}"}
+    assert nudge_job_violations(job)
+    job = _nudge()
+    job["steps"][0]["run"] = "git push https://x:${{ steps.app.outputs.token }}@github.com/o/argocd"
+    assert nudge_job_violations(job)
+
+
+def test_mutation_a_job_level_token_read_reddens():
+    job = _nudge()
+    job["env"] = {"T": "${{ steps.app.outputs.token }}"}
+    assert nudge_job_violations(job)
+
+
+def all_mints():
+    """(workflow file name, job id, step) for every mint in every workflow."""
+    out = []
+    for path in sorted(WORKFLOWS.glob("*.y*ml")):
+        for job_id, job in (yaml.safe_load(path.read_text(encoding="utf-8")).get("jobs") or {}).items():
+            for step in job.get("steps", []):
+                if "create-github-app-token" in str(step.get("uses", "")):
+                    out.append((path.name, job_id, step))
+    return out
+
+
+def mint_scope_violations(mints):
+    """Every mint names its permissions. A mint with `owner:` and no
+    `repositories:` is org-wide, so it is refused, except the one metadata-only
+    lister (ADR-0987). In ci-release.yaml every mint must set `repositories:`,
+    owner or not."""
+    bad = []
+    for wf, job_id, step in mints:
+        w = lower_keys(step.get("with"))
+        perms = {k: v for k, v in w.items() if k.startswith("permission-")}
+        where = "%s/%s/%s" % (wf, job_id, step.get("id"))
+        if not PINNED_MINT.match(str(step.get("uses", ""))):
+            bad.append(where + ": mint is not pinned to a 40-hex sha")
+        if wf == "ci-release.yaml" and "${{" in str(w.get("repositories", "")):
+            bad.append(where + ": repositories: must be a literal in ci-release")
+        if not perms:
+            bad.append(where + ": no explicit permission-*")
+        if repositories_of(step):
+            continue
+        if wf == "ci-release.yaml":
+            bad.append(where + ": no repositories: in ci-release")
+        elif "owner" in w:
+            lister = (
+                wf == "fan-out.yaml"
+                and step.get("id") == "lister"
+                and perms == {"permission-metadata": "read"}
+            )
+            if not lister:
+                bad.append(where + ": owner without repositories is org-wide")
+    return bad
+
+
+def test_every_mint_in_every_workflow_is_scoped():
+    mints = all_mints()
+    assert mint_scope_violations(mints) == []
+    # NOT VACUOUS: the scan sees the mints known to exist, in several files.
+    files = {wf for wf, _j, _s in mints}
+    assert {"ci-release.yaml", "ci-pr.yaml", "fan-out.yaml", "repin.yaml", "sweep.yaml"} <= files
+    assert len(mints) >= 7
+
+
+def _mint(wf="ci-release.yaml", **with_):
+    base = {"permission-contents": "write"}
+    base.update(with_)
+    return (wf, "j", {"id": "m", "uses": "actions/create-github-app-token@" + "a" * 40, "with": base})
+
+
+def test_mutation_a_mint_without_permissions_reddens():
+    m = _mint(repositories="argocd")
+    del m[2]["with"]["permission-contents"]
+    assert mint_scope_violations([m])
+
+
+def test_mutation_an_empty_repositories_reddens():
+    for empty in ("", "  \n ", ",", None, []):
+        assert mint_scope_violations([_mint(repositories=empty)]), repr(empty)
+
+
+def test_mutation_an_owner_wide_mint_in_any_workflow_reddens():
+    for wf in ("sweep.yaml", "repin.yaml", "ci-pr.yaml", "fan-out.yaml"):
+        assert mint_scope_violations([_mint(wf, owner="o")]), wf
+
+
+def test_mutation_the_lister_exception_is_exactly_metadata_read():
+    ok = ("fan-out.yaml", "j", {"id": "lister", "uses": "actions/create-github-app-token@" + "a" * 40,
+                                  "with": {"owner": "o", "permission-metadata": "read"}})
+    assert mint_scope_violations([ok]) == []
+    wide = copy.deepcopy(ok)
+    wide[2]["with"]["permission-contents"] = "read"
+    assert mint_scope_violations([wide])
+    renamed = copy.deepcopy(ok)
+    renamed[2]["id"] = "other"
+    assert mint_scope_violations([renamed])
+    moved = ("sweep.yaml",) + ok[1:]
+    assert mint_scope_violations([moved])
+
+
+def test_mutation_an_unscoped_mint_added_to_a_real_workflow_reddens():
+    mints = all_mints() + [_mint("ci-release.yaml")]
+    assert mint_scope_violations(mints)
+
+
+def test_mutation_a_capitalised_owner_key_reddens():
+    for wf in ("sweep.yaml", "ci-release.yaml", "repin.yaml"):
+        m = _mint(wf, Owner="yadgarhq")
+        assert mint_scope_violations([m]), wf
+    m = _mint("sweep.yaml", Owner="yadgarhq", Repositories="x")
+    assert mint_scope_violations([m]) == []
+    # A capitalised `Permission-Contents` still counts as an explicit permission.
+    m = _mint("sweep.yaml", Repositories="x")
+    m[2]["with"]["Permission-Contents"] = m[2]["with"].pop("permission-contents")
+    assert mint_scope_violations([m]) == []
+    assert repositories_of(m[2]) == ["x"]
+
+
+def test_mutation_a_templated_repositories_in_ci_release_reddens():
+    assert mint_scope_violations([_mint(repositories="${{ inputs.repos }}")])
+    assert mint_scope_violations([_mint("sweep.yaml", repositories="${{ matrix.repo }}")]) == []
+
+
+def test_mutation_an_unpinned_mint_in_any_workflow_reddens():
+    for uses in (
+        "actions/create-github-app-token@v3",
+        "actions/create-github-app-token@" + "a" * 39,
+        "actions/create-github-app-token",
+        "other/create-github-app-token@" + "a" * 40,
+    ):
+        m = _mint("sweep.yaml", repositories="x")
+        m[2]["uses"] = uses
+        assert mint_scope_violations([m]), uses
