@@ -35,22 +35,27 @@ A BEHIND pull request whose base did not touch `.pre-commit-config.yaml` is
 REFRESHED instead: `actions-adopt` is moved, in one ref write, to a new commit
 on the base tip carrying the same file (`fan_out.Gh.rewrite_branch`; never
 through the base tip itself, which closes the pull request, yaadgaar 466), so
-CI runs fresh and a later sweep can merge it. Never through
+CI runs fresh and a later sweep can merge it. That write is a compare-and-swap
+from the head evaluated (yaadgaar 470): a fan-out rewrite that lands first is
+kept, and the refresh is a skip. Never through
 `update-branch` (ADR-0693) and never through `fan_out.one`, which no-ops on a
 behind pull request whose config is unchanged.
 
 THE MERGE IS A SQUASH that sends the head sha, the title and the body itself.
 The body carries no Conventional Commits bullet (P7), so the consumer's
 `version` job cuts no release for it. A merge GitHub refuses (405, 409, 422) is
-a skip; a merge it DENIES (401, 403) is the write token misconfigured, and
-reds the `act` job.
+a skip; any other failure (401, 403, 404, no usable auth, an error with no
+HTTP code) is the write token or the call, not the pull request, and reds the
+`act` job. So does a re-evaluation that could not read (yaadgaar 469).
 
 DRY UNTIL ARMED. `classes.json` arms the sweep with `"sweep": {"live": true}`
 (yaadgaar 465). While it is false the workflow mints no write token and runs
 no `act` job, and `evaluate` writes its verdict table to the step summary only. Reads go through
 `GITHUB_TOKEN`: R1 admits only public repositories, so nothing here needs to
-read a private one. The merge and the branch rewrite, with the two reads the
-rewrite makes, are the only calls made with the App token, minted per repository with `contents: write`.
+read a private one. The merge and the branch rewrite, with the reads the
+rewrite makes (the repository's node id, the parent commit, the new commit, and
+the branch after a failed swap), are the only calls made with the App token,
+minted per repository with `contents: write`.
 
 Commands:
 
@@ -92,7 +97,10 @@ VERSION = r"v[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}"
 TITLE = re.compile(
     rf"chore\(deps\): bump yadgarhq/actions hooks from ({VERSION}) to ({VERSION})")
 SHA = re.compile(r"[0-9a-f]{40}")
-DENIED = re.compile(r"\bHTTP 40[13]\b")  # a merge call the token may not make
+# The only merge failures that are GitHub's verdict on the pull request. Any
+# other (401/403/404, 5xx, no usable auth, an error with no HTTP code) is not,
+# and reds the leg (yaadgaar 469).
+REFUSED = re.compile(r"\bHTTP (405|409|422)\b")
 PAGE = 100  # a list of exactly this many may have a second page: refused
 SWEEP_KEYS = {"live", "exclude", "soak_hours", "max_merges", "max_refreshes_per_pr_per_day"}
 DAY = datetime.timedelta(hours=24)
@@ -467,9 +475,17 @@ def sweep(api, owner, classes, now):
                    and len(fan_out.class_of(m.get("topics") or [], classes["topic_prefix"])) == 1)
     if len(names) > fan_out.MAX_CONSUMERS:
         raise Refusal(f"{len(names)} consumers, over the cap of {fan_out.MAX_CONSUMERS}")
+    # ONE ROW PER EXCLUSION, from classes.json (yaadgaar 467). The listing is
+    # public-only, so a private excluded repository is never listed and never read.
+    exclude = classes["sweep"]["exclude"]
+    rows += [{"repo": name, "n": 0, "action": "skip", "reason": f"R2: excluded: {exclude[name]}"}
+             for name in sorted(exclude)]
     for name in names:
-        if name in classes["sweep"]["exclude"] or name in classes["exempt"]:
-            rows.append({"repo": name, "n": 0, "action": "skip", "reason": "excluded"})
+        if name in exclude:
+            continue
+        if name in classes["exempt"]:
+            rows.append({"repo": name, "n": 0, "action": "skip",
+                         "reason": f"R2: exempt: {classes['exempt'][name]}"})
             continue
         prs = api.get(f"repos/{owner}/{name}/pulls?head={owner}:{fan_out.BRANCH}&state=open&per_page=10")
         if not isinstance(prs, list) or not prs:
@@ -500,7 +516,12 @@ def plan(rows, max_merges):
 
 def act(reader, writer, owner, name, n, head, action, classes, now):
     """M1-M3 for one leg: evaluate again from scratch, then merge or refresh."""
+    # Evaluate ran before a fan-out may have started; it must not race one (yaadgaar 470).
+    need(not fan_out_running(reader, owner), "fan-out running")
     verdict = judge(reader, owner, name, n, classes, now)
+    if verdict.get("reason", "").startswith("error:"):
+        # A read that failed is not a pull request that stopped qualifying (yaadgaar 469).
+        raise Refusal(f"M1: the re-evaluation failed: {verdict['reason']}")
     if verdict["action"] != action:
         raise Skip(f"M1: re-evaluated as {verdict['action']}: {verdict.get('reason', '')}")
     need(verdict["head"] == head, "M1: the head moved since evaluate")
@@ -508,10 +529,11 @@ def act(reader, writer, owner, name, n, head, action, classes, now):
         try:
             writer.merge_pr(owner, name, n, head, f"{verdict['title']} (#{n})", verdict["body"])
         except Refusal as exc:
-            # 401/403 is the write token, not the pull request: red the run.
-            if DENIED.search(str(exc)):
-                raise Refusal(f"M2: the merge call was denied: {exc}") from None
-            raise Skip(f"M2: the merge was refused: {exc}") from None
+            # Only 405/409/422 is GitHub refusing this pull request. Anything
+            # else is the token or the call, not the pull request: red the run.
+            if REFUSED.search(str(exc)):
+                raise Skip(f"M2: the merge was refused: {exc}") from None
+            raise Refusal(f"M2: the merge call was denied: {exc}") from None
         after = reader.get(f"repos/{owner}/{name}/pulls/{n}", fresh=True)
         need(dig(after, "merged") is True, "M3: not merged after the merge call")
         return f"merged {owner}/{name}#{n} as {dig(after, 'merge_commit_sha')}"
@@ -520,10 +542,15 @@ def act(reader, writer, owner, name, n, head, action, classes, now):
     need(dig(ref, "object", "sha") == head, "the branch moved since it was read: no reset")
     # ONE REF WRITE (yaadgaar 466). The new commit is built on the tip first and
     # the branch then moves straight to it: a reset to the tip first would make
-    # head == base, and GitHub closes the pull request. A failure leaves the
-    # branch where it was; a Refusal (an `Unverified` one included) reds the run.
-    writer.rewrite_branch(owner, name, fan_out.BRANCH, verdict["tip"], config_only.CONFIG,
-                          verdict["text"], verdict["title"], exists=True)
+    # head == base, and GitHub closes the pull request. The move is a
+    # compare-and-swap from `head` (yaadgaar 470): a fan-out rewrite that landed
+    # after the read above is kept, and this is a skip. Any other failure leaves
+    # the branch where it was; a Refusal (an `Unverified` one included) reds the run.
+    try:
+        writer.rewrite_branch(owner, name, fan_out.BRANCH, verdict["tip"], config_only.CONFIG,
+                              verdict["text"], verdict["title"], exists=True, expect=head)
+    except fan_out.RefMoved as moved:
+        raise Skip(f"the branch moved under the refresh: {moved}") from None
     return f"refreshed {owner}/{name}#{n} onto {verdict['tip']}"
 
 
@@ -662,8 +689,10 @@ def main(argv):
             raise Refusal("`act` runs only when the sweep is armed")
         if not (fan_out.NAME.fullmatch(args.repo) and SHA.fullmatch(args.head)):
             raise Refusal("`act` was handed a malformed repository or head")
+        if not os.environ.get("SWEEP_WRITE_TOKEN"):
+            raise Refusal("`act` has no SWEEP_WRITE_TOKEN")
         reader = SweepGh(os.environ.get("GH_TOKEN", ""))
-        writer = SweepGh(os.environ.get("SWEEP_WRITE_TOKEN", ""))
+        writer = SweepGh(os.environ["SWEEP_WRITE_TOKEN"])
         try:
             done = act(reader, writer, args.owner, args.repo, args.n, args.head, args.action,
                        classes, now_utc())

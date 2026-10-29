@@ -605,6 +605,18 @@ class Unverified(Refusal):
     """
 
 
+class RefMoved(Refusal):
+    """A compare-and-swap found the branch somewhere other than `expect`.
+
+    Someone else (the fan-out) moved it after it was read. Their commit stays;
+    the caller decides whether that is a skip.
+    """
+
+
+SWAP_REF = ("mutation($repo:ID!,$updates:[RefUpdate!]!)"
+            "{updateRefs(input:{repositoryId:$repo,refUpdates:$updates}){clientMutationId}}")
+
+
 def check_created(made):
     """The `POST git/commits` answer, checked BEFORE any ref points at it."""
     if (made.get("verification") or {}).get("verified") is not True:
@@ -930,7 +942,8 @@ class Gh:
                  "url": p["html_url"], "title": p["title"], "body": p["body"] or ""}
                 for p in json.loads(out)]
 
-    def rewrite_branch(self, owner, repo, branch, parent, path, text, message, exists):
+    def rewrite_branch(self, owner, repo, branch, parent, path, text, message, exists,
+                       expect=None):
         """`branch` becomes ONE new commit on `parent` that carries `text` at `path`.
 
         The commit is built first (blob, tree on `parent`'s tree, commit), and
@@ -943,10 +956,16 @@ class Gh:
         with `web-flow` as committer. That is checked twice: on the create
         answer before the ref moves, and on the commits API after it, which is
         what `sweep.py` K2 reads. Either failing raises `Unverified`.
+
+        `expect`, when given, is the head the caller read (yaadgaar 470). The
+        branch then moves by compare-and-swap (GraphQL `updateRefs` with
+        `beforeOid`), never by a forced PATCH: a branch no longer at `expect`
+        raises `RefMoved` and keeps whatever moved it there.
         """
         if branch != BRANCH:
             raise Refusal(f"refusing to force-move `{branch}`: only `{BRANCH}` is ours")
         at = f"repos/{q(owner)}/{q(repo)}"
+        node = json.loads(self._api(at))["node_id"] if exists and expect is not None else None
         tree = json.loads(self._api(f"{at}/git/commits/{q(parent, '')}"))["tree"]["sha"]
         blob = json.loads(self._api("-X", "POST", f"{at}/git/blobs", payload={
             "content": base64.b64encode(text.encode()).decode(), "encoding": "base64"}))["sha"]
@@ -957,13 +976,42 @@ class Gh:
             "message": message, "tree": new_tree, "parents": [parent]}))
         check_created(made)
         sha = made["sha"]
-        if exists:
+        if node is not None:
+            self._swap_ref(owner, repo, node, branch, expect, sha)
+        elif exists:
             self._api("-X", "PATCH", f"{at}/git/refs/heads/{q(branch)}",
                       payload={"sha": sha, "force": True})
         else:
             self._api("-X", "POST", f"{at}/git/refs",
                       payload={"ref": f"refs/heads/{branch}", "sha": sha})
         check_landed(json.loads(self._api(f"{at}/commits/{q(sha, '')}")), sha)
+
+    def _swap_ref(self, owner, repo, node, branch, expect, sha):
+        """`branch` from `expect` to `sha`, or not at all. `force` only allows the
+        non-fast-forward move; `beforeOid` is what makes it a compare-and-swap.
+
+        A failed swap is not read by its text: the ref is read again. Still at
+        `expect` is a failure (a Refusal); at `sha` is a swap whose answer was
+        lost; anywhere else is `RefMoved`.
+        """
+        failure = None
+        try:
+            got = json.loads(self._api("graphql", payload={"query": SWAP_REF, "variables": {
+                "repo": node, "updates": [{"name": f"refs/heads/{branch}", "beforeOid": expect,
+                                           "afterOid": sha, "force": True}]}}))
+            if (not isinstance(got, dict) or got.get("errors")
+                    or not isinstance((got.get("data") or {}).get("updateRefs"), dict)):
+                failure = f"updateRefs answered {json.dumps(got)[:200]}"
+        except (Refusal, ValueError) as exc:
+            failure = str(exc)
+        if failure is None:
+            return
+        now = self.branch_sha(owner, repo, branch)
+        if now == sha:
+            return
+        if now != expect:
+            raise RefMoved(f"`{branch}` moved to {now} after it was read at {expect}; not overwritten")
+        raise Refusal(f"the compare-and-swap of `{branch}` failed: {failure}")
 
     def create_pr(self, owner, repo, base, branch, title, body_text):
         out = self._api("-X", "POST", f"repos/{q(owner)}/{q(repo)}/pulls", payload={

@@ -19,9 +19,9 @@ name: sweep
 # asks for public ones only, so no read here needs the App. The App token is
 # minted per `act` leg, scoped by `repositories:` to that leg's one repository,
 # with `contents: write` and nothing else: the squash merge and the branch
-# rewrite (git data API blob, tree, commit and ref, plus two commit reads) are
-# the only calls made with it (the REST permission table lists `contents`
-# for each of them).
+# rewrite (git data API blob, tree and commit, the ref moved by a GraphQL
+# `updateRefs` compare-and-swap, a repository read for its node id, two commit
+# reads, and a ref read after a failed swap) are the only calls made with it.
 #
 # NOT THE FAN-OUT'S CONCURRENCY GROUP. A queued sweep must never cancel or delay
 # a tag-push fan-out; `sweep.py` instead stops when a fan-out run is in progress
@@ -103,6 +103,7 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read # the checkout of this repository
+      actions: read # whether a fan-out started since evaluate (yaadgaar 470)
     strategy:
       fail-fast: false
       max-parallel: 4

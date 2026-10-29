@@ -89,8 +89,10 @@ class Fake:
         pr = self.data[f"repos/{owner}/{name}/pulls/{n}"]
         pr.update(merged=True, state="closed", merge_commit_sha="f" * 40)
 
-    def rewrite_branch(self, owner, name, branch, parent, path, text, message, exists):
-        self.writes.append(("rewrite", owner, name, branch, parent, path, text, message, exists))
+    def rewrite_branch(self, owner, name, branch, parent, path, text, message, exists,
+                       expect=None):
+        self.writes.append(("rewrite", owner, name, branch, parent, path, text, message, exists,
+                            expect))
 
 
 class Case:
@@ -107,6 +109,9 @@ class Case:
         self.tip = self.one(rf"^{self.r}/git/ref/heads/")["object"]["sha"]
         self.data[f"{self.r}/git/ref/heads/{fan_out.BRANCH}"] = {
             "ref": f"refs/heads/{fan_out.BRANCH}", "object": {"sha": self.head, "type": "commit"}}
+        for status in ("in_progress", "queued"):  # `act` asks again (yaadgaar 470)
+            self.data[f"repos/{OWNER}/actions/actions/workflows/fan-out.yaml/runs?status={status}"] = {
+                "total_count": 0}
 
     def one(self, pattern):
         hits = [v for k, v in self.data.items() if re.search(pattern, k)]
@@ -572,7 +577,9 @@ def estate(*names):
         listing.append({"name": case.repo, "topics": case.meta["topics"]})
         data[f"repos/{OWNER}/{case.repo}/pulls?head={OWNER}:actions-adopt&state=open&per_page=10"] = [
             {"number": case.n}]
-    listing += [{"name": "actions", "topics": []}, {"name": "argocd-verify", "topics": ["yadgar-class-verify"]}]
+    # `type=public` never lists a private repository: docs and argocd-verify are
+    # absent here as they are from the real listing (yaadgaar 467).
+    listing += [{"name": "actions", "topics": []}]
     data[f"orgs/{OWNER}/repos?type=public&per_page=100&page=1"] = listing
     for status in ("in_progress", "queued"):
         data[f"repos/{OWNER}/actions/actions/workflows/fan-out.yaml/runs?status={status}"] = {
@@ -584,10 +591,43 @@ def test_the_sweep_plans_one_merge_and_every_refresh():
     rows, todo = sweep.sweep(Fake(estate("store-45", "chart-75", "yadgar-98")), OWNER,
                              classes(max_merges=1), NOW)
     by = {r["repo"]: r for r in rows}
-    assert by["argocd-verify"]["reason"] == "excluded"
+    assert by["argocd-verify"]["reason"].startswith("R2: excluded: Private")
     assert "actions" not in by  # no class topic, so not a consumer
     assert [(t["repo"], t["action"]) for t in todo] == [("chart", "merge"), ("yadgar", "refresh")]
     assert by["store"]["reason"].startswith("M4")
+
+
+def test_every_exclusion_is_a_report_row_with_its_reason_though_never_listed():
+    """YAADGAAR 467. The listing is public-only, so an excluded private repository
+    is never listed; its row comes from classes.json, not from a private read."""
+    shipped = classes()["sweep"]["exclude"]
+    data = estate("store-45")
+    listed = [m["name"] for m in data[f"orgs/{OWNER}/repos?type=public&per_page=100&page=1"]]
+    assert not set(shipped) & set(listed)
+    rows, _ = sweep.sweep(Fake(data), OWNER, classes(), NOW)
+    got = {r["repo"]: r["reason"] for r in rows if r["repo"] in shipped}
+    assert got == {name: f"R2: excluded: {why}" for name, why in shipped.items()}
+    assert all(r["action"] == "skip" for r in rows if r["repo"] in shipped)
+    assert "R2: excluded: Private" in sweep.report(rows, True)
+
+
+def test_a_listed_excluded_repository_is_one_row_and_never_read():
+    data = estate("store-45")
+    rows, todo = sweep.sweep(Fake(data), OWNER, classes(exclude={"store": "a reason"}), NOW)
+    assert [r for r in rows if r["repo"] == "store"] == [
+        {"repo": "store", "n": 0, "action": "skip", "reason": "R2: excluded: a reason"}]
+    assert todo == []
+
+
+def test_a_listed_exempt_repository_is_one_row_with_its_reason():
+    data = estate("store-45")
+    listing = data[f"orgs/{OWNER}/repos?type=public&per_page=100&page=1"]
+    [producer] = [m for m in listing if m["name"] == "actions"]
+    producer["topics"] = ["yadgar-class-base"]  # listed as a consumer, so exempt must catch it
+    rows, _ = sweep.sweep(Fake(data), OWNER, classes(), NOW)
+    assert [r for r in rows if r["repo"] == "actions"] == [
+        {"repo": "actions", "n": 0, "action": "skip",
+         "reason": f"R2: exempt: {classes()['exempt']['actions']}"}]
 
 
 def test_the_merge_cap_is_respected_at_zero_and_two():
@@ -601,6 +641,32 @@ def test_a_running_fan_out_stops_the_sweep():
     data[f"repos/{OWNER}/actions/actions/workflows/fan-out.yaml/runs?status=queued"] = {"total_count": 1}
     rows, todo = sweep.sweep(Fake(data), OWNER, classes(), NOW)
     assert todo == [] and rows[0]["reason"] == "fan-out running"
+
+
+@pytest.mark.parametrize("action, n", [("merge", 45), ("refresh", 98)])
+def test_a_fan_out_running_at_act_time_writes_nothing(action, n):
+    """YAADGAAR 470. `evaluate` saw no fan-out, but one may have started since."""
+    case = merge_case() if action == "merge" else refresh_case()
+    case.data[f"repos/{OWNER}/actions/actions/workflows/fan-out.yaml/runs?status=in_progress"] = {
+        "total_count": 1}
+    writes = []
+    with pytest.raises(sweep.Skip, match="fan-out running"):
+        sweep.act(Fake(case.data, writes), Fake(case.data, writes), OWNER, case.repo, n, case.head,
+                  action, classes(), NOW)
+    assert writes == []
+
+
+def test_a_re_evaluation_that_errors_reds_the_act_leg():
+    """YAADGAAR 469. An `error:` row is a read that failed, not a pull request
+    that stopped qualifying: it must not pass as a Skip (which exits 0)."""
+    case = merge_case()
+    del case.data[f"{case.r}/pulls/45/commits?per_page=100"]
+    writes = []
+    with pytest.raises(Refusal, match="M1: the re-evaluation failed: error:") as raised:
+        sweep.act(Fake(case.data, writes), Fake(case.data, writes), OWNER, "store", 45, case.head,
+                  "merge", classes(), NOW)
+    assert not isinstance(raised.value, sweep.Skip)
+    assert writes == []
 
 
 def test_the_merge_sends_squash_the_head_the_title_and_the_body():
@@ -634,6 +700,23 @@ def test_a_denied_merge_is_not_a_skip(denial):
     assert not isinstance(raised.value, sweep.Skip)
 
 
+@pytest.mark.parametrize("failure", [
+    "gh: Not Found (HTTP 404)",
+    "gh: Server Error (HTTP 500)",
+    "To get started with GitHub CLI, please run:  gh auth login",
+    "gh: Pull Request is not mergeable",
+])
+def test_a_merge_failure_that_is_not_a_known_refusal_reds(failure):
+    """YAADGAAR 469. Only 405, 409 and 422 are GitHub refusing this pull request.
+    A 404 (the token cannot see the repository), no usable auth, or an error with
+    no HTTP code is not a verdict on the pull request: it reds."""
+    case = merge_case()
+    with pytest.raises(Refusal, match="M2") as raised:
+        sweep.act(Fake(case.data), Fake(case.data, refuse_merge=failure), OWNER, "store", 45,
+                  case.head, "merge", classes(), NOW)
+    assert not isinstance(raised.value, sweep.Skip)
+
+
 def test_the_real_clients_403_text_is_read_as_a_denial(monkeypatch):
     """`gh api`'s own stderr, through `SweepGh._api`, not a string the fake builds."""
     case = merge_case()
@@ -650,6 +733,7 @@ def test_a_denied_merge_reds_the_act_run(tmp_path, monkeypatch, capsys):
     case = merge_case()
     monkeypatch.setenv("EVENT", "schedule")
     monkeypatch.setenv("REF", "refs/heads/main")
+    monkeypatch.setenv("SWEEP_WRITE_TOKEN", "token")
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary"))
     armed = classes(live=True)
     monkeypatch.setattr(sweep, "load", lambda text: armed)
@@ -698,7 +782,7 @@ def test_a_refresh_is_one_rewrite_onto_the_tip_with_the_same_file():
               "refresh", classes(), NOW)
     assert writes == [
         ("rewrite", OWNER, "yadgar", "actions-adopt", case.tip, ".pre-commit-config.yaml",
-         case.text(case.head), case.pr["title"], True),
+         case.text(case.head), case.pr["title"], True, case.head),
     ]
     assert case.tip != case.head
 
@@ -728,6 +812,45 @@ def test_a_branch_that_moved_is_not_reset():
         sweep.act(Fake(case.data, writes), Fake(case.data, writes), OWNER, "yadgar", 98, case.head,
                   "refresh", classes(), NOW)
     assert writes == []
+
+
+def test_a_ref_moved_under_the_swap_is_a_skip_that_keeps_the_leg_green(tmp_path, monkeypatch):
+    """YAADGAAR 470. The compare-and-swap refused because the fan-out moved the
+    branch after the read: that is the fan-out's newer commit winning, not a fault."""
+    case = refresh_case()
+
+    class Raced(Fake):
+        def rewrite_branch(self, *args, **kwargs):
+            raise fan_out.RefMoved("`actions-adopt` moved under the swap")
+
+    armed_act(tmp_path, monkeypatch, case, Raced)
+    code = sweep.main(["act", "--owner", OWNER, "--repo", "yadgar", "--n", "98",
+                       "--head", case.head, "--action", "refresh"])
+    assert code == 0
+    assert "skipped yadgarhq/yadgar#98" in (tmp_path / "summary").read_text()
+
+
+def test_an_act_leg_with_no_write_token_reds_before_any_call(tmp_path, monkeypatch, capsys):
+    case = merge_case()
+    armed_act(tmp_path, monkeypatch, case, Fake)
+    monkeypatch.setenv("SWEEP_WRITE_TOKEN", "")
+    monkeypatch.setattr(sweep, "SweepGh", lambda token: pytest.fail("no client may be built"))
+    code = sweep.main(["act", "--owner", OWNER, "--repo", "store", "--n", "45",
+                       "--head", case.head, "--action", "merge"])
+    assert code == 1
+    assert "SWEEP_WRITE_TOKEN" in capsys.readouterr().err
+
+
+def armed_act(tmp_path, monkeypatch, case, writer_class):
+    monkeypatch.setenv("EVENT", "schedule")
+    monkeypatch.setenv("REF", "refs/heads/main")
+    monkeypatch.setenv("SWEEP_WRITE_TOKEN", "token")
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary"))
+    armed = classes(live=True)
+    monkeypatch.setattr(sweep, "load", lambda text: armed)
+    clients = iter([Fake(case.data), writer_class(case.data)])
+    monkeypatch.setattr(sweep, "SweepGh", lambda token: next(clients))
+    monkeypatch.setattr(sweep, "now_utc", lambda: NOW)
 
 
 def test_the_refresh_cap_counts_todays_force_pushes():
@@ -951,6 +1074,7 @@ def test_a_failed_rewrite_reds_the_act_run(tmp_path, monkeypatch, capsys, failur
 
     monkeypatch.setenv("EVENT", "schedule")
     monkeypatch.setenv("REF", "refs/heads/main")
+    monkeypatch.setenv("SWEEP_WRITE_TOKEN", "token")
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary"))
     armed = classes(live=True)
     monkeypatch.setattr(sweep, "load", lambda text: armed)
@@ -1051,3 +1175,8 @@ def test_every_checkout_drops_its_credentials():
         for step in steps(job):
             if "actions/checkout" in step.get("uses", ""):
                 assert step["with"]["persist-credentials"] is False
+
+
+def test_the_act_job_may_read_whether_a_fan_out_is_running():
+    """YAADGAAR 470: `act` asks `fan_out_running` again, with GITHUB_TOKEN."""
+    assert workflow()["jobs"]["act"]["permissions"].get("actions") == "read"

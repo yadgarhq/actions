@@ -1541,9 +1541,16 @@ class GitHub(fan_out.Gh):
         self.calls = []
         self.ref_writes = []
 
+    race = None  # a sha the fan-out moves the branch to just before a compare-and-swap
+    graphql_answer = None  # a GraphQL answer to give instead of performing the swap
+
     def _api(self, *args, payload=None, missing_ok=False):
         method, path = (args[1], args[2]) if args[0] == "-X" else ("GET", args[0])
         self.calls.append((method, path, payload))
+        if path == "graphql":
+            return self._swap(payload)
+        if path == "repos/yadgarhq/docs":
+            return json.dumps({"name": "docs", "node_id": "R_docs"})
         prefix = "repos/yadgarhq/docs/"
         assert path.startswith(prefix), path
         path = path[len(prefix):]
@@ -1567,6 +1574,13 @@ class GitHub(fan_out.Gh):
             if self.refs[name] == self.refs["main"]:
                 self.pr = "closed"
             return json.dumps({"object": {"sha": payload["sha"]}})
+        if method == "GET" and path.startswith("git/ref/heads/"):
+            name = path.removeprefix("git/ref/heads/")
+            if name not in self.refs:
+                if missing_ok:
+                    return None
+                raise fan_out.Refusal("gh: Not Found (HTTP 404)")
+            return json.dumps({"object": {"sha": self.refs[name]}})
         if method == "GET" and path.startswith("commits/"):
             return json.dumps({
                 "sha": path.split("/", 1)[1], "commit": {"verification": {"verified": self.signed}},
@@ -1575,10 +1589,74 @@ class GitHub(fan_out.Gh):
         raise AssertionError(f"unexpected call {method} {path}")
 
 
-def rewrite(gh, exists=True, branch="actions-adopt"):
+    def _swap(self, payload):
+        """GraphQL `updateRefs`, as GitHub runs it: `beforeOid` must be the ref's value."""
+        assert "updateRefs" in payload["query"]
+        if self.race is not None:
+            self.refs["actions-adopt"] = self.race
+        if self.graphql_answer is not None:
+            return json.dumps(self.graphql_answer)
+        variables = payload["variables"]
+        assert variables["repo"] == "R_docs"
+        (update,) = variables["updates"]
+        name = update["name"].removeprefix("refs/heads/")
+        if self.refs.get(name) != update["beforeOid"]:
+            raise fan_out.Refusal("gh: GraphQL: the ref was not at the expected value (updateRefs)")
+        self.ref_writes.append(("CAS", name, update["afterOid"], update["force"]))
+        self.refs[name] = update["afterOid"]
+        return json.dumps({"data": {"updateRefs": {"clientMutationId": None}}})
+
+
+def rewrite(gh, exists=True, branch="actions-adopt", **kwargs):
     gh.rewrite_branch("yadgarhq", "docs", branch, BASE, ".pre-commit-config.yaml",
                       "repos: []\n", "chore(deps): bump yadgarhq/actions hooks from v1 to v2",
-                      exists)
+                      exists, **kwargs)
+
+
+# YAADGAAR 470. The sweeper's refresh passes `expect`, the head it evaluated.
+# The ref then moves by compare-and-swap, never by a forced PATCH, so a fan-out
+# rewrite that lands between the sweeper's read and its write is never overwritten.
+
+
+def test_an_expected_head_moves_the_ref_by_compare_and_swap_only():
+    gh = GitHub()
+    rewrite(gh, expect=OLD)
+    assert gh.ref_writes == [("CAS", "actions-adopt", NEW, True)]
+    assert [m for m, _, _ in gh.calls if m == "PATCH"] == []
+    assert gh.refs["actions-adopt"] == NEW
+    assert gh.calls[-1][:2] == ("GET", "repos/yadgarhq/docs/commits/" + NEW)
+
+
+def test_a_ref_the_fan_out_moved_is_never_overwritten():
+    gh = GitHub()
+    gh.race = "e" * 40
+    with pytest.raises(fan_out.RefMoved):
+        rewrite(gh, expect=OLD)
+    assert gh.refs["actions-adopt"] == "e" * 40
+    assert gh.ref_writes == []
+
+
+@pytest.mark.parametrize("answer", [
+    {"errors": [{"message": "something else"}]},
+    {"data": {"updateRefs": None}, "errors": [{"message": "x"}]},
+    {"data": {}},
+    {"data": {"updateRefs": {"clientMutationId": None}}, "errors": [{"message": "partial"}]},
+])
+def test_a_failed_swap_on_a_ref_that_did_not_move_is_a_refusal_not_a_move(answer):
+    gh = GitHub()
+    gh.graphql_answer = answer
+    with pytest.raises(fan_out.Refusal) as raised:
+        rewrite(gh, expect=OLD)
+    assert not isinstance(raised.value, fan_out.RefMoved)
+    assert gh.refs["actions-adopt"] == OLD
+
+
+def test_a_swap_whose_answer_was_lost_but_landed_is_checked_like_any_other():
+    gh = GitHub()
+    gh.graphql_answer = {"errors": [{"message": "timeout"}]}
+    gh.race = NEW  # the swap did land; only its answer was lost
+    rewrite(gh, expect=OLD)
+    assert gh.calls[-1][:2] == ("GET", "repos/yadgarhq/docs/commits/" + NEW)
 
 
 def test_rewrite_branch_moves_the_ref_once_to_a_new_commit_on_the_base_tip():
