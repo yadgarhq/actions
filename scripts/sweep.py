@@ -41,7 +41,9 @@ behind pull request whose config is unchanged.
 
 THE MERGE IS A SQUASH that sends the head sha, the title and the body itself.
 The body carries no Conventional Commits bullet (P7), so the consumer's
-`version` job cuts no release for it.
+`version` job cuts no release for it. A merge GitHub refuses (405, 409, 422) is
+a skip; a merge it DENIES (401, 403) is the write token misconfigured, and
+reds the `act` job.
 
 DRY BY DEFAULT. `classes.json` ships `"sweep": {"live": false}`; while it is
 false the workflow mints no write token and runs no `act` job, and `evaluate`
@@ -63,6 +65,7 @@ Tests: python3 -m pytest scripts/tests/ -q
 import argparse
 import datetime
 import json
+import math
 import os
 import re
 import subprocess
@@ -89,6 +92,7 @@ VERSION = r"v[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}"
 TITLE = re.compile(
     rf"chore\(deps\): bump yadgarhq/actions hooks from ({VERSION}) to ({VERSION})")
 SHA = re.compile(r"[0-9a-f]{40}")
+DENIED = re.compile(r"\bHTTP 40[13]\b")  # a merge call the token may not make
 PAGE = 100  # a list of exactly this many may have a second page: refused
 SWEEP_KEYS = {"live", "exclude", "soak_hours", "max_merges", "max_refreshes_per_pr_per_day"}
 DAY = datetime.timedelta(hours=24)
@@ -148,9 +152,14 @@ def load(text):
     if not isinstance(exclude, dict) or not all(
             isinstance(k, str) and isinstance(v, str) and v.strip() for k, v in exclude.items()):
         raise Refusal("classes.json: `sweep.exclude` maps a name to a non-empty reason")
-    for key in ("soak_hours", "max_merges", "max_refreshes_per_pr_per_day"):
+    for key in ("max_merges", "max_refreshes_per_pr_per_day"):
         if not is_int(sweep[key]) or sweep[key] < 0:
             raise Refusal(f"classes.json: `sweep.{key}` must be a non-negative integer")
+    # Hours may be fractional (ADR-1068 sets 0.5); a bool, a string, NaN and
+    # infinity are not hours.
+    soak = sweep["soak_hours"]
+    if type(soak) not in (int, float) or not math.isfinite(soak) or soak < 0:
+        raise Refusal("classes.json: `sweep.soak_hours` must be a non-negative finite number")
     return classes
 
 
@@ -499,6 +508,9 @@ def act(reader, writer, owner, name, n, head, action, classes, now):
         try:
             writer.merge_pr(owner, name, n, head, f"{verdict['title']} (#{n})", verdict["body"])
         except Refusal as exc:
+            # 401/403 is the write token, not the pull request: red the run.
+            if DENIED.search(str(exc)):
+                raise Refusal(f"M2: the merge call was denied: {exc}") from None
             raise Skip(f"M2: the merge was refused: {exc}") from None
         after = reader.get(f"repos/{owner}/{name}/pulls/{n}", fresh=True)
         need(dig(after, "merged") is True, "M3: not merged after the merge call")

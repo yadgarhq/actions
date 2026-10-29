@@ -494,8 +494,17 @@ def test_a_tag_not_cut_on_main_by_one_merged_pull_request_is_skipped(change, cod
 
 def test_a_tag_younger_than_the_soak_is_skipped():
     case = merge_case()
-    skipped(case, "T5", now=datetime.datetime(2026, 10, 28, 20, 0, tzinfo=datetime.timezone.utc))
+    skipped(case, "T5", now=datetime.datetime(2026, 10, 28, 10, 10, tzinfo=datetime.timezone.utc))
     skipped(case, "T5", classes(soak_hours=1000))
+
+
+def test_a_fractional_soak_compares_in_minutes():
+    """ADR-1068: the soak is 0.5 h. v1.38.2's commit is 2026-10-28T10:00:07Z."""
+    case = merge_case()
+    half = classes(soak_hours=0.5)
+    at = lambda h, m, s: datetime.datetime(2026, 10, 28, h, m, s, tzinfo=datetime.timezone.utc)  # noqa: E731
+    skipped(case, "T5", half, now=at(10, 30, 6))
+    assert case.judge(half, now=at(10, 30, 7))["action"] == "merge"
 
 
 def test_a_tag_object_naming_a_tree_is_skipped():
@@ -612,6 +621,46 @@ def test_a_refused_merge_is_a_skip(refusal):
                   case.head, "merge", classes(), NOW)
 
 
+@pytest.mark.parametrize("denial", ["gh: Bad credentials (HTTP 401)",
+                                    "gh: Resource not accessible by integration (HTTP 403)"])
+def test_a_denied_merge_is_not_a_skip(denial):
+    """A 401 or 403 is the write token misconfigured, not the pull request: it
+    must red the `act` job, never pass as a Skip (which exits 0)."""
+    case = merge_case()
+    with pytest.raises(Refusal, match="M2") as raised:
+        sweep.act(Fake(case.data), Fake(case.data, refuse_merge=denial), OWNER, "store", 45,
+                  case.head, "merge", classes(), NOW)
+    assert not isinstance(raised.value, sweep.Skip)
+
+
+def test_the_real_clients_403_text_is_read_as_a_denial(monkeypatch):
+    """`gh api`'s own stderr, through `SweepGh._api`, not a string the fake builds."""
+    case = merge_case()
+    writer = sweep.SweepGh("token")
+    denied = sweep.subprocess.CompletedProcess(
+        [], 1, stdout="", stderr="gh: Resource not accessible by integration (HTTP 403)\n")
+    monkeypatch.setattr(sweep.subprocess, "run", lambda *a, **k: denied)
+    with pytest.raises(Refusal, match="M2: the merge call was denied") as raised:
+        sweep.act(Fake(case.data), writer, OWNER, "store", 45, case.head, "merge", classes(), NOW)
+    assert not isinstance(raised.value, sweep.Skip)
+
+
+def test_a_denied_merge_reds_the_act_run(tmp_path, monkeypatch, capsys):
+    case = merge_case()
+    monkeypatch.setenv("EVENT", "schedule")
+    monkeypatch.setenv("REF", "refs/heads/main")
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary"))
+    armed = classes(live=True)
+    monkeypatch.setattr(sweep, "load", lambda text: armed)
+    clients = iter([Fake(case.data), Fake(case.data, refuse_merge="gh: Forbidden (HTTP 403)")])
+    monkeypatch.setattr(sweep, "SweepGh", lambda token: next(clients))
+    monkeypatch.setattr(sweep, "now_utc", lambda: NOW)
+    code = sweep.main(["act", "--owner", OWNER, "--repo", "store", "--n", "45",
+                       "--head", case.head, "--action", "merge"])
+    assert code == 1
+    assert "::error::M2" in capsys.readouterr().err
+
+
 def test_the_act_job_re_evaluates_and_writes_nothing_when_that_fails():
     case = merge_case()
     case.check("ci / passed").update(conclusion="failure")
@@ -726,10 +775,11 @@ def test_the_real_client_merges_with_exactly_the_four_fields(monkeypatch):
 # --------------------------------------------------------------------------
 
 
-def test_the_sweep_ships_unarmed_with_the_placeholder_soak():
+def test_the_sweep_ships_unarmed_with_the_half_hour_soak():
+    """ADR-1068: Max ruled the soak at 0.5 h on 2026-10-29."""
     shipped = sweep.load(CLASSES_TEXT)["sweep"]
     assert shipped["live"] is False
-    assert shipped["soak_hours"] == 24
+    assert shipped["soak_hours"] == 0.5
     assert shipped["max_merges"] == 1
     assert shipped["max_refreshes_per_pr_per_day"] == 3
 
@@ -742,7 +792,13 @@ def test_the_sweep_ships_unarmed_with_the_placeholder_soak():
     lambda s: s.update(soak_hours=-1),
     lambda s: s.update(soak_hours=True),
     lambda s: s.update(soak_hours="24"),
+    lambda s: s.update(soak_hours="0.5"),
+    lambda s: s.update(soak_hours=float("nan")),
+    lambda s: s.update(soak_hours=float("inf")),
+    lambda s: s.update(soak_hours=-0.5),
+    lambda s: s.update(soak_hours=None),
     lambda s: s.update(max_merges=1.5),
+    lambda s: s.update(max_refreshes_per_pr_per_day=0.5),
     lambda s: s.update(exclude={"docs": ""}),
     lambda s: s.update(exclude=["docs"]),
 ])
@@ -751,6 +807,13 @@ def test_a_malformed_sweep_block_is_refused(change):
     change(data["sweep"])
     with pytest.raises(Refusal):
         sweep.load(json.dumps(data))
+
+
+@pytest.mark.parametrize("soak", [0, 0.5, 1, 24, 0.0])
+def test_a_whole_or_fractional_soak_is_accepted(soak):
+    data = json.loads(CLASSES_TEXT)
+    data["sweep"]["soak_hours"] = soak
+    assert sweep.load(json.dumps(data))["sweep"]["soak_hours"] == soak
 
 
 def test_a_missing_sweep_block_is_refused():
@@ -810,6 +873,28 @@ def test_a_read_that_fails_reds_the_evaluate_run(tmp_path, monkeypatch, capsys):
     assert "| `store` |" in summary  # the table is still written
 
 
+def test_an_exception_that_is_not_a_refusal_reds_the_evaluate_run(tmp_path, monkeypatch, capsys):
+    """F1. Any exception inside evaluation, not only a Refusal, is an `error:` row
+    that reds the run: a prefix narrowed to `error: Refusal` must fail here."""
+    data = estate("store-45", "chart-75")
+
+    class Broken(Fake):
+        def get(self, path, fresh=False):
+            if path == "repos/yadgarhq/chart/pulls/75":
+                raise KeyError("head")
+            return super().get(path, fresh)
+
+    summary = tmp_path / "summary"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "out"))
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    monkeypatch.setattr(sweep, "SweepGh", lambda token: Broken(data))
+    monkeypatch.setattr(sweep, "now_utc", lambda: NOW)
+    code = sweep.main(["evaluate", "--owner", OWNER, "--classes", str(REPO / "classes.json")])
+    assert code == 1
+    assert "error: KeyError" in summary.read_text()
+    assert "::error::1 rows could not be evaluated: chart" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("code_letter", ["V1", "T5"])
 def test_an_ordinary_skip_keeps_the_evaluate_run_green(tmp_path, monkeypatch, capsys, code_letter):
     case = merge_case()
@@ -819,7 +904,7 @@ def test_an_ordinary_skip_keeps_the_evaluate_run_green(tmp_path, monkeypatch, ca
         runs = data[f"{case.r}/commits/{case.head}/check-runs?per_page=100"]["check_runs"]
         [r for r in runs if r["name"] == "ci / passed"][0]["conclusion"] = "failure"
     else:
-        now = datetime.datetime(2026, 10, 28, 12, 0, tzinfo=datetime.timezone.utc)
+        now = datetime.datetime(2026, 10, 28, 10, 10, tzinfo=datetime.timezone.utc)
     code, summary = run_evaluate(tmp_path, monkeypatch, data, now)
     assert code == 0
     assert f"| skip | {code_letter}:" in summary
