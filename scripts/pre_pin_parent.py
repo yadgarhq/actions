@@ -141,7 +141,70 @@ def vendor(parent_chart: Path, name: str, version: str, tarball: Path) -> Path:
     return destination
 
 
-def failure_message(name: str, version: str, verb: str, result: subprocess.CompletedProcess) -> str:
+def example_values(parent_chart: Path) -> Path | None:
+    """The parent's `example/values.yaml`, a sibling of its `chart/` (yaadgaar 345)."""
+    path = parent_chart.parent / "example" / "values.yaml"
+    return path if path.is_file() else None
+
+
+PLACEHOLDER_ADMINISTRATOR = "REPLACE-WITH-A-UUIDV7-YOU-MINT"
+CI_ADMINISTRATOR = "01900000-0000-7000-8000-000000000001"
+
+
+def render_parent(values_flags: list[str], template_flags: list[str]):
+    """Lint, template with the CI values, then template with the example values.
+
+    Returns None when all pass, else `(verb, label, result)` of the first
+    refusal, `label` naming the example file when that is what refused.
+
+    The example is rendered from a TEMP COPY with chart's adopter placeholder
+    replaced by a fixed uuidv7 (chart's own `_adopter_values_as_replaced`): the
+    seeder render-check refuses the placeholder by design, so the shipped file
+    can never render as is. The checkout is not touched.
+    """
+    lint = helm("lint", "--strict", str(PARENT), *values_flags)
+    if lint.returncode != 0:
+        return ("lint", "", lint)
+    template = helm("template", "ci-render", str(PARENT), *template_flags, *values_flags)
+    if template.returncode != 0:
+        return ("template", "", template)
+    example = example_values(PARENT)
+    if example is not None:
+        with tempfile.TemporaryDirectory() as scratch:
+            copy = Path(scratch) / "example" / "values.yaml"
+            copy.parent.mkdir()
+            copy.write_text(example.read_text().replace(PLACEHOLDER_ADMINISTRATOR, CI_ADMINISTRATOR))
+            rendered = helm("template", "ci-render-example", str(PARENT), *template_flags, "-f", str(copy))
+        if rendered.returncode != 0:
+            return ("template", str(example), rendered)
+    return None
+
+
+def parent_sha() -> str:
+    """The parent checkout's head: `PARENT_SHA` from the workflow, else git."""
+    given = os.environ.get("PARENT_SHA", "").strip()
+    if given:
+        return given
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(PARENT), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=False,
+        )
+    except FileNotFoundError:
+        return "an unknown commit"
+    return done.stdout.strip() or "an unknown commit"
+
+
+def baseline_message(sha: str, result: subprocess.CompletedProcess) -> str:
+    """PURE: parent main is red before anything of this pull request is vendored."""
+    return (
+        f"yadgarhq/chart main is red at {sha} before this pull request's chart was "
+        f"vendored; not this PR's K-8 order. Fix yadgarhq/chart main, then re-run this job.\n\n"
+        f"{result.stdout}{result.stderr}"
+    )
+
+
+def failure_message(name: str, version: str, verb: str, result: subprocess.CompletedProcess, example: str = "") -> str:
     """PURE: the sentence a refused `lint`/`template` prints, K-8's order named.
 
     Both the green test and the red test call this, and the red test asserts
@@ -149,10 +212,16 @@ def failure_message(name: str, version: str, verb: str, result: subprocess.Compl
     error and a K-8 violation read identically in helm's own text, so this is
     the one place that tells a reviewer which repair applies.
     """
+    where = f" using {example}" if example else ""
+    step2 = (
+        f"{example} is a parent render too: K-8 step 2 puts the key there as well. "
+        if example else ""
+    )
     return (
-        f"yadgarhq/chart main refuses to {verb} with {name!r} vendored at {version}, "
+        f"yadgarhq/chart main refuses to {verb} with {name!r} vendored at {version}{where}, "
         f"the pin yadgarhq/chart's own Chart.yaml already carries for it:\n\n"
         f"{result.stdout}{result.stderr}\n"
+        f"{step2}"
         f"If this pull request makes a chart key required with no default, the "
         f"yadgarhq/chart fixture -- chart/ci/values.yaml, example/ values, and the "
         f"parent chart test -- has to land in yadgarhq/chart FIRST (K-8 order). "
@@ -192,10 +261,6 @@ def main() -> int:
         )
         return 0
 
-    with tempfile.TemporaryDirectory() as workspace:
-        tarball = package_candidate(CANDIDATE, pin, Path(workspace))
-        vendor(PARENT, name, pin, tarball)
-
     values_flags = values_override_flags(PARENT)
     try:
         template_flags = api_version_flags(PARENT)
@@ -203,15 +268,35 @@ def main() -> int:
         print(f"::error::{error}")
         return 1
 
-    lint = helm("lint", "--strict", str(PARENT), *values_flags)
-    if lint.returncode != 0:
-        print(f"::error::{failure_message(name, pin, 'lint', lint)}")
-        return lint.returncode
+    # BASELINE FIRST (yaadgaar 342): the parent exactly as checked out. If main
+    # is already red (a bad pin written by `parent_bump.py` with no PR CI), say
+    # so rather than blame this pull request's K-8 order.
+    baseline_red = render_parent(values_flags, template_flags)
 
-    template = helm("template", "ci-render", str(PARENT), *template_flags, *values_flags)
-    if template.returncode != 0:
-        print(f"::error::{failure_message(name, pin, 'template', template)}")
-        return template.returncode
+    # A red baseline does NOT stop here: a chart PR that repairs a red parent
+    # main would deadlock otherwise. Vendor and render again.
+    with tempfile.TemporaryDirectory() as workspace:
+        tarball = package_candidate(CANDIDATE, pin, Path(workspace))
+        vendor(PARENT, name, pin, tarball)
+
+    red = render_parent(values_flags, template_flags)
+    if red is not None:
+        verb, label, result = red
+        if baseline_red is not None:
+            # Both red: name the pre-existing red, then ALSO the vendored
+            # result, so a second failure this PR adds is not hidden.
+            print(f"::error::{baseline_message(parent_sha(), baseline_red[2])}")
+            print(f"::error::{failure_message(name, pin, verb, result, label)}")
+        else:
+            print(f"::error::{failure_message(name, pin, verb, result, label)}")
+        return result.returncode or 1
+    if baseline_red is not None:
+        print(
+            f"::warning::yadgarhq/chart main is red at {parent_sha()} before this pull "
+            f"request's chart was vendored; this pull request repairs it ({name!r} "
+            f"vendored at {pin} renders and lints)."
+        )
+        return 0
 
     print(
         f"pre-pin-parent: yadgarhq/chart main renders and lints with {name!r} "
