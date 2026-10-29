@@ -1757,3 +1757,77 @@ def test_each_repository_outcome_is_one_inert_stdout_line():
         assert "\n" not in line
         assert "::" not in line
         assert "add-mask" not in line and "stop-commands" not in line and "boom" not in line
+
+
+# --------------------------------------------------------------------------
+# yaadgaar 468, ADR-1073: the fan-out triggers the sweep, and never merges
+# --------------------------------------------------------------------------
+
+DISPATCH = ('gh api -X POST "repos/${REPO}/actions/workflows/sweep.yaml/dispatches"\n'
+            '-f ref=main -f "inputs[dry_run]=false" -f "inputs[wait_minutes]=45"')
+
+
+def dispatch_violations(flow):
+    """Every way the dispatch job could do more than trigger sweep.yaml on main."""
+    found = []
+    jobs = flow["jobs"]
+    if set(jobs) != {"fan-out", "dispatch-sweep"}:
+        found.append(("jobs", sorted(jobs)))
+    if jobs["fan-out"].get("permissions") != {"contents": "read"}:
+        found.append(("fan-out permissions", jobs["fan-out"].get("permissions")))
+    if jobs["fan-out"].get("outputs") != {"live": "${{ steps.mode.outputs.live }}"}:
+        found.append(("fan-out outputs", jobs["fan-out"].get("outputs")))
+    job = jobs.get("dispatch-sweep", {})
+    if job.get("permissions") != {"actions": "write"}:
+        found.append(("dispatch permissions", job.get("permissions")))
+    if job.get("needs") != "fan-out":
+        found.append(("needs", job.get("needs")))
+    if job.get("if") != "github.event_name == 'push' && needs.fan-out.outputs.live == 'true'":
+        found.append(("if", job.get("if")))
+    steps = job.get("steps", [])
+    if len(steps) != 1 or "uses" in steps[0]:
+        found.append(("steps", steps))
+        return found
+    step = steps[0]
+    if step.get("env") != {"GH_TOKEN": "${{ github.token }}", "REPO": "${{ github.repository }}"}:
+        found.append(("env", step.get("env")))
+    if step.get("run", "").strip() != DISPATCH.replace("\n", " "):
+        found.append(("run", step.get("run")))
+    if "secrets." in json.dumps(job):
+        found.append(("secrets", job))
+    return found
+
+
+def test_the_fan_out_dispatches_only_sweep_yaml_on_main_with_github_token():
+    flow = workflow()
+    assert dispatch_violations(flow) == []
+    job = flow["jobs"]["dispatch-sweep"]
+    assert job["timeout-minutes"] <= 5
+    # The cap it sends is one sweep.yaml accepts.
+    import sweep
+    assert sweep.wait_minutes("45") == 45
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda f: f["jobs"]["dispatch-sweep"]["permissions"].update({"contents": "write"}),
+    lambda f: f["jobs"]["dispatch-sweep"]["permissions"].update({"pull-requests": "write"}),
+    lambda f: f["jobs"]["fan-out"]["permissions"].update({"actions": "write"}),
+    lambda f: f["jobs"]["fan-out"]["permissions"].update({"contents": "write"}),
+    lambda f: f["jobs"]["dispatch-sweep"].update({"if": "needs.fan-out.outputs.live == 'true'"}),
+    lambda f: f["jobs"]["dispatch-sweep"].update({"if": "always()"}),
+    lambda f: f["jobs"]["dispatch-sweep"]["steps"][0].update(
+        run=f["jobs"]["dispatch-sweep"]["steps"][0]["run"].replace("sweep.yaml", "fan-out.yaml")),
+    lambda f: f["jobs"]["dispatch-sweep"]["steps"][0].update(
+        run=f["jobs"]["dispatch-sweep"]["steps"][0]["run"].replace("ref=main", "ref=v1")),
+    lambda f: f["jobs"]["dispatch-sweep"]["steps"][0].update(
+        run=f["jobs"]["dispatch-sweep"]["steps"][0]["run"].replace("dry_run]=false", "dry_run]=true")),
+    lambda f: f["jobs"]["dispatch-sweep"]["steps"][0]["env"].update(
+        GH_TOKEN="${{ secrets.RELEASE_APP_PRIVATE_KEY }}"),
+    lambda f: f["jobs"]["dispatch-sweep"]["steps"].insert(0, {
+        "uses": "actions/create-github-app-token@" + "a" * 40}),
+    lambda f: f["jobs"].update({"other": {"permissions": {}, "steps": []}}),
+])
+def test_mutation_any_widening_of_the_dispatch_reddens(mutate):
+    flow = copy.deepcopy(workflow())
+    mutate(flow)
+    assert dispatch_violations(flow) != []

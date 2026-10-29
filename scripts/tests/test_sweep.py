@@ -1146,7 +1146,9 @@ def test_the_workflow_triggers_and_concurrency():
     on = wf[True]  # YAML 1.1 reads `on:` as the boolean true
     assert on["schedule"] == [{"cron": "13,43 * * * *"}]
     assert on["workflow_dispatch"]["inputs"]["dry_run"]["default"] is True
-    assert wf["concurrency"] == {"group": "sweep", "cancel-in-progress": False}
+    # The group is on `evaluate`, not the workflow: a waiting run holds nothing.
+    assert "concurrency" not in wf
+    assert wf["jobs"]["evaluate"]["concurrency"] == {"group": "sweep", "cancel-in-progress": False}
 
 
 def test_the_evaluate_job_mints_nothing():
@@ -1180,3 +1182,146 @@ def test_every_checkout_drops_its_credentials():
 def test_the_act_job_may_read_whether_a_fan_out_is_running():
     """YAADGAAR 470: `act` asks `fan_out_running` again, with GITHUB_TOKEN."""
     assert workflow()["jobs"]["act"]["permissions"].get("actions") == "read"
+
+
+# --------------------------------------------------------------------------
+# yaadgaar 468, ADR-1073: the fan-out dispatches this run, and it waits first
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text, minutes", [("", 0), ("0", 0), ("7", 7), ("45", 45), ("60", 60)])
+def test_the_wait_input_is_an_integer_from_zero_to_the_cap(text, minutes):
+    assert sweep.MAX_WAIT_MINUTES == 60
+    assert sweep.wait_minutes(text) == minutes
+
+
+@pytest.mark.parametrize("text", ["61", "99", "100", "-1", "1.5", "5.0", "1e1", "abc", " 5", "5 ",
+                                  "5\n", "07", "+5", "٣", "true"])
+def test_a_wait_input_that_is_not_an_integer_in_range_is_refused(text):
+    with pytest.raises(Refusal):
+        sweep.wait_minutes(text)
+
+
+def test_the_wait_ends_at_the_soak_plus_the_ci_margin():
+    assert sweep.CI_MARGIN == datetime.timedelta(minutes=5)
+    tagged = NOW - datetime.timedelta(minutes=3)
+    # 30 min soak + 5 min margin, 3 min already gone: 32 min left.
+    assert sweep.wait_seconds(tagged, 0.5, NOW, 45) == 32 * 60
+    # The cap clamps it.
+    assert sweep.wait_seconds(tagged, 0.5, NOW, 20) == 20 * 60
+    # A soak already past waits nothing.
+    assert sweep.wait_seconds(NOW - datetime.timedelta(hours=2), 0.5, NOW, 45) == 0
+    # A cap of zero waits nothing, whatever the tag.
+    assert sweep.wait_seconds(tagged, 0.5, NOW, 0) == 0
+    # An unreadable tag waits the whole cap: later, never earlier.
+    assert sweep.wait_seconds(None, 0.5, NOW, 45) == 45 * 60
+
+
+class TagApi:
+    """The four reads `newest_tag_time` makes, and nothing else."""
+
+    def __init__(self, refs, broken=False):
+        self.refs, self.broken, self.calls = refs, broken, []
+
+    def get(self, path):
+        self.calls.append(path)
+        if self.broken:
+            raise Refusal("gh api: HTTP 502")
+        if path == f"repos/{OWNER}/actions/git/matching-refs/tags/v":
+            return self.refs
+        if path == f"repos/{OWNER}/actions/git/tags/{'b' * 40}":
+            return {"object": {"type": "commit", "sha": "c" * 40}}
+        if path == f"repos/{OWNER}/actions/commits/{'c' * 40}":
+            return {"sha": "c" * 40, "commit": {"committer": {"date": "2026-10-30T11:57:00Z"}}}
+        raise AssertionError(path)
+
+
+def ref(name, kind, sha):
+    return {"ref": f"refs/tags/{name}", "object": {"type": kind, "sha": sha}}
+
+
+def test_the_newest_tag_is_the_semver_greatest_and_an_annotated_tag_is_followed():
+    api = TagApi([ref("v1.9.0", "commit", "a" * 40), ref("v1.10.0", "tag", "b" * 40),
+                  ref("v1", "commit", "d" * 40), ref("v2.0.0-rc1", "commit", "e" * 40)])
+    assert sweep.newest_tag_time(api, OWNER) == NOW - datetime.timedelta(minutes=3)
+    assert api.calls == [f"repos/{OWNER}/actions/git/matching-refs/tags/v",
+                         f"repos/{OWNER}/actions/git/tags/{'b' * 40}",
+                         f"repos/{OWNER}/actions/commits/{'c' * 40}"]
+
+
+@pytest.mark.parametrize("refs", [[], [ref("v1", "commit", "d" * 40)], {"message": "Not Found"},
+                                  [ref("v1.10.0", "blob", "b" * 40)], [{"ref": 5}]])
+def test_a_tag_time_that_cannot_be_read_is_none(refs):
+    assert sweep.newest_tag_time(TagApi(refs), OWNER) is None
+    assert sweep.newest_tag_time(TagApi(refs, broken=True), OWNER) is None
+
+
+def run_wait(monkeypatch, tmp_path, minutes, api):
+    slept = []
+    monkeypatch.setattr(sweep, "SweepGh", lambda token: api)
+    monkeypatch.setattr(sweep, "now_utc", lambda: NOW)
+    monkeypatch.setattr(sweep.time, "sleep", slept.append)
+    monkeypatch.setenv("WAIT_MINUTES", minutes)
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary"))
+    return sweep.main(["wait", "--owner", OWNER]), slept
+
+
+def test_the_wait_command_sleeps_until_the_soak_and_ci_should_be_done(monkeypatch, tmp_path):
+    api = TagApi([ref("v1.10.0", "tag", "b" * 40)])
+    code, slept = run_wait(monkeypatch, tmp_path, "45", api)
+    assert (code, slept) == (0, [32 * 60])
+
+
+def test_a_zero_wait_reads_nothing_and_sleeps_nothing(monkeypatch, tmp_path):
+    for minutes in ("", "0"):
+        api = TagApi([ref("v1.10.0", "tag", "b" * 40)])
+        code, slept = run_wait(monkeypatch, tmp_path, minutes, api)
+        assert (code, slept, api.calls) == (0, [], [])
+
+
+def test_an_unreadable_tag_waits_the_whole_cap(monkeypatch, tmp_path):
+    code, slept = run_wait(monkeypatch, tmp_path, "45", TagApi([], broken=True))
+    assert (code, slept) == (0, [45 * 60])
+
+
+def test_a_bad_wait_input_reds_before_any_read_or_sleep(monkeypatch, tmp_path, capsys):
+    api = TagApi([ref("v1.10.0", "tag", "b" * 40)])
+    code, slept = run_wait(monkeypatch, tmp_path, "61", api)
+    assert (code, slept, api.calls) == (1, [], [])
+    assert "::error::" in capsys.readouterr().err
+
+
+def test_the_workflow_takes_a_wait_input_and_waits_before_it_evaluates():
+    wf = workflow()
+    wait = wf[True]["workflow_dispatch"]["inputs"]["wait_minutes"]
+    assert wait["type"] == "string" and wait["default"] == "0"
+    assert wf["jobs"]["evaluate"]["needs"] == "wait"
+    names = [s.get("id") for s in steps("wait")]
+    step = steps("wait")[names.index("wait")]
+    assert step["env"]["WAIT_MINUTES"] == "${{ inputs.wait_minutes }}"
+    assert step["run"].strip() == 'python3 scripts/sweep.py wait --owner "$OWNER"'
+    assert "wait" not in [s.get("id") for s in steps("evaluate")]
+    # The input reaches the shell through env only, never templated into a run block.
+    for job in wf["jobs"].values():
+        for s in job["steps"]:
+            assert "inputs." not in s.get("run", "")
+
+
+def test_the_wait_job_holds_no_concurrency_group_and_writes_nothing():
+    """YAADGAAR 468 review. A waiting run must not hold `sweep`: the next tag's
+    dispatched run would go pending, and a cron would cancel it."""
+    job = workflow()["jobs"]["wait"]
+    assert "concurrency" not in job
+    assert "needs" not in job
+    assert job["permissions"] == {"contents": "read"}
+    assert mints("wait") == []
+
+
+def test_two_runs_never_act_on_one_repository_at_once():
+    assert workflow()["jobs"]["act"]["concurrency"] == {
+        "group": "sweep-act-${{ matrix.repo }}", "cancel-in-progress": False}
+
+
+def test_the_wait_job_has_time_for_the_longest_wait():
+    assert workflow()["jobs"]["wait"]["timeout-minutes"] >= sweep.MAX_WAIT_MINUTES + 1
+    assert workflow()["jobs"]["evaluate"]["timeout-minutes"] <= 20

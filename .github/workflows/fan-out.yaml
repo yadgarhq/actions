@@ -44,6 +44,16 @@ name: fan-out
 # request forward instead of opening a second one. A commit on that branch the
 # fan-out did not make is never reset away: the row is an error instead.
 #
+# THEN IT TRIGGERS THE SWEEP, AND ONLY TRIGGERS IT (ADR-1073, yaadgaar 468).
+# After a live tag-push fan-out succeeds, `dispatch-sweep` dispatches
+# `sweep.yaml` on main with `dry_run` false and a 45-minute wait cap; the sweep
+# sleeps until the T5 soak and the consumers' CI should be done, then decides.
+# The fan-out still never merges (ADR-0982): that job holds `actions: write` on
+# `GITHUB_TOKEN` and nothing else, no App token, no secret, no checkout.
+# `GITHUB_TOKEN` events start no workflow, except `workflow_dispatch` and
+# `repository_dispatch`, which always do (GitHub docs, "Triggering a workflow
+# from a workflow").
+#
 # ROLLBACK: set `"live": false` in classes.json (or disable this workflow) and
 # close the open `actions-adopt` pull requests. Consumers keep their old rev;
 # nothing was merged.
@@ -75,6 +85,8 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+    outputs:
+      live: ${{ steps.mode.outputs.live }}
     steps:
       # ALL TAGS, because the hook manifest is read at the target tag from this
       # checkout: the write token below is not scoped to `actions` itself.
@@ -187,3 +199,21 @@ jobs:
             args+=(--live)
           fi
           python3 scripts/fan_out.py "${args[@]}"
+
+  # ADR-1073: trigger the sweep, which waits out the soak itself. A failed
+  # fan-out, a dry one, or a dispatch of this workflow triggers nothing.
+  dispatch-sweep:
+    needs: fan-out
+    if: github.event_name == 'push' && needs.fan-out.outputs.live == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write # POST .../actions/workflows/sweep.yaml/dispatches, nothing else
+    steps:
+      - name: dispatch the sweep, to evaluate after the soak
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: >-
+          gh api -X POST "repos/${REPO}/actions/workflows/sweep.yaml/dispatches"
+          -f ref=main -f "inputs[dry_run]=false" -f "inputs[wait_minutes]=45"

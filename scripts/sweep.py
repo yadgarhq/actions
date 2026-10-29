@@ -60,6 +60,7 @@ minted per repository with `contents: write`.
 Commands:
 
     sweep.py mode                       EVENT, DRY_RUN, REF -> `live=true|false`
+    sweep.py wait --owner O             WAIT_MINUTES -> sleep until the soak should be done
     sweep.py check-name -- NAME         a matrix leg's repository, or exit 1
     sweep.py evaluate --owner O [--live]
     sweep.py act --owner O --repo R --n N --head SHA --action merge|refresh
@@ -75,6 +76,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.parse
 
 import ci_verdict
@@ -104,6 +106,12 @@ REFUSED = re.compile(r"\bHTTP (405|409|422)\b")
 PAGE = 100  # a list of exactly this many may have a second page: refused
 SWEEP_KEYS = {"live", "exclude", "soak_hours", "max_merges", "max_refreshes_per_pr_per_day"}
 DAY = datetime.timedelta(hours=24)
+# ADR-1073 (yaadgaar 468). The fan-out dispatches this workflow with a
+# `wait_minutes` cap; the run sleeps until the newest tag's soak plus this
+# margin for the consumers' CI, never longer than the cap, never past this one.
+CI_MARGIN = datetime.timedelta(minutes=5)
+MAX_WAIT_MINUTES = 60
+WAIT_INPUT = re.compile(r"0|[1-9][0-9]?")
 
 
 class Skip(Exception):
@@ -179,6 +187,58 @@ def is_live(event, dry_run, ref, armed):
     if event == "schedule":
         return True
     return event == "workflow_dispatch" and dry_run == "false"
+
+
+def wait_minutes(text):
+    """The `wait_minutes` input. Empty (the schedule sends none) is 0; anything
+    else must be a plain integer from 0 to MAX_WAIT_MINUTES."""
+    if text == "":
+        return 0
+    if not (isinstance(text, str) and WAIT_INPUT.fullmatch(text)) or int(text) > MAX_WAIT_MINUTES:
+        raise Refusal(f"wait_minutes must be an integer from 0 to {MAX_WAIT_MINUTES}")
+    return int(text)
+
+
+def wait_seconds(tag_time, soak_hours, now, cap_minutes):
+    """Seconds until `tag_time` + soak + CI_MARGIN, clamped to [0, cap].
+
+    THE WAIT IS NOT A GATE. T5 is still checked by `evaluate` and again by
+    `act`, so a wait that is too long only costs time and one that is too short
+    only finds nothing to merge. An unreadable tag (None) waits the whole cap:
+    later, never earlier."""
+    cap = cap_minutes * 60
+    if cap == 0:
+        return 0
+    if tag_time is None:
+        return cap
+    left = (tag_time + datetime.timedelta(hours=soak_hours) + CI_MARGIN - now).total_seconds()
+    return max(0, min(cap, math.ceil(left)))
+
+
+def newest_tag_time(api, owner):
+    """The committer date of the commit the greatest plain vX.Y.Z tag on
+    `actions` names: where the T5 soak counts from (ADR-1072). None when any
+    read or shape fails."""
+    try:
+        refs = api.get(f"repos/{owner}/{ACTIONS}/git/matching-refs/tags/v")
+        need(isinstance(refs, list), "unexpected API shape: tag refs")
+        names = {}
+        for r in refs:
+            name = dig(r, "ref")
+            if isinstance(name, str) and name.startswith("refs/tags/"):
+                names[name[len("refs/tags/"):]] = r
+        tag = fan_out.greatest([n for n in names if fan_out.TAG.fullmatch(n)])
+        need(tag is not None, "no plain tag")
+        kind, sha = dig(names[tag], "object", "type"), dig(names[tag], "object", "sha")
+        if kind == "tag":
+            obj = api.get(f"repos/{owner}/{ACTIONS}/git/tags/{sha}")
+            kind, sha = dig(obj, "object", "type"), dig(obj, "object", "sha")
+        need(kind == "commit" and isinstance(sha, str) and bool(SHA.fullmatch(sha)), "not a commit")
+        commit = api.get(f"repos/{owner}/{ACTIONS}/commits/{sha}")
+        need(dig(commit, "sha") == sha, "the commits API answered for another sha")
+        return parse_time(dig(commit, "commit", "committer", "date"))
+    except (Skip, Refusal, ValueError, TypeError, KeyError):
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -639,6 +699,9 @@ def main(argv):
     sub = parser.add_subparsers(dest="command", required=True)
     mode_cmd = sub.add_parser("mode")
     mode_cmd.add_argument("--classes", default="classes.json")
+    wait_cmd = sub.add_parser("wait")
+    wait_cmd.add_argument("--owner", required=True)
+    wait_cmd.add_argument("--classes", default="classes.json")
     name_cmd = sub.add_parser("check-name")
     name_cmd.add_argument("name")
     ev = sub.add_parser("evaluate")
@@ -661,6 +724,18 @@ def main(argv):
                 raise Refusal("the leg names no single repository")
             return 0
         classes = armed_from(args.classes)
+        if args.command == "wait":
+            cap = wait_minutes(os.environ.get("WAIT_MINUTES", ""))
+            if cap == 0:
+                print("no wait asked")
+                return 0
+            tagged = newest_tag_time(SweepGh(os.environ.get("GH_TOKEN", "")), args.owner)
+            seconds = wait_seconds(tagged, classes["sweep"]["soak_hours"], now_utc(), cap)
+            if tagged is None:
+                print("::warning::the newest tag's time could not be read; waiting the whole cap")
+            print(f"waiting {seconds}s (cap {cap} min) for the soak and the consumers' CI")
+            time.sleep(seconds)
+            return 0
         if args.command == "mode":
             live = env_live(classes)
             fan_out.output("live", "true" if live else "false")
