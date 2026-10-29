@@ -56,6 +56,7 @@ GATED = [
     "portability",
     "service_immutable",
     "pre_pin_parent",
+    "release_ready",
 ]
 
 
@@ -825,11 +826,13 @@ SHORT_CIRCUITED = [
     "portability",
     "service_immutable",
     "pre_pin_parent",
+    "release_ready",
 ]
 
 
 def edited_needs(text_edit="true", **override):
-    """The `toJSON(needs)` a text-only edit produces: eight skips and two runs.
+    """The `toJSON(needs)` a text-only edit produces: every `SHORT_CIRCUITED` job
+    skips, and two run.
 
     `detect` and `template` execute — `template` is the job that re-reads the
     edited body, which is the entire point of the short-circuit — and everything

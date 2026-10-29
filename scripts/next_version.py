@@ -73,6 +73,11 @@ in the `passed` job's `needs:`, and there is no required check on a push to
 a failure notification. That is the whole of the improvement, and overstating it
 would be the same mistake as the silence.
 
+THE BASELINE HALF IS ENFORCED BEFORE THE MERGE NOW, by `--pr` mode (`ready`)
+in the `release_ready` job, which IS under `passed` (yaadgaar 324, ADR-1076). It
+reddens a tagged repository whose baseline this file could not count from, and
+it gives a notice, not a red, where a repository carries no tag at all.
+
 Tests: `python3 -m pytest scripts/tests/ -q`.
 """
 
@@ -98,7 +103,7 @@ SEMVER = re.compile(r"^v([0-9]+)\.([0-9]+)\.([0-9]+)$")
 # `Cargo.lock` do, and a `Containerfile` does because the base image is part of
 # the artifact. A bumped action SHA under `.github/workflows/` does NOT, and the
 # reason is DELIVERY rather than significance. A workflow reaches whoever runs it
-# through the BRANCH they pin, and all nineteen consumers pin `@main`, so a tag
+# through the BRANCH they pin, and every consumer pins `@main`, so a tag
 # carries nothing for it. Saying instead that such a bump "changes how the
 # repository is built, not what it produces" is backwards in THIS repository,
 # where `ci-pr.yaml` is the product. Synthesising a
@@ -190,13 +195,22 @@ def refuse_baseline(last, tags):
     lightweight one lost to it — and `v1` is an annotated tag object. Moving it to
     a release commit would red the repository that publishes this workflow.
     """
-    plain = [tag for tag in tags if SEMVER.match(tag)]
-    lines = [
+    return [
         f"`{last}` is the nearest `v*` tag to HEAD and it is not a plain",
         "`vMAJOR.MINOR.PATCH` tag, so there is no baseline this can count from",
         "and nothing was tagged.",
         "",
-    ]
+    ] + repair(last, tags)
+
+
+def repair(last, tags):
+    """Which of the two repairs `refuse_baseline` names, without its preamble.
+
+    Shared with `ready`, which says the same thing BEFORE a merge, where
+    "nothing was tagged" would be false.
+    """
+    plain = [tag for tag in tags if SEMVER.match(tag)]
+    lines = []
     if plain:
         newest = max(plain, key=lambda t: tuple(int(g) for g in SEMVER.match(t).groups()))
         lines += [
@@ -331,6 +345,87 @@ def derive(last, tags, messages, bots, files):
     return Verdict(0, nxt, note, entries, out + lines)
 
 
+def ready(last, tags, body):
+    """PR-time release readiness (yaadgaar 324, ADR-1076): a verdict and a level.
+
+    ONLY THE BASELINE DECIDES THE EXIT CODE. ADR-1076 rules it: a repository
+    with zero `v*` tags gets a notice, and otherwise a baseline this file could
+    not count from is red. The version the body implies is a REPORT. `ci /
+    template` already reddens a body that does not parse, and a second reader
+    able to redden the same text would be a second gate over it in every
+    consumer. So a bot body, an empty body and a body with no Changelog all stay
+    green, and the merge-time derivation still decides them.
+
+    THE BODY IS NOT A SQUASH MESSAGE. `body_lines` drops line one, the squash
+    subject; a pull request body has none, and its line one is the template's
+    opening `<!--`. Dropping it lets the comment's example bullets — one is a
+    `feat!:` — through `strip_comments`. So this reads `body.splitlines()`.
+
+    NO `git log` AND NO API. On `pull_request` HEAD is the merge ref, so a
+    `last..HEAD` range would hold the branch's own commit messages, which never
+    reach `main` under a squash merge. The body is the message that will.
+    """
+    out = ["## Release readiness", ""]
+    if not tags:
+        return Verdict(0, "", "", [], out + [
+            "This repository carries **no** `v*` tag, so it is not on the",
+            "release model and this merge will not release. The first tag of a",
+            "repository is cut by hand; every one after it is derived from the",
+            "Changelog."]), "notice"
+    if not last:
+        return Verdict(1, "", "", [], out + [
+            f"This repository carries {len(tags)} `v*` tags but none of them is",
+            "reachable from HEAD, so there is no baseline to count from and this",
+            "merge **will not release**. Check that the release tags sit on this",
+            "branch's history."]), "error"
+    base = SEMVER.match(last)
+    if not base:
+        return Verdict(1, "", "", [], out + [
+            f"`{last}` is the nearest `v*` tag to HEAD and it is not a plain",
+            "`vMAJOR.MINOR.PATCH` tag, so there is no baseline to count from and",
+            "this merge **will not release**.",
+            ""] + repair(last, tags)), "error"
+    entries, matches, _ = commit_entries(body.splitlines())
+    if not entries:
+        return Verdict(0, "", "", [], out + [
+            f"The baseline `{last}` is a plain semver tag. This body carries no",
+            "Changelog bullet this can read, so the merge-time derivation decides",
+            "whether it releases: a bot merge that ships synthesises a patch, and",
+            "`ci / template` reports a body that does not follow the template."]), "ok"
+    nxt, note, lines = compute(last, base, entries, matches)
+    return Verdict(0, nxt, note, entries, out + [
+        f"The baseline `{last}` is a plain semver tag. As written, this body",
+        f"would release **`v{nxt}`**. The merge-time derivation reads the whole",
+        "range since the baseline, so other merges can raise it.", ""] + lines), "ok"
+
+
+def pr_main():
+    """`--pr`: what `release_ready` runs. Reads tags from the checkout, the body
+    from `BODY`, and nothing else."""
+    # THE TAG LISTING IS READ WITH ITS EXIT CODE, because `sh` drops it. A git
+    # that fails would list nothing, `ready` would read zero tags, and the gate
+    # would answer with a green notice: fail-open. `describe` may fail by
+    # design (no tag reachable), and an empty baseline beside a non-empty
+    # listing is already red, so only the listing needs the check.
+    listing = subprocess.run(["git", "tag", "--list", "v*"],
+                             capture_output=True, text=True)
+    if listing.returncode != 0:
+        print("::error::`git tag --list` failed, so the tags cannot be read and "
+              f"the baseline cannot be checked: {listing.stderr.strip()}")
+        return 1
+    last = sh("git", "describe", "--tags", "--abbrev=0", "--match", "v*")
+    tags = [t for t in listing.stdout.splitlines() if t.strip()]
+    verdict, level = ready(last, tags, os.environ.get("BODY") or "")
+    text = "\n".join(verdict.lines)
+    with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+        fh.write(text + "\n")
+    print(text)
+    if level in ("notice", "error"):
+        # Plain text: an annotation renders no markdown.
+        print(f"::{level}::" + " ".join(verdict.lines[2:]).replace("**", ""))
+    return verdict.rc
+
+
 def state(repo, token):
     """What git says, paired so a message can never be read against another's author.
 
@@ -361,7 +456,13 @@ def state(repo, token):
     return last, tags, messages, bots, files
 
 
-def main():
+def main(argv=None):
+    argv = argv or []
+    if argv == ["--pr"]:
+        return pr_main()
+    if argv:
+        print(f"::error::next_version.py takes no arguments or `--pr`, not {argv}")
+        return 2
     last, tags, messages, bots, files = state(
         os.environ.get("GITHUB_REPOSITORY") or "", os.environ.get("GH_TOKEN") or "")
     verdict = derive(last, tags, messages, bots, files)
@@ -394,4 +495,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))
