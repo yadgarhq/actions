@@ -797,8 +797,10 @@ jobs:
     # GitHub's 360-minute default on a release that already shipped. The worst
     # path here is three write attempts with 5s and 10s backoff plus three tag attempts with
     # the same, one token mint and about a dozen `gh api` reads — under two
-    # minutes, and nothing polls. Ten leaves five times that as headroom while
-    # cutting a wedged read short by a factor of thirty-six.
+    # minutes — plus, on a re-run only, the registry probe of the parent
+    # (`chart_publicly_pullable.with_retries`: up to five tries, each bounded by
+    # a 30 s timeout, so about 2.5 minutes worst case). Nothing polls beyond
+    # that. Ten still leaves headroom while cutting a wedged read short.
     timeout-minutes: 10
     steps:
       # THE OFF SWITCH, AND HERE IT IS RED RATHER THAN QUIET. It has to be a step

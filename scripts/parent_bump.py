@@ -79,7 +79,10 @@ tag never happened". `parent_pin.pin` refuses an equal version outright and its
 docstring says what to do instead — "a caller that wants idempotence reads the
 pin first with `pins()`" — so that is what this does: it reads the pin in `main`
 AND the pin at the newest published tag, and the two together say which of the
-three states the parent is in.
+three states the parent is in. A THIRD DISCRIMINATOR is the registry: a tag whose
+chart is not in `ghcr.io/<owner>/charts/yadgar` (its tag-triggered release failed)
+is refused, never reported as finished, and the repair named is re-running the
+parent's release workflow rather than this job.
 
 WHAT THIS DOES NOT CLASSIFY, said rather than asserted. A failed write is retried
 whatever its cause, because every attempt re-reads the file first and is
@@ -103,6 +106,7 @@ import sys
 import time
 from collections import namedtuple
 
+import chart_publicly_pullable
 import example_pins
 import parent_pending
 from parent_pin import Refusal, pin, pins
@@ -115,6 +119,10 @@ from repin import greatest, output, summary
 # answer differently without the parent's `dependencies:` block disagreeing.
 PARENT = "chart"
 PATH = "chart/Chart.yaml"
+# THE PARENT'S PUBLISHED NAME and where it is pushed: `<owner>/charts/<name>` on
+# ghcr, the same repository `chart_publicly_pullable` asks about for a module.
+PARENT_CHART = "yadgar"
+REGISTRY = "ghcr.io"
 BRANCH = "main"
 
 # THREE, THE SAME BOUND THE `argocd` WRITE USES, and for the reason given there:
@@ -125,6 +133,14 @@ ATTEMPTS = 3
 EXISTS = "Reference already exists"
 
 File = namedtuple("File", "sha text")
+
+
+class Unpublished(Refusal):
+    """The pin and the tag exist; the parent chart is not confirmed published.
+
+    A distinct class because `failed()` and the `::error::` line say the parent
+    was NOT re-pinned, and that is false here.
+    """
 
 
 class Gh:
@@ -138,8 +154,9 @@ class Gh:
     path that cannot be run gets tested at all.
     """
 
-    def __init__(self, owner, run=None, sleep=None):
+    def __init__(self, owner, run=None, sleep=None, fetch=None):
         self.owner = owner
+        self._fetch = fetch or chart_publicly_pullable.fetch_url
         self._run = run or (
             lambda args: subprocess.run(args, capture_output=True, text=True)
         )
@@ -154,6 +171,35 @@ class Gh:
 
     def pause(self, seconds):
         self._sleep(seconds)
+
+    def published(self, version):
+        """`(state, detail)` for the parent chart `version` in the registry.
+
+        `state` is `present`, `absent` (the registry refused the token or the
+        manifest, or answered 404 for the manifest) or `unknown` (5xx, 429, unreachable, unreadable).
+        Asked the way an adopter asks, anonymously, through
+        `chart_publicly_pullable` and its retry policy.
+        """
+        manifest = []
+
+        def fetch(request):
+            answer = self._fetch(request)
+            if "/manifests/" in request.full_url:
+                manifest.append(answer[0])
+            return answer
+
+        repository = f"{self.owner}/{chart_publicly_pullable.NAMESPACE}/{PARENT_CHART}"
+        ok, detail, private = chart_publicly_pullable.with_retries(
+            REGISTRY, repository, version, fetch, self._sleep
+        )
+        if ok:
+            return "present", detail
+        # ABSENT ONLY ON THE REGISTRY'S OWN VERDICT: a refused token or manifest
+        # (`private`) or a 404 on the MANIFEST. A 404 from the token endpoint says
+        # nothing about the chart, so it stays unknown.
+        if private or (manifest and manifest[-1] == 404):
+            return "absent", detail
+        return "unknown", detail
 
     def contents(self, ref):
         """The parent's `Chart.yaml` at one ref, as its blob sha and its text."""
@@ -331,13 +377,16 @@ def cut(gh, commit, previous, offered, module, repo):
 def recover(gh, module, offered, repo):
     """`main` already pins this version. Decide whether anything published it.
 
-    THREE STATES AND THIS TELLS THEM APART, because a re-run has to. The pin in
+    FOUR STATES AND THIS TELLS THEM APART, because a re-run has to (the fourth,
+    "tagged but not in the registry", is refused; see below). The pin in
     `main` matching the offer means either a previous run of this job finished —
     in which case there is nothing to do and saying so is the right answer — or
     it committed and never tagged, in which case the parent's newest published
     version does NOT carry this module's release and the repair is to cut the
     version that is missing. The discriminator is the pin as the newest published
-    TAG carries it, which is one extra read and no guessing.
+    TAG carries it, which is one extra read and no guessing. A matching tag is
+    then confirmed against the OCI registry, because a tag is not a published
+    chart.
     """
     last = greatest(gh.tags())
     if last is None:
@@ -351,11 +400,38 @@ def recover(gh, module, offered, repo):
 
     published = pins(gh.contents(last).text).get(module)
     if published == offered:
+        # A TAG IS NOT A PUBLISHED CHART (ADR-0645: a gate that cannot see its
+        # subject must not report green). The tag-triggered release can fail
+        # after the tag is cut, and then `last` names a version no adopter can
+        # pull. Ask the registry before saying "nothing to do". Never cut a new
+        # tag here: a cut tag is permanent and a second one would skip a number.
+        version = last.lstrip("v")
+        reference = f"{REGISTRY}/{gh.owner}/charts/{PARENT_CHART}:{version}"
+        state, detail = gh.published(version)
+        if state == "absent":
+            raise Unpublished(
+                f"`{module}` is already pinned at {offered} and `{last}` "
+                f"carries that pin, but the tag exists and the chart is not in "
+                f"the registry: `{reference}` is not pullable ({detail}). "
+                f"The repair is to re-run the PARENT's tag release workflow "
+                f"for `{last}` in `{gh.owner}/{PARENT}`, not this job; releasing "
+                "again would cut a second tag and skip a number. If that tag's "
+                "release run is still in progress, wait for it to finish, then "
+                "re-run this job."
+            )
+        if state != "present":
+            raise Unpublished(
+                f"`{module}` is already pinned at {offered} and `{last}` "
+                f"carries that pin, but the registry cannot tell whether "
+                f"`{reference}` was published: {detail}. Refused rather than "
+                "reported green; re-run this job once the registry answers."
+            )
         return None, (
             f"`{module}` is already pinned at **{offered}** in `{BRANCH}` and "
             f"`{last}` publishes that pin, so this release has already been "
             "taken into the parent. Nothing to write and nothing to tag — this "
-            "is what a re-run of a run that already succeeded looks like."
+            "is what a re-run of a run that already succeeded looks like. The "
+            f"registry confirmed `{reference}` ({detail})."
         )
     if published is None:
         raise Refusal(
@@ -449,7 +525,26 @@ def failed(module, offered, owner, note):
     ])
 
 
-def main(run=None, sleep=None):
+def report(module, offered, owner, refusal):
+    """`(summary, annotation)` for a refusal, worded for what is actually true."""
+    if isinstance(refusal, Unpublished):
+        return (
+            "\n".join([
+                "### Pinned and tagged, but the parent chart is not published",
+                "",
+                f"`{module} {offered}` is pinned and tagged in `{owner}/{PARENT}`, "
+                f"but the parent chart is not published: {refusal}",
+            ]),
+            "::error::the parent chart is pinned and tagged, but the parent chart "
+            f"is not published: {refusal}",
+        )
+    return (
+        failed(module, offered, owner, str(refusal)),
+        f"::error::the parent chart was not re-pinned: {refusal}",
+    )
+
+
+def main(run=None, sleep=None, fetch=None):
     env = os.environ
     owner = env.get("OWNER", "").strip()
     module = env.get("MODULE", "").strip()
@@ -464,7 +559,7 @@ def main(run=None, sleep=None):
         )
         return 2
 
-    gh = Gh(owner, run=run, sleep=sleep)
+    gh = Gh(owner, run=run, sleep=sleep, fetch=fetch)
     nxt, note = bump(gh, module, offered, repo)
     output(module=module, pin=offered, parent=f"v{nxt}" if nxt else "")
     summary("\n".join(["## The parent chart", "", note]))
@@ -480,13 +575,12 @@ if __name__ == "__main__":  # pragma: no cover
         # anything; the summary is where the repair fits. A step that writes only
         # a summary is how a dropped release becomes invisible, and one that
         # writes only an annotation tells nobody what to do.
-        summary(
-            failed(
-                os.environ.get("MODULE", "this module"),
-                os.environ.get("VERSION", "").lstrip("v"),
-                os.environ.get("OWNER", "the organisation"),
-                str(refusal),
-            )
+        text, annotation = report(
+            os.environ.get("MODULE", "this module"),
+            os.environ.get("VERSION", "").lstrip("v"),
+            os.environ.get("OWNER", "the organisation"),
+            refusal,
         )
-        print(f"::error::the parent chart was not re-pinned: {refusal}")
+        summary(text)
+        print(annotation)
         sys.exit(1)

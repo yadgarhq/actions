@@ -50,6 +50,7 @@ import yaml
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+import chart_publicly_pullable  # noqa: E402
 import ci_verdict  # noqa: E402
 import next_version  # noqa: E402
 import parent_bump  # noqa: E402
@@ -289,13 +290,37 @@ class Api:
         return Done(0, "{}", "")
 
 
-def bump(api, module="gateway", version="0.9.49", monkeypatch=None, repo=REPO):
+class Registry:
+    """A `fetch` stub for ghcr: a token exchange, then one manifest answer.
+
+    `manifest` is the HTTP status the manifest request gets (200 = published,
+    404 = absent, 5xx = cannot tell) and `Unreachable` is raised when it is None.
+    Every request is recorded so a test can assert WHICH artefact was asked for.
+    """
+
+    def __init__(self, manifest=200, token=200):
+        self.manifest, self.token, self.requests = manifest, token, []
+
+    def __call__(self, request):
+        url = request.full_url
+        self.requests.append(url)
+        if "/token" in url:
+            return self.token, b'{"token": "anonymous"}'
+        if self.manifest is None:
+            raise chart_publicly_pullable.Unreachable("connection reset")
+        body = b'{"layers": [{"digest": "sha256:0"}]}' if self.manifest == 200 else b""
+        return self.manifest, body
+
+
+def bump(api, module="gateway", version="0.9.49", monkeypatch=None, repo=REPO,
+         registry=None):
     """`main()` itself, with the environment the workflow step sets."""
+    registry = registry if registry is not None else Registry()
     env = {"OWNER": OWNER, "MODULE": module, "VERSION": version, "REPO": repo}
     old = {k: os.environ.get(k) for k in env}
     os.environ.update(env)
     try:
-        return parent_bump.main(run=api, sleep=lambda _s: None)
+        return parent_bump.main(run=api, sleep=lambda _s: None, fetch=registry)
     finally:
         for key, value in old.items():
             if value is None:
@@ -770,6 +795,69 @@ def test_a_rerun_of_a_finished_bump_writes_nothing_and_stays_green():
     assert bump(api) == 0
     assert api.puts == []
     assert api.refs == []
+
+
+def finished(**kwargs):
+    return Api(main=chart({**PINS, "gateway": "0.9.49"}),
+               tags=["v0.1.0", "v0.1.1"],
+               published=chart({**PINS, "gateway": "0.9.49"}), **kwargs)
+
+
+def test_a_rerun_asks_the_registry_for_the_parent_the_tag_names():
+    registry = Registry(manifest=200)
+    assert bump(finished(), registry=registry) == 0
+    assert any(
+        u.endswith("/v2/yadgarhq/charts/yadgar/manifests/0.1.1") for u in registry.requests
+    ), registry.requests
+
+
+def test_a_tag_whose_chart_is_not_in_the_registry_is_refused_not_green():
+    """A TAG IS NOT A PUBLISHED CHART: the tag-triggered release can fail after the tag."""
+    api, registry = finished(), Registry(manifest=404)
+    text = refused(api, registry=registry)
+    assert "v0.1.1" in text
+    assert "ghcr.io/yadgarhq/charts/yadgar" in text
+    assert "re-run" in text.lower() and "release workflow" in text
+    assert api.puts == [] and api.refs == [], "a cut tag is permanent: never cut another"
+
+
+def test_a_404_from_the_token_endpoint_is_unknown_not_absent():
+    api = finished()
+    text = refused(api, registry=Registry(token=404))
+    assert "cannot tell" in text and "not in the registry" not in text
+    assert api.puts == [] and api.refs == []
+
+
+def test_an_absent_chart_message_says_to_wait_for_a_release_in_progress():
+    text = refused(finished(), registry=Registry(manifest=404))
+    assert "still in progress, wait for it to finish, then re-run this job" in text
+
+
+@pytest.mark.parametrize("manifest", [404, 503])
+def test_an_unpublished_parent_is_not_reported_as_not_repinned(manifest):
+    """`failed()` says the parent was NOT re-pinned; here it is pinned and tagged."""
+    with pytest.raises(parent_bump.Refusal) as caught:
+        bump(finished(), registry=Registry(manifest=manifest))
+    summary, annotation = parent_bump.report("gateway", "0.9.49", OWNER, caught.value)
+    for text in (summary, annotation):
+        assert "pinned and tagged" in text and "not published" in text
+        assert "NOT re-pinned" not in text and "was not re-pinned" not in text
+
+
+def test_an_ordinary_refusal_still_says_the_parent_was_not_repinned():
+    summary, annotation = parent_bump.report(
+        "gateway", "0.9.49", OWNER, parent_bump.Refusal("boom")
+    )
+    assert "does NOT pin it" in summary
+    assert annotation == "::error::the parent chart was not re-pinned: boom"
+
+
+def test_a_registry_that_cannot_answer_is_refused_as_cannot_tell():
+    api = finished()
+    for manifest in (503, None):
+        text = refused(api, registry=Registry(manifest=manifest))
+        assert "cannot tell" in text
+        assert api.puts == [] and api.refs == []
 
 
 def test_a_pin_committed_but_never_tagged_gets_the_missing_tag():
