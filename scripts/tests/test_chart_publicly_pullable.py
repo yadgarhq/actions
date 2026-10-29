@@ -720,3 +720,16 @@ def test_the_workflow_hands_the_gate_no_credential():
     rendered = str(step.get("env", {}))
     assert "secrets." not in rendered, rendered
     assert "token" not in rendered.lower(), rendered
+
+
+def test_manifest_bearer_is_not_forwarded_on_redirect():
+    """The bearer rides `unredirected_hdrs`, so urllib drops it on a redirect hop."""
+    import urllib.request
+    import chart_publicly_pullable as mod
+    req = mod.manifest_request("ghcr.io", "o/charts/c", "1.0.0", "tok")
+    assert req.get_header("Authorization") == "Bearer tok"
+    assert "Authorization" not in req.headers
+    hop = urllib.request.HTTPRedirectHandler().redirect_request(
+        req, None, 302, "Found", {}, "https://elsewhere.example/x")
+    assert hop is not None
+    assert hop.get_header("Authorization") is None

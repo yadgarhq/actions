@@ -173,14 +173,13 @@ def token_request(registry, repository):
 
 def manifest_request(registry, repository, tag, token):
     """The manifest, carrying the anonymously obtained bearer and nothing else."""
-    return urllib.request.Request(
+    request = urllib.request.Request(
         f"https://{registry}/v2/{repository}/manifests/{tag}",
-        headers={
-            "Accept": ACCEPT,
-            "Authorization": f"Bearer {token}",
-            "User-Agent": USER_AGENT,
-        },
+        headers={"Accept": ACCEPT, "User-Agent": USER_AGENT},
     )
+    # Unredirected, so urllib never copies the bearer onto a redirect hop.
+    request.add_unredirected_header("Authorization", f"Bearer {token}")
+    return request
 
 
 def fetch_url(request):

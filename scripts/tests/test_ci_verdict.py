@@ -1926,3 +1926,23 @@ def test_the_wait_bound_defaults_to_the_measured_ceiling(monkeypatch):
     assert ci_verdict.wait_budget() == ci_verdict.DEFAULT_WAIT_SECONDS == 600
     monkeypatch.setenv("CARRY_FORWARD_WAIT_SECONDS", "0")
     assert ci_verdict.wait_budget() == 0
+
+
+def test_check_runs_token_is_not_forwarded_on_redirect(monkeypatch):
+    """The bearer rides `unredirected_hdrs`, so urllib drops it on a redirect hop."""
+    seen = []
+
+    def urlopen(req, timeout=None):
+        seen.append(req)
+        raise OSError("stop")
+
+    monkeypatch.setattr(ci_verdict.urllib.request, "urlopen", urlopen)
+    with pytest.raises(Exception):
+        ci_verdict.fetch_check_runs("https://api.github.com/x", "secret-token")
+    req = seen[0]
+    assert req.get_header("Authorization") == "Bearer secret-token"
+    assert "Authorization" not in req.headers
+    hop = ci_verdict.urllib.request.HTTPRedirectHandler().redirect_request(
+        req, None, 302, "Found", {}, "https://elsewhere.example/x")
+    assert hop is not None
+    assert hop.get_header("Authorization") is None
