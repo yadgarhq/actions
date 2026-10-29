@@ -775,10 +775,13 @@ def test_the_real_client_merges_with_exactly_the_four_fields(monkeypatch):
 # --------------------------------------------------------------------------
 
 
-def test_the_sweep_ships_unarmed_with_the_half_hour_soak():
-    """ADR-1068: Max ruled the soak at 0.5 h on 2026-10-29."""
+def test_the_sweep_ships_armed_with_the_half_hour_soak():
+    """ADR-1068: Max ruled the soak at 0.5 h on 2026-10-29, and armed the
+    sweeper on 2026-10-29 after a dry run passed all 19 adoption pull requests
+    (yaadgaar 465). Rollback is a pull request that sets `live` back to false
+    and changes this assertion with it."""
     shipped = sweep.load(CLASSES_TEXT)["sweep"]
-    assert shipped["live"] is False
+    assert shipped["live"] is True
     assert shipped["soak_hours"] == 0.5
     assert shipped["max_merges"] == 1
     assert shipped["max_refreshes_per_pr_per_day"] == 3
@@ -832,13 +835,31 @@ def outputs(path):
     return dict(line.split("=", 1) for line in path.read_text().splitlines())
 
 
+def unarmed(tmp_path):
+    """The shipped classes.json with `sweep.live` false: the shipped file is armed."""
+    data = json.loads(CLASSES_TEXT)
+    data["sweep"]["live"] = False
+    path = tmp_path / "classes.json"
+    path.write_text(json.dumps(data))
+    return str(path)
+
+
 def test_mode_is_dry_while_unarmed(tmp_path, monkeypatch):
     out = tmp_path / "out"
     for key, value in {"EVENT": "schedule", "REF": "refs/heads/main", "DRY_RUN": "",
                        "GITHUB_OUTPUT": str(out)}.items():
         monkeypatch.setenv(key, value)
-    assert sweep.main(["mode", "--classes", str(REPO / "classes.json")]) == 0
+    assert sweep.main(["mode", "--classes", unarmed(tmp_path)]) == 0
     assert outputs(out) == {"live": "false"}
+
+
+def test_mode_is_live_on_the_shipped_file(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    for key, value in {"EVENT": "schedule", "REF": "refs/heads/main", "DRY_RUN": "",
+                       "GITHUB_OUTPUT": str(out)}.items():
+        monkeypatch.setenv(key, value)
+    assert sweep.main(["mode", "--classes", str(REPO / "classes.json")]) == 0
+    assert outputs(out) == {"live": "true"}
 
 
 def test_a_dry_evaluate_plans_nothing_even_when_it_would_merge(tmp_path, monkeypatch):
@@ -941,13 +962,14 @@ def test_a_failed_rewrite_reds_the_act_run(tmp_path, monkeypatch, capsys, failur
     assert f"::error::{message}" in capsys.readouterr().err
 
 
-def test_live_flags_refuse_while_unarmed(monkeypatch):
+def test_live_flags_refuse_while_unarmed(tmp_path, monkeypatch):
     monkeypatch.setenv("EVENT", "schedule")
     monkeypatch.setenv("REF", "refs/heads/main")
     monkeypatch.setattr(sweep, "SweepGh", lambda token: pytest.fail("no client may be built"))
-    assert sweep.main(["evaluate", "--owner", OWNER, "--live"]) == 1
+    classes = unarmed(tmp_path)
+    assert sweep.main(["evaluate", "--owner", OWNER, "--live", "--classes", classes]) == 1
     assert sweep.main(["act", "--owner", OWNER, "--repo", "store", "--n", "45",
-                       "--head", "a" * 40, "--action", "merge"]) == 1
+                       "--head", "a" * 40, "--action", "merge", "--classes", classes]) == 1
 
 
 @pytest.mark.parametrize("name, code", [("store", 0), ("", 1), ("..", 1), ("a/b", 1), ("a b", 1)])
