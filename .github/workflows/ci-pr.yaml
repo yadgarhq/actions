@@ -898,6 +898,40 @@ jobs:
           fi
           python3 "$dir/next_version.py" --pr
 
+  # YAADGAAR 231 / ADR-0983 STEP 2: A HOOK-ASSERTED TOOL MOVES ONLY AFTER EVERY
+  # CONSUMER ACCEPTS IT. `hooks/tool_version.py` checks the binary against
+  # `versions.yaml` at the rev each consumer pins; CI installs `version` from
+  # this repository's main. A pull request here that moves `version` of
+  # gitleaks, hadolint, actionlint or cargo-deny is red while any consumer's
+  # rev does not accept the new version. `scripts/hook_tools_adopted.py` says
+  # what "behind" means and what it cannot see.
+  #
+  # `yadgarhq/actions` ONLY: no other repository carries `versions.yaml`. The
+  # checkout is this repository itself, so the script is the pull request's.
+  #
+  # NO SECRET REACHES THIS JOB (Max, 2026-10-30, option 3). `GITHUB_TOKEN` reads
+  # the public consumers; a private one is attested in `classes.json`
+  # `private_consumers`. With no move, the script exits 0 and reads nothing.
+  hook_tools_adopted:
+    needs: detect
+    if: >-
+      github.event_name != 'push' && needs.detect.outputs.text_edit != 'true'
+      && needs.detect.outputs.config_only != 'true'
+      && github.repository == 'yadgarhq/actions'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+          # Every tag: `versions.yaml` is read at each consumer's rev from here.
+          fetch-depth: 0
+      - name: every consumer accepts a moved hook-asserted tool
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+        run: python3 scripts/hook_tools_adopted.py --owner "$OWNER"
+
   # A REAL ENGINE, not a mock. D69's capability probe establishes what an engine
   # can do by executing against it, so a test suite with no engine cannot
   # exercise the one thing that can be wrong. A `-db` repo's tests without a
@@ -2508,6 +2542,7 @@ jobs:
         service_immutable,
         pre_pin_parent,
         release_ready,
+        hook_tools_adopted,
       ]
     runs-on: ubuntu-latest
     # ADR-1033: a text-only edit may wait here, bounded by

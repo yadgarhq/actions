@@ -57,6 +57,7 @@ GATED = [
     "service_immutable",
     "pre_pin_parent",
     "release_ready",
+    "hook_tools_adopted",
 ]
 
 
@@ -827,6 +828,7 @@ SHORT_CIRCUITED = [
     "service_immutable",
     "pre_pin_parent",
     "release_ready",
+    "hook_tools_adopted",
 ]
 
 
@@ -1913,6 +1915,8 @@ def test_main_arms_the_wait_with_the_workflows_sentinels(monkeypatch):
         ctx[job]["result"] = "success"
     ctx["test"]["result"] = "skipped"
     ctx["proto"]["result"] = "skipped"
+    # REPO is unset here, and `hook_tools_adopted` runs in yadgarhq/actions only.
+    ctx["hook_tools_adopted"]["result"] = "skipped"
     monkeypatch.setenv("NEEDS", json.dumps(ctx))
     monkeypatch.setenv("EVENT", "pull_request")
     monkeypatch.setenv("WORKFLOW", str(CI_PR))

@@ -25,8 +25,10 @@
 #      the ADR-0982 fan-out land that tag in every repository.
 #   2. Move: only after every adoption pull request has merged, change `version`
 #      (and `sha256`) to the new version and delete it from `accept`.
-# Nothing refuses step 2 early yet: that check needs the fan-out's adoption report
-# (S5/S6). `accept` on any other tool is refused by `scripts/versions_parity.py`.
+# `ci / hook_tools_adopted` (`scripts/hook_tools_adopted.py`, yaadgaar 231) refuses
+# step 2 while any consumer's rev does not accept the new version; a private
+# consumer is judged from its rev in `classes.json` `private_consumers`.
+# `accept` on any other tool is refused by `scripts/versions_parity.py`.
 # TO ADD OR DELETE A SITE: change `sites` in the same pull request.
 #
 # ONE LINE PER TOOL, as a flow mapping. `tool_versions.py` runs before setup-python,
