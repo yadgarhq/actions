@@ -26,7 +26,8 @@
   },
   "topic_prefix": "yadgar-class-",
   "exempt": {
-    "actions": "The producer. Its own .pre-commit-config.yaml runs its hooks from local paths (`repo: local`) at the commit under test, so it pins no rev to adopt."
+    "actions": "The producer. Its own .pre-commit-config.yaml runs its hooks from local paths (`repo: local`) at the commit under test, so it pins no rev to adopt.",
+    ".github": "The organisation default community-health repository (the pull request template, yaadgaar 316). Not a consumer: it carries no class topic and pins no rev to adopt."
   },
   "classes": {
     "base": {

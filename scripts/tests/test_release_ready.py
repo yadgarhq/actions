@@ -38,7 +38,8 @@ from test_next_version import _git_env, build, git, message, HUMAN  # noqa: E402
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "next_version.py"
 CI_PR = ROOT / ".github" / "workflows" / "ci-pr.yaml"
-TEMPLATE = ROOT / ".github" / "pull_request_template.md"
+# The canonical template (yadgarhq/.github), copied byte for byte.
+TEMPLATE = ROOT / "scripts" / "tests" / "fixtures" / "pull_request_template.md"
 
 
 def filled_template(changelog):
