@@ -6,7 +6,8 @@
     "ORDER is part of the class. Where consumers of one class disagreed on order, the majority wins; on a tie, the order the other rust classes share wins. Each class's `order` field says which repositories that moves.",
     "`live` ARMS A TAG PUSH (first-run safety, review of actions#124). While it is false, a pushed tag runs the fan-out DRY; a dispatch from main with dry_run=false is the explicit human path. Set it true only in a reviewed pull request, after a dry run from main; that pull request's own tag is then the first live run.",
     "Keys on a hook other than `id` are written into the consumer's block as they are (only `exclude` is measured today). `overrides` replaces a hook's keys for one repository.",
-    "`sweep` is YAADGAAR 442 (c): `scripts/sweep.py` merges an adoption pull request only when every condition in its docstring holds. `sweep.live` ARMS IT and ships false; set it true only in a reviewed pull request, after dry runs from main. `sweep.soak_hours` is 0.5 (ADR-1068, Max 2026-10-29): a tag younger than that is not adopted. `sweep.exclude` names a consumer the sweeper never touches, and why."
+    "`sweep` is YAADGAAR 442 (c): `scripts/sweep.py` merges an adoption pull request only when every condition in its docstring holds. `sweep.live` ARMS IT and ships false; set it true only in a reviewed pull request, after dry runs from main. `sweep.soak_hours` is 0.5 (ADR-1068, Max 2026-10-29): a tag younger than that is not adopted. `sweep.exclude` names a consumer the sweeper never touches, and why.",
+    "`private_consumers` is YAADGAAR 231, ADR-0983 step 2. `scripts/hook_tools_adopted.py` refuses a pull request that moves a hook-asserted tool's `version` while a consumer's rev does not accept the new version. It reads public consumers with `GITHUB_TOKEN`, which cannot see a private one, so each private consumer carries ONE reviewed entry here: `{\"rev\": \"vX.Y.Z\"}`, the rev it pins, judged like a public rev; or `{\"exempt\": \"why\"}`, ADR-0983's explicit exemption. A rev, never a flag: an old rev computes as behind, so the entry cannot go stale silently. Update the rev in the pull request that moves a tool. Every `sweep.exclude` name the public listing cannot see needs an entry. Revs read 2026-10-30 from each repository's main."
   ],
   "live": true,
   "sweep": {
@@ -18,6 +19,10 @@
     "soak_hours": 0.5,
     "max_merges": 10,
     "max_refreshes_per_pr_per_day": 3
+  },
+  "private_consumers": {
+    "docs": { "rev": "v1.37.1" },
+    "argocd-verify": { "rev": "v1.37.1" }
   },
   "topic_prefix": "yadgar-class-",
   "exempt": {

@@ -37,8 +37,9 @@ steps (the header of `versions.yaml` carries the rule):
 A refusal here means the developer's binary, or a consumer's `rev`, is out of
 step with that rule.
 
-NOT ENFORCED HERE, deferred to S5/S6: refusing step 2 while a consumer is still
-behind. That needs the fan-out's adoption report, which does not exist yet.
+NOT ENFORCED HERE: refusing step 2 while a consumer is still behind. That is
+`scripts/hook_tools_adopted.py`, the `hook_tools_adopted` job of `ci-pr.yaml`
+on a pull request to `yadgarhq/actions` (yaadgaar 231).
 
 EXACT EQUALITY with an accepted version, AND ONE MEASURED SHAPE PER TOOL. The version line of each tool,
 measured on the release artefacts at the pinned versions:
