@@ -27,6 +27,22 @@ name: sweep
 # a tag-push fan-out; `sweep.py` instead stops when a fan-out run is in progress
 # or queued.
 #
+# DISPATCHED BY THE FAN-OUT, CRON AS THE BACKSTOP (ADR-1073, yaadgaar 468).
+# GitHub drops most scheduled runs, so a live tag-push fan-out dispatches this
+# workflow on main with `dry_run` false and a `wait_minutes` cap. `sweep.py
+# wait` sleeps until the newest tag's T5 soak plus a margin for the consumers'
+# CI (about 35 minutes from the tag), never longer than the cap, and only then
+# does `evaluate` run. The wait is not a gate: T5 is still checked. A schedule
+# run sends no input and waits nothing.
+#
+# THE WAIT HOLDS NO CONCURRENCY GROUP. It is its own job, `wait`, outside any
+# group, so runs dispatched for several tags in an hour all wait at once, each
+# for the newest tag it reads. Only `evaluate` holds the `sweep` group: GitHub
+# keeps one running and one pending job per group and cancels an older pending
+# one, which is harmless there, because what is cancelled is an evaluation the
+# next one repeats. Each `act` leg holds a group per repository, so two runs
+# never write to one repository at once.
+#
 # ROLLBACK: set `sweep.live` false in classes.json, or disable this workflow.
 on:
   schedule:
@@ -37,17 +53,52 @@ on:
         description: "report only; merge nothing (live also needs main and sweep.live)"
         type: boolean
         default: true
+      wait_minutes:
+        description: "sleep until the newest tag's soak and CI should be done, at most this many minutes (0-60)"
+        type: string
+        default: "0"
 
 permissions: {}
 
-concurrency:
-  group: sweep
-  cancel-in-progress: false
-
 jobs:
+  # ADR-1073. Outside any concurrency group (yaadgaar 468 review): a waiting run
+  # must not leave the next tag's run pending, where a cron would cancel it.
+  # The input reaches the script through env only, and is checked there.
+  wait:
+    runs-on: ubuntu-latest
+    timeout-minutes: 65 # 60 for the longest wait, 5 spare
+    permissions:
+      contents: read # the checkout of this repository, and its tags through the API
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: the tool versions this job installs (versions.yaml)
+        id: versions
+        run: python3 scripts/tool_versions.py versions.yaml >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ steps.versions.outputs.python }}
+      # `sweep.py` imports `ci_verdict`, which imports PyYAML.
+      - name: install PyYAML
+        env:
+          PYYAML_VERSION: ${{ steps.versions.outputs.pyyaml }}
+        run: pip install --disable-pip-version-check "pyyaml==${PYYAML_VERSION}"
+      - name: wait for the soak and the consumers' CI
+        id: wait
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          WAIT_MINUTES: ${{ inputs.wait_minutes }}
+        run: python3 scripts/sweep.py wait --owner "$OWNER"
+
   evaluate:
+    needs: wait
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    concurrency:
+      group: sweep
+      cancel-in-progress: false
     permissions:
       contents: read # the checkout of this repository
       actions: read # whether a fan-out run is in progress or queued here
@@ -101,6 +152,12 @@ jobs:
     if: needs.evaluate.outputs.live == 'true' && needs.evaluate.outputs.plan != '[]' && needs.evaluate.outputs.plan != ''
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # One writer per repository across runs: `evaluate` no longer holds the
+    # group while a run acts, so a later run's leg for the same repository
+    # waits for this one.
+    concurrency:
+      group: sweep-act-${{ matrix.repo }}
+      cancel-in-progress: false
     permissions:
       contents: read # the checkout of this repository
       actions: read # whether a fan-out started since evaluate (yaadgaar 470)
