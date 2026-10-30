@@ -56,7 +56,7 @@ import sys
 import urllib.parse
 from dataclasses import dataclass, field
 
-from repin import REQUIRED, Refusal, greatest, semver
+from repin import REQUIRED, Refusal, greatest, org_template, semver
 
 ACTIONS_URL = "https://github.com/yadgarhq/actions"
 ACTIONS_REPO = "actions"
@@ -472,20 +472,22 @@ def headings(text):
 
 
 def body(template, repository, cls, current, tag, changes, deployable):
-    """The adoption pull request body, from the CONSUMER's own template.
+    """The adoption pull request body, from the consumer's template: its own,
+    else the organisation default.
 
     NO LINE MAY LOOK LIKE A CONVENTIONAL COMMITS BULLET, `## Changelog`
     included (yaadgaar 442): a merged adoption cuts no release. The lists below
     open with a backticked phrase.
     """
     if len((template or "").encode()) > MAX_TEMPLATE_BYTES:
-        raise Refusal(f"{TEMPLATE} is over {MAX_TEMPLATE_BYTES} bytes")
+        raise Refusal(f"the pull request template is over {MAX_TEMPLATE_BYTES} bytes")
     found = headings(template)
     titles = [t for _, t in found]
     missing = [h for h in REQUIRED if h not in titles]
     if missing:
         raise Refusal(
-            f"{TEMPLATE} is missing {', '.join('`## ' + m + '`' for m in missing)}, "
+            f"the pull request template is missing "
+            f"{', '.join('`## ' + m + '`' for m in missing)}, "
             "so no body built from it can pass `ci / template`"
         )
     moved = current != tag
@@ -671,11 +673,12 @@ def one(client, owner, meta, cls, tag, classes, live, row):
     plus = sum(1 for l in patch.splitlines() if l.startswith("+") and not l.startswith("+++"))
     minus = sum(1 for l in patch.splitlines() if l.startswith("-") and not l.startswith("---"))
     row.update(diff=f"+{plus} -{minus}", patch=patch, changes=changes)
-    template = client.read_file(owner, name, TEMPLATE, base_sha)
-    if template is None:
-        raise Refusal(f"no {TEMPLATE}, so no body can be built for it")
+    # The consumer's own template when it carries one, else the organisation
+    # default (yaadgaar 316), which refuses rather than answer with nothing.
+    own = client.read_file(owner, name, TEMPLATE, base_sha)
+    template = own[0] if own is not None else client.org_template()
     title = title_for(current, tag, changes)
-    text_body = body(template[0], f"{owner}/{name}", cls, current, tag, changes,
+    text_body = body(template, f"{owner}/{name}", cls, current, tag, changes,
                      DEPLOYABLE in meta["topics"])
     branch = BRANCH
     prs = client.find_prs(owner, name, branch)
@@ -872,6 +875,20 @@ class Gh:
 
     def __init__(self, repos=None):
         self.repos = repos
+        self._org = None
+
+    def org_template(self):
+        """`repin.org_template`, read once per run. A refusal is kept too, so
+        a dead default costs one timeout, not one per consumer."""
+        if self._org is None:
+            try:
+                self._org = (org_template(), None)
+            except Refusal as refusal:
+                self._org = (None, refusal)
+        text, refusal = self._org
+        if refusal is not None:
+            raise refusal
+        return text
 
     def _api(self, *args, payload=None, missing_ok=False):
         argv = ["gh", "api", *args] + (["--input", "-"] if payload is not None else [])

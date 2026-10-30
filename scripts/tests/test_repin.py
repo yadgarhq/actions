@@ -20,7 +20,10 @@ report no problems and the same bump.
 Run: python3 -m pytest scripts/tests/ -q
 """
 
+import http.client
 import json
+
+import pytest
 import subprocess
 import sys
 from pathlib import Path
@@ -822,3 +825,127 @@ def test_the_subject_is_a_conventional_commits_line_so_the_bump_is_derivable():
     bumps = repin.plan(repin.git_deps(MANIFEST), TAGS)
     for subject in (repin.title(bumps), repin.title([repin.Bump(repin.Dep("yadgar-x", "x", "v0.1.0"), "v0.2.0")])):
         assert pr_body.BULLET.match("- " + subject), subject
+
+
+# --------------------------------------------------------------------------
+# where the template comes from (yaadgaar 316)
+# --------------------------------------------------------------------------
+#
+# GitHub's own rule: the repository's `.github/pull_request_template.md` when it
+# carries one, else the organisation default in yadgarhq/.github. These run
+# in-process with the fetcher replaced, so no test reaches the network; the
+# subprocess tests above always write a local template for the same reason.
+
+
+class _Answer:
+    def __init__(self, data, status=200):
+        self.data, self.status = data, status
+
+    def read(self, n=-1):
+        return self.data if n < 0 else self.data[:n]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _no_network(*args, **kwargs):
+    raise AssertionError("a test reached the network")
+
+
+def plan_in_process(tmp_path, monkeypatch, template):
+    (tmp_path / "Cargo.toml").write_text(MANIFEST)
+    if template is not None:
+        (tmp_path / ".github").mkdir()
+        (tmp_path / ".github" / "pull_request_template.md").write_text(template)
+    tags = tags_dir(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "out.txt"))
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    body = tmp_path / "body.md"
+    code = repin.main(["repin.py", "plan", str(tags), str(tmp_path / "plan.json"), str(body)])
+    return code, body
+
+
+def test_plan_uses_the_repository_template_and_never_asks_the_org(tmp_path, monkeypatch):
+    def refuse():
+        raise AssertionError("the org default was read")
+
+    monkeypatch.setattr(repin, "org_template", refuse)
+    monkeypatch.setattr(repin.urllib.request, "urlopen", _no_network)
+    own = TEMPLATE.replace("## Risk", "<!-- this repository's own -->\n\n## Risk", 1)
+    code, body = plan_in_process(tmp_path, monkeypatch, own)
+    assert code == 0
+    assert pr_body.review(body.read_text(), wrapped=False)[0] == []
+
+
+def test_plan_without_a_repository_template_uses_the_org_default(tmp_path, monkeypatch):
+    calls = []
+
+    def org():
+        calls.append(1)
+        return TEMPLATE
+
+    monkeypatch.setattr(repin, "org_template", org)
+    monkeypatch.setattr(repin.urllib.request, "urlopen", _no_network)
+    code, body = plan_in_process(tmp_path, monkeypatch, None)
+    assert code == 0
+    assert calls == [1]
+    assert pr_body.review(body.read_text(), wrapped=False)[0] == []
+
+
+def test_plan_refuses_when_neither_template_can_be_read(tmp_path, monkeypatch):
+    def org():
+        raise repin.Refusal("yadgarhq/.github: HTTP 503")
+
+    monkeypatch.setattr(repin, "org_template", org)
+    with pytest.raises(repin.Refusal, match="503"):
+        plan_in_process(tmp_path, monkeypatch, None)
+    assert not (tmp_path / "body.md").exists()
+    assert not (tmp_path / "plan.json").exists()
+
+
+def test_org_template_reads_the_public_default_with_a_timeout(monkeypatch):
+    seen = {}
+
+    def opener(request, timeout=None):
+        seen["url"], seen["timeout"] = request.full_url, timeout
+        seen["auth"] = request.get_header("Authorization")
+        return _Answer(TEMPLATE.encode())
+
+    monkeypatch.setattr(repin.urllib.request, "urlopen", opener)
+    assert repin.org_template() == TEMPLATE
+    assert seen["url"] == repin.ORG_TEMPLATE_URL
+    assert "yadgarhq/.github" in seen["url"]
+    assert seen["url"].endswith("/.github/pull_request_template.md")
+    assert seen["timeout"] and seen["timeout"] <= 60
+    assert seen["auth"] is None
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        lambda r, timeout=None: (_ for _ in ()).throw(
+            repin.urllib.error.HTTPError(repin.ORG_TEMPLATE_URL, 404, "Not Found", {}, None)),
+        lambda r, timeout=None: (_ for _ in ()).throw(
+            repin.urllib.error.HTTPError(repin.ORG_TEMPLATE_URL, 503, "Unavailable", {}, None)),
+        lambda r, timeout=None: (_ for _ in ()).throw(repin.urllib.error.URLError("dns")),
+        lambda r, timeout=None: (_ for _ in ()).throw(TimeoutError("slow")),
+        lambda r, timeout=None: (_ for _ in ()).throw(http.client.IncompleteRead(b"x", 10)),
+        lambda r, timeout=None: (_ for _ in ()).throw(http.client.BadStatusLine("junk")),
+        lambda r, timeout=None: _Answer(b"", status=204),
+        lambda r, timeout=None: _Answer(b"\xff\xfe not utf-8"),
+        lambda r, timeout=None: _Answer(b"x" * (repin.MAX_TEMPLATE_BYTES + 1)),
+    ],
+    ids=["404", "503", "url-error", "timeout", "incomplete-read", "bad-status-line",
+         "not-200", "not-utf8", "too-big"],
+)
+def test_org_template_fails_closed_naming_both_places(monkeypatch, failure):
+    monkeypatch.setattr(repin.urllib.request, "urlopen", failure)
+    with pytest.raises(repin.Refusal) as refused:
+        repin.org_template()
+    text = str(refused.value)
+    assert ".github/pull_request_template.md" in text
+    assert "yadgarhq/.github" in text

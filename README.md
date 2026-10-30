@@ -57,8 +57,13 @@ the file explicitly.
 
 ## The pull request template is enforced
 
-`pull_request_template.md` here is canonical; every repository carries a copy at
-`.github/pull_request_template.md`, because GitHub only reads it from there.
+The canonical template is the organisation default,
+`.github/pull_request_template.md` in the public
+[`yadgarhq/.github`](https://github.com/yadgarhq/.github) repository. GitHub
+offers it to every repository that carries no template of its own, so no
+repository keeps a copy. `fan_out.py` and `repin.py` resolve it the same way: a
+repository's own `.github/pull_request_template.md` when it has one, else the
+organisation default, and a refusal naming both when neither can be read.
 
 **`ci-pr` fails when a section is missing or empty**, and HTML comments do not
 count as an answer — an unfilled template is exactly a body consisting only of

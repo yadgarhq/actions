@@ -22,6 +22,7 @@ Run: python3 -m pytest scripts/tests/ -q
 """
 
 import copy
+import http.client
 import json
 import os
 import subprocess
@@ -37,6 +38,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 import fan_out  # noqa: E402
 import next_version  # noqa: E402
 import pr_body  # noqa: E402
+import repin  # noqa: E402
 
 GATE = REPO / "scripts" / "fan_out.py"
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "fan_out"
@@ -140,6 +142,20 @@ def test_manifest_ids_agrees_with_a_real_yaml_parser():
 
 def test_actions_is_exempt_in_the_data_itself():
     assert "actions" in CLASSES["exempt"]
+
+
+def test_the_org_template_repository_is_exempt_and_never_an_error():
+    # yadgarhq/.github holds the organisation's default pull request template
+    # (yaadgaar 316). It carries no class topic and pins no rev; without its
+    # exemption every fan-out run would mark it `error` and exit 1.
+    assert CLASSES["exempt"][".github"].strip()
+    repos = estate()
+    repos[".github"] = {"topics": [], "branches": {}, "commits": {}}
+    gh = Fake(repos, forbid_writes=True)
+    rows, code = fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=False)
+    assert by_repo(rows)[".github"]["status"] == "exempt"
+    assert code == 0
+    assert not [r for r in gh.reads if r[0] == ".github"]
 
 
 def test_a_class_with_a_duplicate_hook_is_refused():
@@ -457,6 +473,15 @@ class Fake:
             for n, r in self.repos.items()
         ]
 
+    org_error = None
+    org_reads = 0
+
+    def org_template(self):
+        self.org_reads += 1
+        if self.org_error is not None:
+            raise self.org_error
+        return TEMPLATE
+
     def read_file(self, owner, repo, path, ref):
         self.reads.append((repo, path, ref))
         if repo == "actions":
@@ -732,14 +757,92 @@ def test_a_class_hook_missing_at_the_target_tag_refuses_the_whole_run():
     assert gh.writes == []
 
 
-def test_a_consumer_without_the_template_is_an_error_and_untouched():
+# THE TEMPLATE IS RESOLVED THE WAY GITHUB RESOLVES IT (yaadgaar 316): the
+# repository's own `.github/pull_request_template.md` when it carries one, else
+# the organisation default in yadgarhq/.github. A default that cannot be read
+# is a refusal, never a body built from nothing.
+
+
+def test_a_consumer_with_its_own_template_uses_it_and_never_asks_the_org():
+    repos = estate()
+    own = TEMPLATE.replace("## What\n", "## What\n\n<!-- docs' own template -->\n", 1)
+    repos["docs"]["commits"]["base"][fan_out.TEMPLATE] = own
+    gh = Fake(repos)
+    gh.org_error = fan_out.Refusal("the org default must not be read")
+    rows, code = fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=True)
+    assert code == 0
+    assert gh.org_reads == 0
+    pr = gh.repos["docs"]["prs"][0]
+    assert by_repo(rows)["docs"]["status"] == "opened"
+    assert "## What" in pr["body"]
+
+
+def test_a_consumer_without_the_template_uses_the_org_default():
     repos = estate()
     repos["docs"] = consumer("docs", template=None)
     gh = Fake(repos)
     rows, code = fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=True)
+    assert code == 0
+    assert by_repo(rows)["docs"]["status"] == "opened"
+    assert gh.org_reads >= 1
+    built = gh.repos["docs"]["prs"][0]["body"]
+    assert list(pr_body.sections(built)) == list(pr_body.sections(TEMPLATE))
+
+
+def test_a_consumer_without_the_template_and_no_org_default_is_an_error_and_untouched():
+    repos = estate()
+    repos["docs"] = consumer("docs", template=None)
+    gh = Fake(repos)
+    gh.org_error = fan_out.Refusal("yadgarhq/.github: HTTP 503")
+    rows, code = fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=True)
     assert by_repo(rows)["docs"]["status"] == "error"
+    assert "503" in by_repo(rows)["docs"]["note"]
     assert not [w for w in gh.writes if w[1] == "docs"]
     assert code == 1
+
+
+def test_the_real_client_reads_the_org_default_once_per_run(monkeypatch):
+    calls = []
+
+    def fetch():
+        calls.append(1)
+        return TEMPLATE
+
+    monkeypatch.setattr(fan_out, "org_template", fetch)
+    gh = fan_out.Gh()
+    assert gh.org_template() == TEMPLATE
+    assert gh.org_template() == TEMPLATE
+    assert calls == [1]
+
+
+def test_a_broken_http_answer_from_the_org_default_is_a_kept_refusal(monkeypatch):
+    calls = []
+
+    def opener(request, timeout=None):
+        calls.append(1)
+        raise http.client.IncompleteRead(b"half", 100)
+
+    monkeypatch.setattr(repin.urllib.request, "urlopen", opener)
+    gh = fan_out.Gh()
+    for _ in range(2):
+        with pytest.raises(fan_out.Refusal, match="yadgarhq/.github"):
+            gh.org_template()
+    assert calls == [1]
+
+
+def test_the_real_client_keeps_a_failed_org_read_for_the_run(monkeypatch):
+    calls = []
+
+    def fetch():
+        calls.append(1)
+        raise fan_out.Refusal("unreadable")
+
+    monkeypatch.setattr(fan_out, "org_template", fetch)
+    gh = fan_out.Gh()
+    for _ in range(2):
+        with pytest.raises(fan_out.Refusal, match="unreadable"):
+            gh.org_template()
+    assert calls == [1]
 
 
 # --------------------------------------------------------------------------
@@ -1253,7 +1356,11 @@ def test_adversarial_templates_parse_in_linear_time():
 
 
 def test_headings_agree_with_the_template_reader_on_real_templates():
-    for path in sorted((FIXTURE_DIR.parent.parent.parent.parent).glob("*pull_request_template.md")):
+    # The canonical template (yadgarhq/.github), copied byte for byte. Asserted
+    # non-empty: a glob that matches nothing would pass this test vacuously.
+    paths = sorted(FIXTURE_DIR.parent.glob("pull_request_template.md"))
+    assert paths
+    for path in paths:
         text = path.read_text()
         assert [t for _, t in fan_out.headings(text)] == list(pr_body.sections(text))
 

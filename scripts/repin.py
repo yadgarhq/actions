@@ -46,11 +46,14 @@ touching one line per bump and nothing else.
 Tests: `python3 -m pytest scripts/tests/ -q`.
 """
 
+import http.client
 import json
 import os
 import re
 import sys
 import tomllib
+import urllib.error
+import urllib.request
 from collections import namedtuple
 
 ORG = "yadgarhq"
@@ -70,6 +73,27 @@ GIT_URL = re.compile(
 HEADING = re.compile(r"^[ \t]*(#{1,6})[ \t]+(.+?)[ \t]*$", re.M)
 
 REQUIRED = ("What", "Why", "Changelog", "Verification", "Risk")
+
+# WHERE A PULL REQUEST BODY'S TEMPLATE COMES FROM, by GitHub's own rule
+# (yaadgaar 316): the repository's `.github/pull_request_template.md` when it
+# carries one, else the organisation default in the public `yadgarhq/.github`.
+# Only `.github/` is looked at in the repository, not the root or `docs/`
+# GitHub also accepts: every repository here kept its copy there.
+#
+# THE DEFAULT IS READ WITH NO TOKEN, over plain HTTPS. Neither caller holds one
+# that reaches `yadgarhq/.github`: `fan-out.yaml` scopes its contents token by
+# `repositories:` to the enumerated consumers and its lister token to
+# `permission-metadata: read`, and `repin.yaml` runs this in a consumer's job.
+# The repository is public, so no grant is needed. Every failure — a 404
+# included, since there is no third place to look — is a refusal that names
+# both places, never a body built from nothing.
+TEMPLATE_PATH = ".github/pull_request_template.md"
+ORG_TEMPLATE_REPO = f"{ORG}/.github"
+ORG_TEMPLATE_URL = (
+    f"https://raw.githubusercontent.com/{ORG_TEMPLATE_REPO}/main/{TEMPLATE_PATH}"
+)
+ORG_TEMPLATE_TIMEOUT = 20  # seconds; nothing here retries
+MAX_TEMPLATE_BYTES = 64 * 1024
 
 Dep = namedtuple("Dep", "name producer tag")
 Bump = namedtuple("Bump", "dep tag")
@@ -322,7 +346,8 @@ def headings(text):
 
 
 def body(template, bumps, repository):
-    """The pull request body, built from the TARGET repository's own template.
+    """The pull request body, built from the target repository's own template,
+    else the organisation default (`resolve_template`).
 
     THE HEADINGS COME FROM THE TEMPLATE RATHER THAN FROM A LIST HERE, because
     the seven templates have drifted across generations and a body that carries
@@ -341,9 +366,10 @@ def body(template, bumps, repository):
     missing = [h for h in REQUIRED if h not in titles]
     if missing:
         raise Refusal(
-            "the target repository's `.github/pull_request_template.md` is "
-            f"missing {', '.join('`## ' + m + '`' for m in missing)}, so no body "
-            "built from it can pass `ci / template`. Fix the template first."
+            f"the pull request template (`{TEMPLATE_PATH}`, or the organisation "
+            f"default in `{ORG_TEMPLATE_REPO}`) is missing "
+            f"{', '.join('`## ' + m + '`' for m in missing)}, so no body built "
+            "from it can pass `ci / template`. Fix the template first."
         )
 
     ordered = sorted(bumps, key=lambda b: b.dep.name)
@@ -461,6 +487,44 @@ def read(path):
         return handle.read()
 
 
+def org_template():
+    """The organisation default template, or a Refusal naming both places."""
+
+    def refuse(why):
+        return Refusal(
+            f"this repository carries no `{TEMPLATE_PATH}` and the organisation "
+            f"default (`{TEMPLATE_PATH}` in `{ORG_TEMPLATE_REPO}`) could not be "
+            f"read: {why}. No body can be built without one."
+        )
+
+    request = urllib.request.Request(ORG_TEMPLATE_URL)
+    try:
+        with urllib.request.urlopen(request, timeout=ORG_TEMPLATE_TIMEOUT) as answer:
+            status = getattr(answer, "status", None)
+            data = answer.read(MAX_TEMPLATE_BYTES + 1)
+    except urllib.error.HTTPError as error:
+        raise refuse(f"HTTP {error.code}") from error
+    # `http.client.HTTPException` too: IncompleteRead and BadStatusLine are not
+    # OSError, and an uncaught one would abort the whole fan-out run.
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as error:
+        raise refuse(type(error).__name__) from error
+    if status != 200:
+        raise refuse(f"HTTP {status}")
+    if len(data) > MAX_TEMPLATE_BYTES:
+        raise refuse(f"it is over {MAX_TEMPLATE_BYTES} bytes")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise refuse("it is not UTF-8") from error
+
+
+def resolve_template():
+    """This repository's template when it carries one, else the org default."""
+    if os.path.isfile(TEMPLATE_PATH):
+        return read(TEMPLATE_PATH)
+    return org_template()
+
+
 def do_producers():
     """The producer repositories whose tags the workflow has to list.
 
@@ -523,16 +587,17 @@ def do_plan(tags_dir, plan_path, body_path):
         output(stale="false")
         return 0
 
+    # The body first: a template that cannot be resolved refuses before any
+    # file is written, so no half-written plan or empty body is left behind.
+    text = body(
+        resolve_template(),
+        bumps,
+        os.environ.get("GITHUB_REPOSITORY", "this repository"),
+    )
     with open(plan_path, "w", encoding="utf-8") as handle:
         json.dump(as_json(bumps), handle, indent=2)
     with open(body_path, "w", encoding="utf-8") as handle:
-        handle.write(
-            body(
-                read(".github/pull_request_template.md"),
-                bumps,
-                os.environ.get("GITHUB_REPOSITORY", "this repository"),
-            )
-        )
+        handle.write(text)
 
     head = branch(bumps)
     output(

@@ -520,7 +520,8 @@ def main():
     if problems:
         lines = [f"### {subject} does not follow the template", ""]
         lines += [f"- {p}" for p in problems]
-        lines += ["", "The template is in `.github/pull_request_template.md`."]
+        lines += ["", "The template is the repository's `.github/pull_request_template.md`, "
+                  "or the organisation default in `yadgarhq/.github` when it has none."]
         if summary:
             with open(summary, "a") as fh:
                 fh.write("\n".join(lines) + "\n")

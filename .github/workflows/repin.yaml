@@ -403,8 +403,9 @@ jobs:
       # THE PULL REQUEST BODY IS THE SQUASH COMMIT MESSAGE in every repository
       # here, and the `version` job derives the release from its `## Changelog`
       # bullets — so the body `repin.py` wrote carries every section of THIS
-      # repository's own template and one unwrapped `chore(deps):` bullet per
-      # bumped crate. `scripts/tests/test_repin.py` runs the real `pr_body.review`
+      # repository's own template, else the org default in yadgarhq/.github,
+      # and one unwrapped `chore(deps):` bullet per bumped crate.
+      # `scripts/tests/test_repin.py` runs the real `pr_body.review`
       # over it in both of its modes rather than restating the rules.
       - name: open one pull request for the whole bump
         if: steps.proposed.outputs.proceed == 'true'
