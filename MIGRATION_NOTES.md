@@ -58,31 +58,7 @@ Use it verbatim as the body of the revert pull request:
 Strip the `| ` gutter before pasting. It is there because `ci / template` splits
 a body on any `#` heading and does not strip fenced code blocks.
 
-## 2. `yadgarhq/actions` carries a stray `v1` tag — decide what to do with it
-
-`v1` is an **annotated** tag object at `71413bf9`, 53 commits behind `main`, while
-`v1.22.0` is at `main`. So `git describe --tags --abbrev=0 --match 'v*'` returns
-`v1.22.0` today and this repository does not redden.
-
-That is safe by accident. Measured in a scratch clone: `git describe` breaks a
-DISTANCE TIE in favour of the newer annotated tag. A fresh annotated tag at `main`
-beat `v1.22.0`; a lightweight one lost to it. So if anyone ever moves or recreates
-`v1` at a release commit, `v1` wins, `SEMVER` rejects it, and the repository that
-publishes this workflow to all nineteen consumers reds on every merge.
-
-Nothing reads `v1`: every consumer pins `ci-pr.yaml@main`, a branch. Deleting it
-is a destructive remote-tag change and is the operator's call, not the agent's.
-The `release-tags` ruleset blocks `deletion` on `refs/tags/v*` with no bypass
-actors, so it needs a ruleset change first or must be left alone:
-
-```
-gh api -X DELETE repos/yadgarhq/actions/git/refs/tags/v1
-```
-
-Leaving it is also defensible — it is harmless where it sits. What is not
-defensible is moving it.
-
-## 3. `yadgarhq/yadgar` will red on its next merge, by design (ledger 936)
+## 2. `yadgarhq/yadgar` will red on its next merge, by design (ledger 936)
 
 `yadgar`'s seven tags are all `v0.1.0aN`, so it has no plain-semver baseline and
 has cut zero automatic tags ever. Under this change its next merge to `main`
@@ -112,7 +88,7 @@ No other repository is in this state. All nineteen were swept: twelve carry only
 plain `vX.Y.Z` tags, five carry none at all and stay green by design, `actions`
 is item 2 above, and `yadgar` is this item.
 
-## 4. Two dependency fixes are stranded and this change does not release them
+## 3. Two dependency fixes are stranded and this change does not release them
 
 Nothing re-runs the `version` job for an already-merged commit, so the synthesis
 this pull request adds applies only to merges from now on.
@@ -127,7 +103,7 @@ this pull request adds applies only to merges from now on.
 
 Each needs a hand-cut tag if it is to ship. That is separate follow-up work.
 
-## 5. The `repin` workflow needs a caller in each consumer repository
+## 4. The `repin` workflow needs a caller in each consumer repository
 
 `.github/workflows/repin.yaml` in this repository is `workflow_call` only, so it
 has no schedule of its own and never runs until a consumer calls it. That split
@@ -189,7 +165,7 @@ jobs:
 enough: every write the workflow makes goes through a short-lived App
 installation token, not `GITHUB_TOKEN`.
 
-## 6. No App or organisation change is needed
+## 5. No App or organisation change is needed
 
 Checked read-only on 2026-09-15 rather than assumed:
 
@@ -212,7 +188,7 @@ RELEASE_APP_CLIENT_ID
 RELEASE_APP_PRIVATE_KEY
 ```
 
-## 7. What the operator should expect on the first real run
+## 6. What the operator should expect on the first real run
 
 The seven repositories are all at their producers' semver-greatest tags today, so
 the first run of each caller reports a comparison table and opens nothing. The
