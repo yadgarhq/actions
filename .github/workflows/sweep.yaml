@@ -17,11 +17,14 @@ name: sweep
 #
 # READS USE GITHUB_TOKEN. R1 admits only public repositories, and the listing
 # asks for public ones only, so no read here needs the App. The App token is
-# minted per `act` leg, scoped by `repositories:` to that leg's one repository,
-# with `contents: write` and nothing else: the squash merge and the branch
-# rewrite (git data API blob, tree and commit, the ref moved by a GraphQL
-# `updateRefs` compare-and-swap, a repository read for its node id, two commit
-# reads, and a ref read after a failed swap) are the only calls made with it.
+# minted per `act` leg, scoped by `repositories:` to that leg's one repository.
+# An ADOPTION leg (`app`) gets `contents: write` and nothing else: the squash
+# merge and the branch rewrite (git data API blob, tree and commit, the ref
+# moved by a GraphQL `updateRefs` compare-and-swap, a repository read for its
+# node id, two commit reads, and a ref read after a failed swap) are the only
+# calls made with it. A BOT leg (`app-bot`, ADR-1106) gets `contents`,
+# `pull_requests` and `workflows: write`: the squash merge, the branch delete
+# and the one `@dependabot rebase` comment are the only calls made with it.
 #
 # NOT THE FAN-OUT'S CONCURRENCY GROUP. A queued sweep must never cancel or delay
 # a tag-push fan-out; `sweep.py` instead stops when a fan-out run is in progress
@@ -42,6 +45,15 @@ name: sweep
 # one, which is harmless there, because what is cancelled is an evaluation the
 # next one repeats. Each `act` leg holds a group per repository, so two runs
 # never write to one repository at once.
+#
+# BOT PULL REQUESTS (ADR-1106). The same run also merges a dependabot or repin
+# pull request in any public repository once `ci / passed` is green on its
+# head, and asks dependabot to rebase a BEHIND one so a later run can merge it. Such a
+# leg carries `kind`, and its token is minted by `app-bot` with `contents`,
+# `pull_requests` and `workflows: write`; an adoption leg's mint is unchanged.
+# Merges made with the App token are pushes by the App, not by GITHUB_TOKEN,
+# so the consumer's push workflows (version, tag, release) run as they do for
+# a merge by hand. The squash commit's author is the pull request's author.
 #
 # ROLLBACK: set `sweep.live` false in classes.json, or disable this workflow.
 on:
@@ -187,8 +199,11 @@ jobs:
         env:
           REPO: ${{ matrix.repo }}
         run: python3 scripts/sweep.py check-name -- "$REPO"
+      # An adoption leg has no `kind` and mints `contents: write` only, as it
+      # always did.
       - name: mint the write token for this one repository
         id: app
+        if: ${{ !matrix.kind }}
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
@@ -196,10 +211,27 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ matrix.repo }}
           permission-contents: write
+      # ADR-1106. A bot leg also needs `pull_requests: write` for the
+      # `@dependabot rebase` comment, and `workflows: write`, without which GitHub refuses
+      # an App's write that touches `.github/workflows/` (dependabot's
+      # github-actions bumps do). Still one repository. A kind that is neither
+      # mints nothing, and `act` then reds on the missing token.
+      - name: mint the bot write token for this one repository
+        id: app-bot
+        if: ${{ matrix.kind == 'dependabot' || matrix.kind == 'repin' }}
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ matrix.repo }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
       - name: merge or refresh
         env:
           GH_TOKEN: ${{ github.token }}
-          SWEEP_WRITE_TOKEN: ${{ steps.app.outputs.token }}
+          SWEEP_WRITE_TOKEN: ${{ steps.app.outputs.token || steps.app-bot.outputs.token }}
           OWNER: ${{ github.repository_owner }}
           EVENT: ${{ github.event_name }}
           DRY_RUN: ${{ inputs.dry_run }}
@@ -208,6 +240,7 @@ jobs:
           NUMBER: ${{ matrix.n }}
           HEAD: ${{ matrix.head }}
           ACTION: ${{ matrix.action }}
+          KIND: ${{ matrix.kind }}
         run: >-
           python3 scripts/sweep.py act --owner "$OWNER" --repo "$REPO"
-          --n "$NUMBER" --head "$HEAD" --action "$ACTION"
+          --n "$NUMBER" --head "$HEAD" --action "$ACTION" --kind "$KIND"

@@ -1,0 +1,417 @@
+{
+  "__about__": {
+    "pull_request": "yadgarhq/gateway#160",
+    "recorded": "2026-10-31, read-only GETs as m-agahi",
+    "normalised": [
+      "added 2026-11-01, read-only: changed_files, the files listing, and each commit's message",
+      "added 2026-11-01, read-only: the branch's repository activity up to the recorded head; later entries dropped: ['push by m-agahi', 'branch_deletion by m-agahi']"
+    ],
+    "shape": "ADR-1106 bot pull request, BEHIND its base with ci / passed green on the head"
+  },
+  "repos/yadgarhq/gateway": {
+    "name": "gateway",
+    "private": false,
+    "visibility": "public",
+    "owner": {
+      "login": "yadgarhq"
+    },
+    "archived": false,
+    "disabled": false,
+    "fork": false,
+    "topics": ["yadgar-class-service", "yadgar-deployable"],
+    "default_branch": "main"
+  },
+  "repos/yadgarhq/gateway/pulls/160": {
+    "number": 160,
+    "state": "open",
+    "draft": false,
+    "locked": false,
+    "title": "chore(deps): re-pin dial, lifecycle, telemetry",
+    "body": "## What\n\nThe scheduled in-org crate re-pin for `yadgarhq/gateway`. Every pin below now equals the semver-greatest plain `vMAJOR.MINOR.PATCH` tag its producer repository publishes:\n\n- `yadgar-dial`: `v0.2.26` -> `v0.2.28`\n- `yadgar-lifecycle`: `v0.3.2` -> `v0.3.4`\n- `yadgar-telemetry`: `v0.2.7` -> `v0.2.9`\n\nNo other line of `Cargo.toml` changed. `Cargo.lock` carries the re-resolution of those crates and nothing else.\n\n## Why\n\nADR-0690: Dependabot orders these git tags LEXICALLY rather than by semver, so `v0.2.9` sorts above `v0.2.10` and every proposal it made once a patch number reached two digits was a downgrade. Nineteen such pull requests were closed, and the four crate names now sit in an `ignore:` block in every consumer's `dependabot.yaml` \u2014 which left NOTHING advancing an in-org pin. Each round was a human opening seven pull requests by hand.\n\nThis is that round, opened by the `repin` workflow in `yadgarhq/actions`, which orders tags by parsed integers. A bot proposes and a human merges: ADR-0531 rejects automation where it MANUFACTURES A REVIEW, and this manufactures none.\n\nADR-0526 requires an in-org crate to be pinned by a published tag, never a bare revision. ADR-0634 confirms the producer's own `version` field is vestigial, so the tag is the only number that decides which code this builds against.\n\n## Changelog\n\n- chore(deps): bump yadgar-dial from v0.2.26 to v0.2.28\n- chore(deps): bump yadgar-lifecycle from v0.3.2 to v0.3.4\n- chore(deps): bump yadgar-telemetry from v0.2.7 to v0.2.9\n\n## Verification\n\n`ci / passed` on this pull request IS the verification. It runs `cargo test --all-features`, the feature-off build, `clippy -D warnings` and this repository's own pre-commit gates against the new pins. Nothing was verified before the pull request was opened.\n\nThe lockfile was re-resolved with a package-scoped `cargo update -p` per crate (`yadgar-dial`, `yadgar-lifecycle`, `yadgar-telemetry`), never a bare `cargo update`, so no unrelated package moved. Read the `Cargo.lock` diff before merging: a transitive dependency of a bumped crate can still move, and that is the half of this change the crate names do not show.\n\nNOT DONE HERE, and no check can do it: nobody has read the producers' diffs between the old tag and the new one. A behavioural change inside a bumped crate reaches `main` if this repository's suite does not exercise it.\n\n## Risk\n\nLow, and reversible one line per crate. This adopts already-published tags of in-org crates; undoing it is restoring the old tag in `Cargo.toml` plus `cargo update -p <crate>`. A published tag never moves in this organisation, so the old pin still names the same commit it always did.\n\nD80: this change renders no resource, names no cloud and names no ingress implementation, so it is correct under a different operator, ingress or cloud. It adds no trust boundary of its own and no control here rests on an environment default.\n\nThe residual is not nothing, and it belongs in this section rather than in a claim that it is absent: `yadgar-dial` and `yadgar-store` both carry TLS configuration, so a bumped tag CAN move a security property, and this pull request's checks do not read the producers' diffs. A reviewer taking a bump of either crate should read its release range.\n",
+    "labels": [],
+    "mergeable": true,
+    "mergeable_state": "behind",
+    "merged": false,
+    "user": {
+      "login": "yadgarhq-bot[bot]",
+      "id": 324366854,
+      "type": "Bot"
+    },
+    "head": {
+      "ref": "repin/dial-v0.2.28_lifecycle-v0.3.4_telemetry-v0.2.9",
+      "sha": "959bbabd65a6b269082562b2a111400221d382c8",
+      "repo": {
+        "full_name": "yadgarhq/gateway"
+      }
+    },
+    "base": {
+      "ref": "main",
+      "sha": "dee030d60dcf904f91fb98d7e2227fbc9cd2249f",
+      "repo": {
+        "full_name": "yadgarhq/gateway"
+      }
+    },
+    "changed_files": 2
+  },
+  "repos/yadgarhq/gateway/pulls/160/reviews?per_page=100": [],
+  "graphql": {
+    "data": {
+      "repository": {
+        "pullRequest": {
+          "reviewThreads": {
+            "totalCount": 0,
+            "nodes": []
+          }
+        }
+      }
+    }
+  },
+  "repos/yadgarhq/gateway/issues/160/timeline?per_page=100": [
+    {
+      "event": "committed"
+    }
+  ],
+  "repos/yadgarhq/gateway/pulls/160/commits?per_page=100": [
+    {
+      "sha": "959bbabd65a6b269082562b2a111400221d382c8",
+      "author": {
+        "id": 324366854,
+        "login": "yadgarhq-bot[bot]",
+        "type": "Bot"
+      },
+      "committer": {
+        "id": 324366854,
+        "login": "yadgarhq-bot[bot]"
+      },
+      "commit": {
+        "verification": {
+          "verified": false
+        },
+        "message": "chore(deps): re-pin dial, lifecycle, telemetry"
+      },
+      "parents": [
+        {
+          "sha": "dee030d60dcf904f91fb98d7e2227fbc9cd2249f"
+        }
+      ]
+    }
+  ],
+  "repos/yadgarhq/gateway/git/ref/heads/main": {
+    "ref": "refs/heads/main",
+    "object": {
+      "sha": "d65cfd40f08f2f192c3ee138c9ebcd058b96c2cb",
+      "type": "commit",
+      "url": "https://api.github.com/repos/yadgarhq/gateway/git/commits/d65cfd40f08f2f192c3ee138c9ebcd058b96c2cb"
+    }
+  },
+  "repos/yadgarhq/gateway/compare/d65cfd40f08f2f192c3ee138c9ebcd058b96c2cb...959bbabd65a6b269082562b2a111400221d382c8": {
+    "status": "diverged",
+    "ahead_by": 1,
+    "behind_by": 1,
+    "total_commits": 1
+  },
+  "repos/yadgarhq/gateway/commits/959bbabd65a6b269082562b2a111400221d382c8/check-runs?per_page=100": {
+    "total_count": 20,
+    "check_runs": [
+      {
+        "name": "ci / passed",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "959bbabd65a6b269082562b2a111400221d382c8",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111665886095
+        }
+      },
+      {
+        "name": "CodeQL",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "959bbabd65a6b269082562b2a111400221d382c8",
+        "app": {
+          "id": 57789
+        },
+        "check_suite": {
+          "id": 111665980324
+        }
+      },
+      {
+        "name": "ci / version",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "959bbabd65a6b269082562b2a111400221d382c8",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111665886095
+        }
+      },
+      {
+        "name": "ci / hook_tools_adopted",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "959bbabd65a6b269082562b2a111400221d382c8",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111665886095
+        }
+      },
+      {
+        "name": "ci / test",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "959bbabd65a6b269082562b2a111400221d382c8",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111665886095
+        }
+      },
+      {
+        "name": "ci / proto",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "959bbabd65a6b269082562b2a111400221d382c8",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111665886095
+        }
+      },
+      {
+        "name": "ci / pre_pin_parent",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "959bbabd65a6b269082562b2a111400221d382c8",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111665886095
+        }
+      },
+      {
+        "name": "ci / portability",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "959bbabd65a6b269082562b2a111400221d382c8",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111665886095
+        }
+      },
+      {
+        "name": "ci / service_immutable",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "959bbabd65a6b269082562b2a111400221d382c8",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111665886095
+        }
+      },
+      {
+        "name": "ci / workflows",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "959bbabd65a6b269082562b2a111400221d382c8",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111665886095
+        }
+      },
+      {
+        "name": "ci / precommit",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "959bbabd65a6b269082562b2a111400221d382c8",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111665886095
+        }
+      },
+      {
+        "name": "ci / vulnerabilities",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "959bbabd65a6b269082562b2a111400221d382c8",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111665886095
+        }
+      },
+      {
+        "name": "ci / release_ready",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "959bbabd65a6b269082562b2a111400221d382c8",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111665886095
+        }
+      },
+      {
+        "name": "main",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "959bbabd65a6b269082562b2a111400221d382c8",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111665886095
+        }
+      },
+      {
+        "name": "ci / template",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "959bbabd65a6b269082562b2a111400221d382c8",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111665886095
+        }
+      },
+      {
+        "name": "release",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "959bbabd65a6b269082562b2a111400221d382c8",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111665886095
+        }
+      },
+      {
+        "name": "ci / detect",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "959bbabd65a6b269082562b2a111400221d382c8",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111665886095
+        }
+      },
+      {
+        "name": "Analyze (actions)",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "959bbabd65a6b269082562b2a111400221d382c8",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111665879409
+        }
+      },
+      {
+        "name": "Analyze (python)",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "959bbabd65a6b269082562b2a111400221d382c8",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111665879409
+        }
+      },
+      {
+        "name": "Analyze (rust)",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "959bbabd65a6b269082562b2a111400221d382c8",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111665879409
+        }
+      }
+    ]
+  },
+  "repos/yadgarhq/gateway/actions/runs?head_sha=959bbabd65a6b269082562b2a111400221d382c8&per_page=100": {
+    "total_count": 2,
+    "workflow_runs": [
+      {
+        "path": ".github/workflows/ci.yaml",
+        "event": "pull_request",
+        "head_sha": "959bbabd65a6b269082562b2a111400221d382c8",
+        "head_branch": "repin/dial-v0.2.28_lifecycle-v0.3.4_telemetry-v0.2.9",
+        "status": "completed",
+        "conclusion": "success",
+        "check_suite_id": 111665886095,
+        "referenced_workflows": [
+          {
+            "path": "yadgarhq/actions/.github/workflows/ci-release.yaml@main",
+            "sha": "33cd5ccd0c79448325c84aa73e8c7e1c2b8ded1b"
+          },
+          {
+            "path": "yadgarhq/actions/.github/workflows/ci-pr.yaml@main",
+            "sha": "33cd5ccd0c79448325c84aa73e8c7e1c2b8ded1b"
+          }
+        ]
+      },
+      {
+        "path": "dynamic/github-code-scanning/codeql",
+        "event": "dynamic",
+        "head_sha": "959bbabd65a6b269082562b2a111400221d382c8",
+        "head_branch": "refs/pull/160/head",
+        "status": "completed",
+        "conclusion": "success",
+        "check_suite_id": 111665879409,
+        "referenced_workflows": []
+      }
+    ]
+  },
+  "repos/yadgarhq/actions/compare/33cd5ccd0c79448325c84aa73e8c7e1c2b8ded1b...main": {
+    "status": "identical",
+    "behind_by": 0
+  },
+  "repos/yadgarhq/gateway/pulls/160/files?per_page=100": [
+    {
+      "filename": "Cargo.lock",
+      "status": "modified"
+    },
+    {
+      "filename": "Cargo.toml",
+      "status": "modified"
+    }
+  ],
+  "repos/yadgarhq/gateway/activity?ref=refs/heads/repin/dial-v0.2.28_lifecycle-v0.3.4_telemetry-v0.2.9&per_page=100": [
+    {
+      "activity_type": "branch_creation",
+      "actor": {
+        "id": 324366854,
+        "login": "yadgarhq-bot[bot]"
+      },
+      "after": "959bbabd65a6b269082562b2a111400221d382c8",
+      "timestamp": "2026-10-31T10:57:19Z"
+    }
+  ]
+}

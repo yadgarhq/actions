@@ -32,10 +32,14 @@ name: repin
 # NOT covered until somebody adds the caller, and nothing detects one missing it.
 # A fan-out would have covered that and cost the three properties above.
 #
-# WHY IT PROPOSES AND DOES NOT MERGE. ADR-0531 rejects automation where it
-# MANUFACTURES A REVIEW rather than where it is automation. A bot opening a pull
-# request a human reads and merges manufactures none; a bot merging its own would.
-# There is no auto-merge here and there should not be one.
+# WHY IT PROPOSES AND DOES NOT MERGE ITSELF. ADR-0531 rejects automation where
+# it MANUFACTURES A REVIEW rather than where it is automation. This workflow
+# still only opens the pull request. ADR-1106 replaced ADR-0531's no-auto-merge
+# clause: the `sweep` workflow in this repository merges a repin pull request
+# (author `yadgarhq-bot[bot]`, head `repin/...`) once `ci / passed` is green on
+# its head, but only when every commit is verified and committed by GitHub.
+# The commit this workflow pushes with git below is unsigned, so until it is
+# made through the API a repin pull request is still merged by a person.
 #
 # NOTHING HERE KNOWS THE FOUR CRATE NAMES OR WHICH REPOSITORY HOLDS WHICH.
 # `scripts/repin.py` derives both from the manifest it is looking at — the

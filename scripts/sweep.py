@@ -1,35 +1,47 @@
 #!/usr/bin/env python3
 """The sweeper: merges a hook adoption pull request that proves itself. YAADGAAR 442 (c).
 
-`fan_out.py` PROPOSES AND NEVER MERGES (ADR-0982). It opens one `actions-adopt`
-pull request per consumer, and each one waits for a person to merge a one-line
-`rev:` bump. This file is the other half: it finds those pull requests and
-merges one only when every fact below holds, read from the GitHub API in this
-run. Nothing is taken from the pull request's own claims.
+ADR-1106 ADDS BOT PULL REQUESTS, AND CHANGES NOTHING BELOW FOR ADOPTION ONES. In
+every public repository of the owner (consumer or not, `exempt` or not; never
+one in `sweep.exclude`, archived, disabled or a fork), an open pull request is
+judged by `evaluate_bot` when `bot_kind` names it:
 
-EVERY CONDITION FAILS CLOSED. A missing key, a value of the wrong type, a list
-that may be truncated, an API error or an unexpected shape is a SKIP with a
-reason, never a merge. The conditions, by the letters the design gives them:
+    dependabot  opener id 49699333, type Bot, login `dependabot[bot]`, head
+                `dependabot/<ecosystem>/...`
+    repin       opener id 324366854, type Bot, login `yadgarhq-bot[bot]`, head
+                `repin/<crate>-<tag>_...` (`repin.branch`)
 
-    R  the repository: public, a consumer with one class topic, not excluded;
-       the run is armed (`sweep.live` true in `classes.json`, from `main`)
-    P  the pull request: opened by the release App (id 324366854, a Bot) from
-       `actions-adopt` in the same repository, open, not draft, not locked, no
-       `no-auto-merge` label, no change request, no unresolved thread, the
-       exact generated `bump` title, and a body with no Changelog bullet
-    K  the commits: exactly one, the head, verified, authored by the App,
-       committed by `web-flow`, its subject the title; every force-push by the App
-    C  the diff: only `.pre-commit-config.yaml`, mode 100644, the one `rev:` line
-       of the actions block moved forward (`config_only.classify`), the files
-       parse equal apart from that rev (`ci_verdict.parsed_agrees`)
-    T  the target tag: a plain vX.Y.Z on `actions` main, cut by exactly one
-       merged pull request into main, older than `sweep.soak_hours`
-    V  CI on the exact head: every `ci / passed` check run green, posted by
-       app 15368 in a suite that IS this consumer's `ci.yaml` pull_request run
-       of this head, calling `ci-pr.yaml@main` at a commit on actions main, with
-       `ci / precommit` green in the same suite. Commit statuses are ignored.
-    U  up to date: not behind the base tip read in this run, base sha equal to
-       it, and `mergeable` true
+Any other pull request, the App's `actions-adopt` included, goes to `evaluate`
+exactly as before. A bot pull request needs: head and base in this repository,
+base the default branch, open, not draft, not locked, no `no-auto-merge` label
+(B2); no change request and no unresolved thread (P5); PROVENANCE (B3): every
+commit authored by that bot, verified, committed by `web-flow`, and not a merge,
+and every force-push the bot's; every changed file MODIFIED and owned by the
+ecosystem (B8: `FILES` for dependabot's cargo, github_actions and docker,
+Cargo files for repin; any other ecosystem is left for a person); every ref
+update of the head branch pushed by the bot, the newest one the head (B9, the
+repository activity API); `ci / passed` green on the head from the
+repository's own pull_request CI run on that branch (V1, V2; `ci-self.yaml` in
+the producer, which calls `ci-pr.yaml` by local path; V3 is not asked); and
+`mergeable` true (U3); and, to merge, the head pushed at least
+`sweep.bot_soak_hours` ago (B10, parity with T5). All dependabot update types
+qualify, majors included.
+Of several open repin pull requests in one repository only the newest is
+judged (B4). repin.yaml's `git push` commit is unsigned, so today every repin
+pull request fails B3 and waits for a person.
+
+Up to date (U1, U2): a squash merge at the head sha (GitHub refuses it if the
+head moved), titled with the bot's own first commit subject (B7) and with the
+fixed `BOT_MESSAGE`, never the editable pull request title or body, so no text
+a person typed reaches history or `derive`; then the bot's branch is deleted, as `delete_branch_on_merge` is
+off. BEHIND: never update-branch, which adds a merge commit B3 refuses. A
+dependabot pull request gets one `@dependabot rebase` comment (at most one an
+hour, `max_refreshes_per_pr_per_day` a day: B6), and dependabot re-signs its
+own commit, so a LATER run merges it after CI. A repin one has no such path
+(B5). Red, pending or conflicting: a skip, left for a person. `act` judges the
+pull request again from scratch, B3 included, on the same head before it
+writes. The plan takes adoption writes first, then at most one bot write per
+repository per run (M5) within the same merge cap (M4).
 
 A BEHIND pull request whose base did not touch `.pre-commit-config.yaml` is
 REFRESHED instead: `actions-adopt` is moved, in one ref write, to a new commit
@@ -55,7 +67,9 @@ no `act` job, and `evaluate` writes its verdict table to the step summary only. 
 read a private one. The merge and the branch rewrite, with the reads the
 rewrite makes (the repository's node id, the parent commit, the new commit, and
 the branch after a failed swap), are the only calls made with the App token,
-minted per repository with `contents: write`.
+minted per repository with `contents: write`. A bot leg's token (ADR-1106) is
+minted per repository with `contents`, `pull_requests` and `workflows: write`,
+for the merge, the rebase comment and the branch delete.
 
 Commands:
 
@@ -63,7 +77,7 @@ Commands:
     sweep.py wait --owner O             WAIT_MINUTES -> sleep until the soak should be done
     sweep.py check-name -- NAME         a matrix leg's repository, or exit 1
     sweep.py evaluate --owner O [--live]
-    sweep.py act --owner O --repo R --n N --head SHA --action merge|refresh
+    sweep.py act --owner O --repo R --n N --head SHA --action merge|refresh [--kind dependabot|repin]
 
 Tests: python3 -m pytest scripts/tests/ -q
 """
@@ -99,12 +113,41 @@ VERSION = r"v[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}"
 TITLE = re.compile(
     rf"chore\(deps\): bump yadgarhq/actions hooks from ({VERSION}) to ({VERSION})")
 SHA = re.compile(r"[0-9a-f]{40}")
+# ADR-1106. The two bots whose pull requests merge when CI is green, each by
+# the id GitHub assigned it AND the head branch its own tooling writes. The
+# login is checked too, but it is the id and the branch that admit.
+DEPENDABOT_ID = 49699333
+BOTS = {
+    "dependabot": (DEPENDABOT_ID, "dependabot[bot]", re.compile(r"dependabot/[A-Za-z0-9_.+-]+(/[A-Za-z0-9_.+-]+)+")),
+    # `repin.branch`: `repin/` and `<crate>-<tag>` parts joined by `_`. One
+    # segment, no `..`: the name goes into a ref path on delete.
+    "repin": (BOT_ID, "yadgarhq-bot[bot]", re.compile(r"repin/[A-Za-z0-9_+-]+(\.[A-Za-z0-9_+-]+)*")),
+}
+CI_SELF = ".github/workflows/ci-self.yaml"
+REBASE = "@dependabot rebase"
+# F1. A bot merge never carries the pull request's editable body: a `feat!`
+# bullet typed there would reach `next_version.derive`. Fixed text with no
+# bullet, so `derive` takes its synthetic `fix(deps)` path as for any bot merge.
+BOT_MESSAGE = "Merged by the yadgarhq/actions sweeper (ADR-1106): ci / passed was green on this head."
+TITLE_MAX = 200
+# F3. What a bot pull request may change, by the ecosystem its branch names.
+# Exactly the ecosystems the estate's dependabot.yml files use (2026-11-01:
+# cargo, github-actions, docker); any other is left for a person. Each entry is
+# matched against the WHOLE path.
+_ANY = r"(?:[^/]+/)*"
+FILES = {
+    "cargo": re.compile(rf"{_ANY}Cargo\.(?:toml|lock)"),
+    "github_actions": re.compile(rf"\.github/workflows/[^/]+\.ya?ml|{_ANY}action\.ya?ml"),
+    "docker": re.compile(rf"{_ANY}(?:Dockerfile|Containerfile)[^/]*"),
+}
+REPIN_FILES = FILES["cargo"]
 # The only merge failures that are GitHub's verdict on the pull request. Any
 # other (401/403/404, 5xx, no usable auth, an error with no HTTP code) is not,
 # and reds the leg (yaadgaar 469).
 REFUSED = re.compile(r"\bHTTP (405|409|422)\b")
 PAGE = 100  # a list of exactly this many may have a second page: refused
-SWEEP_KEYS = {"live", "exclude", "soak_hours", "max_merges", "max_refreshes_per_pr_per_day"}
+SWEEP_KEYS = {"live", "exclude", "soak_hours", "bot_soak_hours", "max_merges",
+              "max_refreshes_per_pr_per_day"}
 DAY = datetime.timedelta(hours=24)
 # ADR-1073 (yaadgaar 468). The fan-out dispatches this workflow with a
 # `wait_minutes` cap; the run sleeps until the newest tag's soak plus this
@@ -173,9 +216,10 @@ def load(text):
             raise Refusal(f"classes.json: `sweep.{key}` must be a non-negative integer")
     # Hours may be fractional (ADR-1068 sets 0.5); a bool, a string, NaN and
     # infinity are not hours.
-    soak = sweep["soak_hours"]
-    if type(soak) not in (int, float) or not math.isfinite(soak) or soak < 0:
-        raise Refusal("classes.json: `sweep.soak_hours` must be a non-negative finite number")
+    for key in ("soak_hours", "bot_soak_hours"):
+        soak = sweep[key]
+        if type(soak) not in (int, float) or not math.isfinite(soak) or soak < 0:
+            raise Refusal(f"classes.json: `sweep.{key}` must be a non-negative finite number")
     return classes
 
 
@@ -384,8 +428,20 @@ def on_main(api, owner, sha, reason):
     need(dig(compare, "status") in ("identical", "ahead") and dig(compare, "behind_by") == 0, reason)
 
 
-def check_ci(api, owner, name, head):
-    """V1-V3. Statuses (V4) are never read."""
+def ci_shape(name):
+    """The workflow that posts a repository's `ci / passed`, and the reusable
+    workflow it must call (None: not read). The producer tests `ci-pr.yaml` by
+    local path from `ci-self.yaml`; every other repository calls it at main."""
+    if name == ACTIONS:
+        return CI_SELF, None
+    return CI_WORKFLOW, CI_PR
+
+
+def check_ci(api, owner, name, head, branch=fan_out.BRANCH, workflow=CI_WORKFLOW, caller=CI_PR,
+             precommit=True):
+    """V1-V3. Statuses (V4) are never read. The defaults are the adoption pull
+    request's; a bot pull request (ADR-1106) passes its own branch and
+    `ci_shape`, and does not ask for V3."""
     got = api.get(f"repos/{owner}/{name}/commits/{head}/check-runs?per_page={PAGE}")
     runs = dig(got, "check_runs")
     need(isinstance(runs, list) and is_int(dig(got, "total_count"))
@@ -407,18 +463,21 @@ def check_ci(api, owner, name, head):
         bound = [w for w in wruns if dig(w, "check_suite_id") == suite]
         need(len(bound) == 1, f"V2: {len(bound)} workflow runs own the `{PASSED}` suite, not one")
         run = bound[0]
-        need(dig(run, "path") == CI_WORKFLOW, f"V2: `{PASSED}` came from {run.get('path')!r}")
+        need(dig(run, "path") == workflow, f"V2: `{PASSED}` came from {run.get('path')!r}")
         need(dig(run, "event") == "pull_request", f"V2: `{PASSED}` ran on {run.get('event')!r}")
-        need(dig(run, "head_sha") == head and dig(run, "head_branch") == fan_out.BRANCH,
+        need(dig(run, "head_sha") == head and dig(run, "head_branch") == branch,
              "V2: the run is for another head")
         need(dig(run, "status") == "completed" and dig(run, "conclusion") == "success",
              "V2: the run is not a completed success")
-        refs = [w for w in as_list(dig(run, "referenced_workflows"), "referenced workflows")
-                if dig(w, "path") == CI_PR]
-        need(len(refs) == 1, f"V2: the run does not call `{CI_PR}` exactly once")
-        sha = dig(refs[0], "sha")
-        need(isinstance(sha, str) and bool(SHA.fullmatch(sha)), "V2: the called ci-pr.yaml has no sha")
-        on_main(api, owner, sha, "V2: the called ci-pr.yaml is not on actions main")
+        if caller is not None:
+            refs = [w for w in as_list(dig(run, "referenced_workflows"), "referenced workflows")
+                    if dig(w, "path") == caller]
+            need(len(refs) == 1, f"V2: the run does not call `{caller}` exactly once")
+            sha = dig(refs[0], "sha")
+            need(isinstance(sha, str) and bool(SHA.fullmatch(sha)), "V2: the called ci-pr.yaml has no sha")
+            on_main(api, owner, sha, "V2: the called ci-pr.yaml is not on actions main")
+        if not precommit:
+            continue
         pre = [r for r in runs if dig(r, "name") == PRECOMMIT and dig(r, "check_suite", "id") == suite]
         need(len(pre) >= 1 and all(dig(r, "status") == "completed" and dig(r, "conclusion") == "success"
                                    for r in pre), f"V3: `{PRECOMMIT}` is not green in the same suite")
@@ -486,6 +545,211 @@ def evaluate(api, owner, name, n, classes, now):
     return dict(verdict, action="refresh", tip=tip, text=head_text)
 
 
+# --------------------------------------------------------------------------
+# ADR-1106: dependabot and repin pull requests
+# --------------------------------------------------------------------------
+
+
+def bot_kind(pr):
+    """`dependabot`, `repin`, or None, from the opener's id, type and login and
+    the head branch. A name alone is a claim: all four must agree."""
+    if not isinstance(pr, dict):
+        return None
+    user, head = pr.get("user"), pr.get("head")
+    if not (isinstance(user, dict) and isinstance(head, dict)):
+        return None
+    for kind, (bot_id, login, branch) in BOTS.items():
+        if (is_int(user.get("id")) and user["id"] == bot_id and user.get("type") == "Bot"
+                and user.get("login") == login and isinstance(head.get("ref"), str)
+                and branch.fullmatch(head["ref"])):
+            return kind
+    return None
+
+
+def bot_candidate(pr):
+    """The listing's cheap pre-filter: a bot login and its branch prefix. `judge`
+    then decides from the pull request itself."""
+    if not isinstance(pr, dict) or not is_int(pr.get("number")):
+        return False
+    login = (pr.get("user") or {}).get("login") if isinstance(pr.get("user"), dict) else None
+    ref = (pr.get("head") or {}).get("ref") if isinstance(pr.get("head"), dict) else None
+    return isinstance(ref, str) and any(
+        login == bot_login and ref.startswith(branch.pattern.split("/")[0] + "/")
+        for _, bot_login, branch in BOTS.values())
+
+
+def check_bot_repo(meta, owner, classes):
+    """R1-R3 for a bot pull request: every public repository of `owner` that is
+    not excluded, archived, disabled or a fork. No class topic is asked for and
+    `exempt` does not apply: that is exemption from ADOPTION, and ADR-1106
+    covers every repository, the producer and `.github` included."""
+    need(dig(meta, "private") is False and dig(meta, "visibility") == "public",
+         "R1: not a public repository")
+    name = dig(meta, "name")
+    need(isinstance(name, str) and bool(fan_out.NAME.fullmatch(name)),
+         "R3: a repository name outside GitHub's alphabet")
+    need(name not in classes["sweep"]["exclude"], f"R2: excluded: {classes['sweep']['exclude'].get(name)}")
+    need(dig(meta, "owner", "login") == owner, f"R3: not owned by {owner}")
+    need(dig(meta, "archived") is False and dig(meta, "disabled") is False
+         and dig(meta, "fork") is False, "R3: archived, disabled or a fork")
+
+
+def check_bot_pr(pr, meta, owner):
+    """P1 (B1), B2 and P4 for a bot pull request. Returns `(kind, branch)`."""
+    kind = bot_kind(pr)
+    need(kind is not None, "P1: not a dependabot or repin pull request (ADR-1106)")
+    full = f"{owner}/{meta['name']}"
+    need(dig(pr, "head", "repo", "full_name") == full
+         and dig(pr, "base", "repo", "full_name") == full, "B2: head is not in this repository")
+    need(dig(pr, "base", "ref") == dig(meta, "default_branch"), "B2: base is not the default branch")
+    need(dig(pr, "state") == "open", "B2: not open")
+    need(dig(pr, "draft") is False, "B2: a draft")
+    need(dig(pr, "locked") is False, "B2: locked")
+    labels = dig(pr, "labels")
+    need(isinstance(labels, list), "B2: no label list")
+    need(all(dig(label, "name") != NO_AUTO_MERGE for label in labels), f"B2: labelled `{NO_AUTO_MERGE}`")
+    return kind, pr["head"]["ref"]
+
+
+def check_bot_commits(commits, timeline, kind, head):
+    """B3, PROVENANCE. EVERY commit is the bot's own (author id and type Bot),
+    verified, and committed by GitHub's `web-flow`, with exactly one parent.
+    An author id is only an email match, so it never admits a commit alone,
+    and a merge commit is never admitted: one can carry any edit (conflict
+    resolution), whoever signed it. repin.yaml's `git push` commit is unsigned
+    and committed by the App, so a repin pull request fails this and waits for
+    a person until repin makes its commit through the API. Every force-push is
+    the bot's."""
+    bot_id = BOTS[kind][0]
+    commits = as_list(commits, "commits")
+    need(len(commits) >= 1 and dig(commits, -1, "sha") == head, "B3: the last commit is not the head")
+    for commit in commits:
+        author, committer = dig(commit, "author"), dig(commit, "committer")
+        need(isinstance(author, dict) and is_int(author.get("id")) and author["id"] == bot_id
+             and author.get("type") == "Bot", f"B3: a commit not authored by the {kind} bot")
+        need(dig(commit, "commit", "verification", "verified") is True
+             and isinstance(committer, dict) and is_int(committer.get("id"))
+             and committer["id"] == WEB_FLOW_ID, "B3: a commit not verified and committed by GitHub")
+        parents = dig(commit, "parents")
+        need(isinstance(parents, list) and len(parents) == 1, "B3: a merge commit (or a root commit)")
+    for event in as_list(timeline, "timeline"):
+        if dig(event, "event") == "head_ref_force_pushed":
+            need(dig(event, "actor", "id") == bot_id, "B3: someone else force-pushed the branch")
+    # B7. The squash title is the bot's own first commit subject, which B3 just
+    # proved the bot wrote, never the pull request title anyone can edit.
+    message = dig(commits, 0, "commit", "message")
+    subject = message.split("\n")[0].strip() if isinstance(message, str) else ""
+    need(0 < len(subject) <= TITLE_MAX, "B7: the bot's commit has no usable subject for a title")
+    return subject
+
+
+def check_bot_files(files, pr, kind, branch):
+    """B8. Every file the pull request changes is MODIFIED (not added, removed,
+    renamed or copied) and is one its ecosystem owns: `FILES` by the
+    `dependabot/<ecosystem>/` segment, Cargo files for repin. A listing that
+    may be truncated, or disagrees with `changed_files`, is a skip."""
+    allowed = REPIN_FILES if kind == "repin" else FILES.get(branch.split("/")[1])
+    need(allowed is not None, f"B8: no file allowlist for `{branch}`; left for a person")
+    need(isinstance(files, list) and len(files) < PAGE, "B8: the files listing may be truncated")
+    count = dig(pr, "changed_files")
+    need(is_int(count) and count == len(files), "B8: the files listing disagrees with changed_files")
+    for f in files:
+        need(dig(f, "status") == "modified", f"B8: {f.get('filename')!r} is {f.get('status')!r}")
+        name = dig(f, "filename")
+        need(isinstance(name, str) and bool(allowed.fullmatch(name)),
+             f"B8: {name!r} is not a file this pull request's ecosystem changes")
+
+
+PUSHES = ("branch_creation", "push", "force_push")
+
+
+def check_bot_pushes(activity, kind, head):
+    """B9. WHO PUSHED, which a commit cannot claim. The repository activity API
+    names the actor of every ref update of the head branch, a plain push
+    included. Every one must be the bot, and the newest must have put `head`
+    there. Returns when the head arrived, where the bot soak (B10) counts from.
+    It also closes the API-commit forgery B3 cannot: a commit made through the
+    API with the bot's author email may verify, but its push is the forger's."""
+    bot_id = BOTS[kind][0]
+    need(isinstance(activity, list) and 1 <= len(activity) < PAGE,
+         "B9: the branch activity is empty or may be truncated")
+    for event in activity:
+        need(dig(event, "activity_type") in PUSHES, f"B9: a {event.get('activity_type')!r} on the branch")
+        need(dig(event, "actor", "id") == bot_id, "B9: a ref update not pushed by the bot")
+    need(dig(activity, 0, "after") == head, "B9: the newest ref update is not the head")
+    return parse_time(dig(activity, 0, "timestamp"))
+
+
+def rebase_asks(timeline, now):
+    """The App's own `@dependabot rebase` comments: (in the last hour, in the last day)."""
+    hour = day = 0
+    for event in timeline:
+        if (event.get("event") == "commented" and (event.get("actor") or {}).get("id") == BOT_ID
+                and (event.get("body") or "").strip() == REBASE):
+            age = now - parse_time(dig(event, "created_at"))
+            hour += age < datetime.timedelta(hours=1)
+            day += age < DAY
+    return hour, day
+
+
+def evaluate_bot(api, owner, name, n, classes, now):
+    """ADR-1106: merge an up-to-date bot pull request whose `ci / passed` is
+    green on its head; ask dependabot to rebase a BEHIND one whose CI is green,
+    so a later run merges it on the new head. Red, pending or conflicting: a skip."""
+    meta = api.get(f"repos/{owner}/{name}")
+    check_bot_repo(meta, owner, classes)
+    pr = api.get(f"repos/{owner}/{name}/pulls/{int(n)}")
+    need(dig(pr, "number") == n, "unexpected API shape: another pull request")
+    kind, branch = check_bot_pr(pr, meta, owner)
+    head = dig(pr, "head", "sha")
+    need(isinstance(head, str) and bool(SHA.fullmatch(head)), "unexpected API shape: head sha")
+    check_reviews(api.get(f"repos/{owner}/{name}/pulls/{n}/reviews?per_page={PAGE}"),
+                  api.graphql_threads(owner, name, n))
+    base = dig(pr, "base", "ref")
+    tip = dig(api.get(f"repos/{owner}/{name}/git/ref/heads/{urllib.parse.quote(base, safe='/')}"),
+              "object", "sha")
+    need(isinstance(tip, str) and bool(SHA.fullmatch(tip)), "unexpected API shape: base tip")
+    timeline = api.get(f"repos/{owner}/{name}/issues/{n}/timeline?per_page={PAGE}")
+    # A full page hides older events: B3's force-push actors and B6's rebase
+    # caps must read the whole timeline, or the pull request is a skip.
+    need(isinstance(timeline, list) and len(timeline) < PAGE, "B3: the timeline may be truncated")
+    subject = check_bot_commits(api.get(f"repos/{owner}/{name}/pulls/{n}/commits?per_page={PAGE}"),
+                                timeline, kind, head)
+    check_bot_files(api.get(f"repos/{owner}/{name}/pulls/{n}/files?per_page={PAGE}"), pr, kind, branch)
+    ref = urllib.parse.quote(f"refs/heads/{branch}", safe="/")
+    pushed = check_bot_pushes(api.get(f"repos/{owner}/{name}/activity?ref={ref}&per_page={PAGE}"),
+                              kind, head)
+    compare = fetcher(api)(ci_verdict.compare_url(f"{owner}/{name}", tip, head))
+    status, behind = dig(compare, "status"), dig(compare, "behind_by")
+    workflow, caller = ci_shape(name)
+    check_ci(api, owner, name, head, branch=branch, workflow=workflow, caller=caller, precommit=False)
+    need(dig(pr, "mergeable") is True, "U3: GitHub does not call it mergeable")
+    verdict = {"repo": name, "n": n, "head": head, "title": subject, "body": BOT_MESSAGE,
+               "kind": kind, "branch": branch, "reason": f"{kind} (ADR-1106)"}
+    if status == "ahead" and behind == 0:
+        need(dig(pr, "base", "sha") == tip, "U2: the pull request's base sha is not the base tip")
+        # B10, parity with T5: the head must have sat on the branch this long.
+        need(now - pushed >= datetime.timedelta(hours=classes["sweep"]["bot_soak_hours"]),
+             f"B10: the head is younger than the {classes['sweep']['bot_soak_hours']}h bot soak")
+        return dict(verdict, action="merge")
+    need(status == "diverged" and is_int(behind) and behind > 0, f"U1: compare status {status!r}")
+    # BEHIND. Only the bot can rebase its commit and keep it signed: dependabot
+    # does on `@dependabot rebase`. Nothing does that for a repin commit.
+    need(kind == "dependabot", "B5: behind, and nothing can rebase a repin commit and keep it signed")
+    hour, day = rebase_asks(timeline, now)
+    need(hour == 0, "B6: behind, and a rebase was asked within the hour")
+    need(day < classes["sweep"]["max_refreshes_per_pr_per_day"],
+         "B6: behind, and the rebase requests for today are capped")
+    return dict(verdict, action="refresh")
+
+
+def route(api, owner, name, n, classes, now):
+    """A bot pull request is judged by ADR-1106; anything else exactly as before."""
+    if bot_kind(api.get(f"repos/{owner}/{name}/pulls/{int(n)}")) is not None:
+        return evaluate_bot(api, owner, name, n, classes, now)
+    return evaluate(api, owner, name, n, classes, now)
+
+
 def ci_verdict_text(fetch, repo, commit):
     try:
         return ci_verdict.config_at(fetch, repo, commit)
@@ -494,9 +758,9 @@ def ci_verdict_text(fetch, repo, commit):
 
 
 def judge(api, owner, name, n, classes, now):
-    """`evaluate`, with every failure of any kind turned into a Skip row."""
+    """`route`, with every failure of any kind turned into a Skip row."""
     try:
-        return evaluate(api, owner, name, n, classes, now)
+        return route(api, owner, name, n, classes, now)
     except Skip as skip:
         return {"repo": name, "n": n, "action": "skip", "reason": str(skip)}
     except Exception as exc:  # fail closed: an error is never a merge
@@ -557,13 +821,48 @@ def sweep(api, owner, classes, now):
                 rows.append({"repo": name, "n": 0, "action": "skip", "reason": "unexpected API shape"})
                 continue
             rows.append(judge(api, owner, name, number, classes, now))
+    # ADR-1106. EVERY listed public repository, consumer or not, exempt or not;
+    # never an excluded or archived one, whose pull requests are not read.
+    every = sorted(m["name"] for m in listed if isinstance(m, dict) and isinstance(m.get("name"), str)
+                   and fan_out.NAME.fullmatch(m["name"]) and m.get("archived") is not True
+                   and m["name"] not in exclude)
+    for name in every:
+        prs = api.get(f"repos/{owner}/{name}/pulls?state=open&per_page={PAGE}")
+        if not isinstance(prs, list):
+            rows.append({"repo": name, "n": 0, "action": "skip",
+                         "reason": "error: the open pull request listing is not a list"})
+            continue
+        if len(prs) >= PAGE:
+            rows.append({"repo": name, "n": 0, "action": "skip",
+                         "reason": f"{len(prs)} open pull requests may be truncated: no bot pull request read"})
+            continue
+        found = [pr for pr in prs if bot_candidate(pr)]
+        # B4. A repin run has opened a NEW pull request on the SAME head branch
+        # while an older one stayed open (task-db #122/#125, 2026-10-31). Only
+        # the newest repin pull request is judged; an older one is left for a
+        # person. Every write is keyed on the number and the head sha anyway.
+        repins = [pr["number"] for pr in found if pr["head"]["ref"].startswith("repin/")]
+        for pr in found:
+            if pr["number"] in repins and pr["number"] != max(repins):
+                rows.append({"repo": name, "n": pr["number"], "action": "skip",
+                             "reason": f"B4: an older open repin pull request; #{max(repins)} is newer"})
+                continue
+            rows.append(judge(api, owner, name, pr["number"], classes, now))
     return rows, plan(rows, classes["sweep"]["max_merges"])
 
 
 def plan(rows, max_merges):
-    """The `act` matrix: at most `max_merges` merges, and every refresh. M4."""
+    """The `act` matrix: at most `max_merges` merges, and every refresh. M4.
+
+    Adoption rows are planned first, exactly as before. A bot row (ADR-1106)
+    then takes what is left (M4), and at most ONE write per repository per run,
+    none in a repository an adoption write already holds (M5): strict status
+    checks leave every sibling BEHIND after a merge, so a second write there
+    is wasted CI or a refused merge."""
     out, merges = [], 0
     for row in rows:
+        if row.get("kind"):
+            continue
         if row["action"] == "merge":
             if merges >= max_merges:
                 row.update(action="skip", reason=f"M4: the cap of {max_merges} merges per run is reached")
@@ -571,11 +870,28 @@ def plan(rows, max_merges):
             merges += 1
         if row["action"] in ("merge", "refresh"):
             out.append({"repo": row["repo"], "n": row["n"], "head": row["head"], "action": row["action"]})
+    busy = {t["repo"] for t in out}
+    for row in rows:
+        if not row.get("kind") or row["action"] not in ("merge", "refresh"):
+            continue
+        if row["repo"] in busy:
+            row.update(action="skip", reason="M5: one write per repository per run, and this one has it")
+            continue
+        if row["action"] == "merge":
+            if merges >= max_merges:
+                row.update(action="skip", reason=f"M4: the cap of {max_merges} merges per run is reached")
+                continue
+            merges += 1
+        busy.add(row["repo"])
+        out.append({"repo": row["repo"], "n": row["n"], "head": row["head"], "action": row["action"],
+                    "kind": row["kind"]})
     return out
 
 
-def act(reader, writer, owner, name, n, head, action, classes, now):
-    """M1-M3 for one leg: evaluate again from scratch, then merge or refresh."""
+def act(reader, writer, owner, name, n, head, action, classes, now, kind=""):
+    """M1-M3 for one leg: evaluate again from scratch, then merge or refresh.
+    `kind` is the leg's (empty for an adoption leg): its token was minted for
+    it, so a verdict of another kind writes nothing."""
     # Evaluate ran before a fan-out may have started; it must not race one (yaadgaar 470).
     need(not fan_out_running(reader, owner), "fan-out running")
     verdict = judge(reader, owner, name, n, classes, now)
@@ -584,7 +900,11 @@ def act(reader, writer, owner, name, n, head, action, classes, now):
         raise Refusal(f"M1: the re-evaluation failed: {verdict['reason']}")
     if verdict["action"] != action:
         raise Skip(f"M1: re-evaluated as {verdict['action']}: {verdict.get('reason', '')}")
+    need(verdict.get("kind", "") == kind,
+         f"M1: re-evaluated as kind {verdict.get('kind', '')!r}, the leg is {kind!r}")
     need(verdict["head"] == head, "M1: the head moved since evaluate")
+    if kind:
+        return act_bot(reader, writer, owner, name, n, head, action, verdict)
     if action == "merge":
         try:
             writer.merge_pr(owner, name, n, head, f"{verdict['title']} (#{n})", verdict["body"])
@@ -612,6 +932,30 @@ def act(reader, writer, owner, name, n, head, action, classes, now):
     except fan_out.RefMoved as moved:
         raise Skip(f"the branch moved under the refresh: {moved}") from None
     return f"refreshed {owner}/{name}#{n} onto {verdict['tip']}"
+
+
+def act_bot(reader, writer, owner, name, n, head, action, verdict):
+    """ADR-1106's writes, after `act` judged the pull request again from
+    scratch (B3 included) on this same head. A merge is the same squash at the
+    head sha as an adoption merge (GitHub refuses it if the head moved), then
+    the bot's branch is deleted (`delete_branch_on_merge` is off estate-wide).
+    A refresh is one `@dependabot rebase` comment: dependabot rewrites and
+    re-signs its own commit, so B3 still holds on the new head. Never
+    update-branch: that adds a merge commit."""
+    if action == "merge":
+        try:
+            writer.merge_pr(owner, name, n, head, f"{verdict['title']} (#{n})", BOT_MESSAGE)
+        except Refusal as exc:
+            if REFUSED.search(str(exc)):
+                raise Skip(f"M2: the merge was refused: {exc}") from None
+            raise Refusal(f"M2: the merge call was denied: {exc}") from None
+        after = reader.get(f"repos/{owner}/{name}/pulls/{n}", fresh=True)
+        need(dig(after, "merged") is True, "M3: not merged after the merge call")
+        writer.delete_branch(owner, name, verdict["branch"])
+        return f"merged {owner}/{name}#{n} as {dig(after, 'merge_commit_sha')}; deleted {verdict['branch']}"
+    need(verdict["kind"] == "dependabot", "B5: only dependabot can be asked to rebase")
+    writer.comment(owner, name, n, REBASE)
+    return f"asked dependabot to rebase {owner}/{name}#{n} (head {head})"
 
 
 # --------------------------------------------------------------------------
@@ -664,6 +1008,26 @@ class SweepGh(fan_out.Gh):
                   payload={"merge_method": "squash", "sha": head,
                            "commit_title": title, "commit_message": message})
 
+    def comment(self, owner, name, n, body):
+        """ADR-1106. The one comment the sweeper writes: `@dependabot rebase`."""
+        if body != REBASE:
+            raise Refusal(f"refusing to comment {body!r}: only {REBASE!r}")
+        self._api("-X", "POST", f"repos/{fan_out.q(owner)}/{fan_out.q(name)}/issues/{int(n)}/comments",
+                  payload={"body": body})
+
+    def delete_branch(self, owner, name, branch):
+        """A merged bot pull request's branch, and no other. Gone already (404,
+        or 422 `Reference does not exist`) is done."""
+        if not any(pattern.fullmatch(branch) for _, _, pattern in BOTS.values()) or ".." in branch:
+            raise Refusal(f"refusing to delete `{branch}`: not a dependabot or repin branch")
+        try:
+            self._api("-X", "DELETE",
+                      f"repos/{fan_out.q(owner)}/{fan_out.q(name)}/git/refs/heads/{branch}",
+                      missing_ok=True)
+        except Refusal as exc:
+            if "HTTP 422" not in str(exc):
+                raise
+
 
 # --------------------------------------------------------------------------
 # the command line
@@ -714,6 +1078,7 @@ def main(argv):
     go.add_argument("--n", required=True, type=int)
     go.add_argument("--head", required=True)
     go.add_argument("--action", required=True, choices=("merge", "refresh"))
+    go.add_argument("--kind", default="", choices=("", *BOTS))
     go.add_argument("--classes", default="classes.json")
     args = parser.parse_args(argv)
 
@@ -770,7 +1135,7 @@ def main(argv):
         writer = SweepGh(os.environ["SWEEP_WRITE_TOKEN"])
         try:
             done = act(reader, writer, args.owner, args.repo, args.n, args.head, args.action,
-                       classes, now_utc())
+                       classes, now_utc(), args.kind)
         except Skip as skip:
             done = f"skipped {args.owner}/{args.repo}#{args.n}: {skip}"
         fan_out.summary(fan_out.clean(done, 500) + "\n")
