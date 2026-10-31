@@ -1,0 +1,484 @@
+{
+  "__about__": {
+    "pull_request": "yadgarhq/gateway#159",
+    "recorded": "2026-10-31, read-only GETs as m-agahi",
+    "normalised": [
+      "recorded seconds after m-agahi merged it (2026-10-31T22:10:06Z): state closed -> open, merged true -> false",
+      "mergeable None -> true, mergeable_state 'unknown' -> clean",
+      "timeline: merged, closed, head_ref_deleted and referenced events dropped",
+      "base branch ref 113145290e758431d999ffa18831a966f19ce4bb (the merge itself) -> the pull request's base.sha",
+      "compare re-keyed to base.sha...head: diverged/behind 1 (the merge itself) -> ahead/behind 0",
+      "recorded 2026-10-31: the compare from the m-agahi merge commit's second parent to the (normalised) base tip, read for B3",
+      "added 2026-11-01, read-only: changed_files, the files listing, and each commit's message",
+      "added 2026-11-01, read-only: the branch's repository activity up to the recorded head; later entries dropped: ['branch_deletion by m-agahi']"
+    ],
+    "shape": "ADR-1106 dependabot pull request, up to date with ci / passed green on the head; it already carries a verified two-parent merge commit by m-agahi from a merge-method update-branch"
+  },
+  "repos/yadgarhq/gateway": {
+    "name": "gateway",
+    "private": false,
+    "visibility": "public",
+    "owner": {
+      "login": "yadgarhq"
+    },
+    "archived": false,
+    "disabled": false,
+    "fork": false,
+    "topics": ["yadgar-class-service", "yadgar-deployable"],
+    "default_branch": "main"
+  },
+  "repos/yadgarhq/gateway/pulls/159": {
+    "number": 159,
+    "state": "open",
+    "draft": false,
+    "locked": false,
+    "title": "build(deps): bump the minor-and-patch group with 5 updates",
+    "body": "Bumps the minor-and-patch group with 5 updates:\n\n| Package | From | To |\n| --- | --- | --- |\n| [hyper](https://github.com/hyperium/hyper) | `1.11.1` | `1.12.0` |\n| [hyper-util](https://github.com/hyperium/hyper-util) | `0.1.20` | `0.1.21` |\n| [redis](https://github.com/redis-rs/redis-rs) | `1.7.1` | `1.8.0` |\n| [tokio](https://github.com/tokio-rs/tokio) | `1.53.3` | `1.54.1` |\n| [uuid](https://github.com/uuid-rs/uuid) | `1.28.0` | `1.29.0` |\n\nUpdates `hyper` from 1.11.1 to 1.12.0\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/hyperium/hyper/releases\">hyper's releases</a>.</em></p>\n<blockquote>\n<h2>v1.12.0</h2>\n<h2>Features</h2>\n<ul>\n<li><strong>http1:</strong> add max_header_size limit for server and client (<a href=\"https://redirect.github.com/hyperium/hyper/issues/4183\">#4183</a>) (<a href=\"https://github.com/hyperium/hyper/commit/d1cd14eff392be63a2318d690cc9380723ec61a1\">d1cd14ef</a>, closes <a href=\"https://redirect.github.com/hyperium/hyper/issues/3832\">#3832</a>)</li>\n</ul>\n<h2>Bug Fixes</h2>\n<ul>\n<li><strong>http1:</strong>\n<ul>\n<li>withdraw a stale want when the client dispatcher takes a request (<a href=\"https://redirect.github.com/hyperium/hyper/issues/4208\">#4208</a>) (<a href=\"https://github.com/hyperium/hyper/commit/c44f1cc51c2bc45b502031a646d3d54315bd7a16\">c44f1cc5</a>)</li>\n<li>remove content-length if transfer-encoding is auto-added (<a href=\"https://redirect.github.com/hyperium/hyper/issues/4224\">#4224</a>) (<a href=\"https://github.com/hyperium/hyper/commit/69396fdd960629d69b09cc6c9b367ef8650c001d\">69396fdd</a>)</li>\n<li>always remove content-length if transfer-encoding is sent (<a href=\"https://redirect.github.com/hyperium/hyper/issues/4223\">#4223</a>) (<a href=\"https://github.com/hyperium/hyper/commit/a5d7fd7861598c0b8c857cb75240a75bcfbd96a3\">a5d7fd78</a>)</li>\n<li>let a Connection close token win over a later keep-alive (<a href=\"https://redirect.github.com/hyperium/hyper/issues/4201\">#4201</a>) (<a href=\"https://github.com/hyperium/hyper/commit/5dadff76d1cb5d21046218df3568569fbba8ed21\">5dadff76</a>)</li>\n<li>preserve hop-by-hop when setting close or keep-alive (<a href=\"https://redirect.github.com/hyperium/hyper/issues/4196\">#4196</a>) (<a href=\"https://github.com/hyperium/hyper/commit/74a39081ff1496970fb75da75c5282b23a9b69e5\">74a39081</a>)</li>\n</ul>\n</li>\n<li><strong>http2:</strong> do not reserve capacity for idle Upgraded streams (<a href=\"https://redirect.github.com/hyperium/hyper/issues/4198\">#4198</a>) (<a href=\"https://github.com/hyperium/hyper/commit/e89d0d93d9566210ee95aea234a00952ebc4a202\">e89d0d93</a>)</li>\n</ul>\n<h2>Everything</h2>\n<ul>\n<li>docs: fix typo responsibile -&gt; responsible by <a href=\"https://github.com/vaibhav8a\"><code>@\u200bvaibhav8a</code></a> in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4177\">hyperium/hyper#4177</a></li>\n<li>style: replace single-character lifetime names with descriptive names by <a href=\"https://github.com/dox4\"><code>@\u200bdox4</code></a> in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4173\">hyperium/hyper#4173</a></li>\n<li>refactor(http1): resolve collapsible_match lint by <a href=\"https://github.com/nakaryo716\"><code>@\u200bnakaryo716</code></a> in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4178\">hyperium/hyper#4178</a></li>\n<li>hyper Improvement Proposals by <a href=\"https://github.com/seanmonstar\"><code>@\u200bseanmonstar</code></a> in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4131\">hyperium/hyper#4131</a></li>\n<li>perf(body): simpler custom Incoming channel by <a href=\"https://github.com/seanmonstar\"><code>@\u200bseanmonstar</code></a> in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4168\">hyperium/hyper#4168</a></li>\n<li>docs(maintainers): add 0x676e67 as a collaborator by <a href=\"https://github.com/seanmonstar\"><code>@\u200bseanmonstar</code></a> in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4184\">hyperium/hyper#4184</a></li>\n<li>fix(ext): remove broken <code>OriginalHeaderOrder</code> doctest by <a href=\"https://github.com/cratelyn\"><code>@\u200bcratelyn</code></a> in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4188\">hyperium/hyper#4188</a></li>\n<li>build(deps): remove unused <code>futures-channel</code> from <code>http1</code> feature by <a href=\"https://github.com/0x676e67\"><code>@\u200b0x676e67</code></a> in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4185\">hyperium/hyper#4185</a></li>\n<li>chore(ci): update to cargo-check-external-types 0.5.0 by <a href=\"https://github.com/tottoto\"><code>@\u200btottoto</code></a> in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4189\">hyperium/hyper#4189</a></li>\n<li>style(lib): address ignored_unit_patterns lint by <a href=\"https://github.com/nakaryo716\"><code>@\u200bnakaryo716</code></a> in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4193\">hyperium/hyper#4193</a></li>\n<li>Preserve hop-by-hop when setting close or keep-alive by <a href=\"https://github.com/dtolnay\"><code>@\u200bdtolnay</code></a> in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4196\">hyperium/hyper#4196</a></li>\n<li>fix(http2): do not reserve capacity for idle Upgraded streams by <a href=\"https://github.com/Dev-next-gen\"><code>@\u200bDev-next-gen</code></a> in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4198\">hyperium/hyper#4198</a></li>\n<li>style(lib): Address clippy panics and missing_panics_doc lints by <a href=\"https://github.com/Siech0\"><code>@\u200bSiech0</code></a> in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4191\">hyperium/hyper#4191</a></li>\n<li>docs: fix typos in capi README, MSRV and governance docs by <a href=\"https://github.com/toyeshhm\"><code>@\u200btoyeshhm</code></a> in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4204\">hyperium/hyper#4204</a></li>\n<li>style(lib): Address trivial, low quantity clippy lints. by <a href=\"https://github.com/Siech0\"><code>@\u200bSiech0</code></a> in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4190\">hyperium/hyper#4190</a></li>\n<li>chore(clippy): allow clippy lints following 1.99.0 release by <a href=\"https://github.com/dswij\"><code>@\u200bdswij</code></a> in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4219\">hyperium/hyper#4219</a></li>\n<li>style: remove useless_borrows_in_formatting from the clippy allowlist by <a href=\"https://github.com/ump45nose\"><code>@\u200bump45nose</code></a> in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4220\">hyperium/hyper#4220</a></li>\n<li>style(h1): mark partial Debug impls as non-exhaustive by <a href=\"https://github.com/badimalex\"><code>@\u200bbadimalex</code></a> in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4218\">hyperium/hyper#4218</a></li>\n<li>style(lib): Address cast-possible-truncation clippy findings. by <a href=\"https://github.com/Siech0\"><code>@\u200bSiech0</code></a> in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4192\">hyperium/hyper#4192</a></li>\n<li>feat(http1): add max_header_size limit for server and client by <a href=\"https://github.com/Aditya-9-6\"><code>@\u200bAditya-9-6</code></a> in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4183\">hyperium/hyper#4183</a></li>\n<li>fix(http1): let a Connection close token win over a later keep-alive by <a href=\"https://github.com/shoemoney\"><code>@\u200bshoemoney</code></a> in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4201\">hyperium/hyper#4201</a></li>\n<li>fix(http1): always remove content-length if transfer-encoding is sent by <a href=\"https://github.com/seanmonstar\"><code>@\u200bseanmonstar</code></a> in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4223\">hyperium/hyper#4223</a></li>\n<li>fix(http1): remove invalid content-length if transfer-encoding is auto-added by <a href=\"https://github.com/seanmonstar\"><code>@\u200bseanmonstar</code></a> in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4224\">hyperium/hyper#4224</a></li>\n<li>fix(http1): withdraw a stale want when the client dispatcher takes a request by <a href=\"https://github.com/shodoco\"><code>@\u200bshodoco</code></a> in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4208\">hyperium/hyper#4208</a></li>\n<li>perf(body): skip waking a closed peer when a channel end drops by <a href=\"https://github.com/0x676e67\"><code>@\u200b0x676e67</code></a> in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4225\">hyperium/hyper#4225</a></li>\n<li>Prepare v1.12.0 by <a href=\"https://github.com/seanmonstar\"><code>@\u200bseanmonstar</code></a> in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4226\">hyperium/hyper#4226</a></li>\n</ul>\n<h2>New Contributors</h2>\n<ul>\n<li><a href=\"https://github.com/vaibhav8a\"><code>@\u200bvaibhav8a</code></a> made their first contribution in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4177\">hyperium/hyper#4177</a></li>\n<li><a href=\"https://github.com/dox4\"><code>@\u200bdox4</code></a> made their first contribution in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4173\">hyperium/hyper#4173</a></li>\n<li><a href=\"https://github.com/dtolnay\"><code>@\u200bdtolnay</code></a> made their first contribution in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4196\">hyperium/hyper#4196</a></li>\n<li><a href=\"https://github.com/Dev-next-gen\"><code>@\u200bDev-next-gen</code></a> made their first contribution in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4198\">hyperium/hyper#4198</a></li>\n<li><a href=\"https://github.com/Siech0\"><code>@\u200bSiech0</code></a> made their first contribution in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4191\">hyperium/hyper#4191</a></li>\n<li><a href=\"https://github.com/toyeshhm\"><code>@\u200btoyeshhm</code></a> made their first contribution in <a href=\"https://redirect.github.com/hyperium/hyper/pull/4204\">hyperium/hyper#4204</a></li>\n</ul>\n<!-- raw HTML omitted -->\n</blockquote>\n<p>... (truncated)</p>\n</details>\n<details>\n<summary>Changelog</summary>\n<p><em>Sourced from <a href=\"https://github.com/hyperium/hyper/blob/master/CHANGELOG.md\">hyper's changelog</a>.</em></p>\n<blockquote>\n<h2>v1.12.0 (2026-10-06)</h2>\n<h4>Bug Fixes</h4>\n<ul>\n<li><strong>http1:</strong>\n<ul>\n<li>withdraw a stale want when the client dispatcher takes a request (<a href=\"https://redirect.github.com/hyperium/hyper/issues/4208\">#4208</a>) (<a href=\"https://github.com/hyperium/hyper/commit/c44f1cc51c2bc45b502031a646d3d54315bd7a16\">c44f1cc5</a>)</li>\n<li>remove content-length if transfer-encoding is auto-added (<a href=\"https://redirect.github.com/hyperium/hyper/issues/4224\">#4224</a>) (<a href=\"https://github.com/hyperium/hyper/commit/69396fdd960629d69b09cc6c9b367ef8650c001d\">69396fdd</a>)</li>\n<li>always remove content-length if transfer-encoding is sent (<a href=\"https://redirect.github.com/hyperium/hyper/issues/4223\">#4223</a>) (<a href=\"https://github.com/hyperium/hyper/commit/a5d7fd7861598c0b8c857cb75240a75bcfbd96a3\">a5d7fd78</a>)</li>\n<li>let a Connection close token win over a later keep-alive (<a href=\"https://redirect.github.com/hyperium/hyper/issues/4201\">#4201</a>) (<a href=\"https://github.com/hyperium/hyper/commit/5dadff76d1cb5d21046218df3568569fbba8ed21\">5dadff76</a>)</li>\n<li>preserve hop-by-hop when setting close or keep-alive (<a href=\"https://redirect.github.com/hyperium/hyper/issues/4196\">#4196</a>) (<a href=\"https://github.com/hyperium/hyper/commit/74a39081ff1496970fb75da75c5282b23a9b69e5\">74a39081</a>)</li>\n</ul>\n</li>\n<li><strong>http2:</strong> do not reserve capacity for idle Upgraded streams (<a href=\"https://redirect.github.com/hyperium/hyper/issues/4198\">#4198</a>) (<a href=\"https://github.com/hyperium/hyper/commit/e89d0d93d9566210ee95aea234a00952ebc4a202\">e89d0d93</a>)</li>\n</ul>\n<h4>Features</h4>\n<ul>\n<li><strong>http1:</strong> add max_header_size limit for server and client (<a href=\"https://redirect.github.com/hyperium/hyper/issues/4183\">#4183</a>) (<a href=\"https://github.com/hyperium/hyper/commit/d1cd14eff392be63a2318d690cc9380723ec61a1\">d1cd14ef</a>, closes <a href=\"https://redirect.github.com/hyperium/hyper/issues/3832\">#3832</a>)</li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a href=\"https://github.com/hyperium/hyper/commit/7f67699ce32d717081deb7018b4da7d679277ac0\"><code>7f67699</code></a> v1.12.0</li>\n<li><a href=\"https://github.com/hyperium/hyper/commit/254bf1271bf4385edd743316ca7c508b3c77d6cb\"><code>254bf12</code></a> perf(body): skip waking a closed peer when a channel end drops (<a href=\"https://redirect.github.com/hyperium/hyper/issues/4225\">#4225</a>)</li>\n<li><a href=\"https://github.com/hyperium/hyper/commit/c44f1cc51c2bc45b502031a646d3d54315bd7a16\"><code>c44f1cc</code></a> fix(http1): withdraw a stale want when the client dispatcher takes a request ...</li>\n<li><a href=\"https://github.com/hyperium/hyper/commit/69396fdd960629d69b09cc6c9b367ef8650c001d\"><code>69396fd</code></a> fix(http1): remove content-length if transfer-encoding is auto-added (<a href=\"https://redirect.github.com/hyperium/hyper/issues/4224\">#4224</a>)</li>\n<li><a href=\"https://github.com/hyperium/hyper/commit/a5d7fd7861598c0b8c857cb75240a75bcfbd96a3\"><code>a5d7fd7</code></a> fix(http1): always remove content-length if transfer-encoding is sent (<a href=\"https://redirect.github.com/hyperium/hyper/issues/4223\">#4223</a>)</li>\n<li><a href=\"https://github.com/hyperium/hyper/commit/5dadff76d1cb5d21046218df3568569fbba8ed21\"><code>5dadff7</code></a> fix(http1): let a Connection close token win over a later keep-alive (<a href=\"https://redirect.github.com/hyperium/hyper/issues/4201\">#4201</a>)</li>\n<li><a href=\"https://github.com/hyperium/hyper/commit/d1cd14eff392be63a2318d690cc9380723ec61a1\"><code>d1cd14e</code></a> feat(http1): add max_header_size limit for server and client (<a href=\"https://redirect.github.com/hyperium/hyper/issues/4183\">#4183</a>)</li>\n<li><a href=\"https://github.com/hyperium/hyper/commit/714c7cf46fd405c88eb34c2f243ae5b146ba8f07\"><code>714c7cf</code></a> style(lib): address cast-possible-truncation clippy findings (<a href=\"https://redirect.github.com/hyperium/hyper/issues/4192\">#4192</a>)</li>\n<li><a href=\"https://github.com/hyperium/hyper/commit/0d474402c20c17939c30aaecde56d1a3e21b2b0a\"><code>0d47440</code></a> style(lib): mark partial Debug impls as non-exhaustive (<a href=\"https://redirect.github.com/hyperium/hyper/issues/4218\">#4218</a>)</li>\n<li><a href=\"https://github.com/hyperium/hyper/commit/da3b1b197c954ac5454a92562fe3d729a87cba56\"><code>da3b1b1</code></a> style(lib): remove useless_borrows_in_formatting from the clippy allowlist (#...</li>\n<li>Additional commits viewable in <a href=\"https://github.com/hyperium/hyper/compare/v1.11.1...v1.12.0\">compare view</a></li>\n</ul>\n</details>\n<br />\n\nUpdates `hyper-util` from 0.1.20 to 0.1.21\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/hyperium/hyper-util/releases\">hyper-util's releases</a>.</em></p>\n<blockquote>\n<h2>v0.1.21</h2>\n<h2>Additions</h2>\n<ul>\n<li>Add crate-level documentation. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/327\">#327</a>)</li>\n<li>Add <code>client::legacy::Builder::http2_header_table_size()</code> method. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/274\">#274</a>)</li>\n<li>Add <code>client::legacy::Builder::http2_max_concurrent_streams()</code> method. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/274\">#274</a>)</li>\n<li>Add <code>client::legacy::Builder::http2_max_local_error_reset_streams()</code> method. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/277\">#277</a>)</li>\n<li>Add <code>client::legacy::connect::HttpConnector::set_mark()</code> method. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/303\">#303</a>)</li>\n<li>Add <code>rt::tracing::WithSpanExecutor&lt;E&gt;</code>, <code>hyper_util::rt::tracing::CurrentSpanExecutor&lt;E&gt;</code>, and <code>hyper_util::rt::tracing::MkSpanExecutor&lt;E, F&gt;</code> executors. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/323\">#323</a>)</li>\n</ul>\n<h2>Fixes</h2>\n<ul>\n<li>Fix <code>client::legacy::Client</code> so that it properly validates CONNECT responses. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/315\">#315</a>)</li>\n<li>Fix <code>client::legacy::Client</code> to cancel the idle interval once its pool empties. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/292\">#292</a>)</li>\n<li>Fix <code>client::legacy::Client</code> to properly handle IPv6 addresses when using a SOCKS proxy. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/302\">#302</a>)</li>\n<li>Fix <code>client::pool::cache</code> to preserve readiness with clones. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/297\">#297</a>)</li>\n<li>Fix <code>client::pool::cache</code> to wake its waiters in FIFO order. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/298\">#298</a>)</li>\n<li>Fix <code>client::pool::singleton::Singleton</code> to properly handle cancellation. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/299\">#299</a>)</li>\n<li>Fix <code>client::pool::singleton::Singleton</code> to share errors with all waiters. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/296\">#296</a>)</li>\n<li>Fix <code>client::proxy::matcher</code> handling for IP wildcards. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/309\">#309</a>)</li>\n<li>The <code>tokio/net</code> feature is narrowed to the <code>client-legacy</code> feature flag, from the <code>client</code> feature flag. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/276\">#276</a>)</li>\n<li>Various fixes to the <code>client::legacy::Client</code>'s SOCKS proxying. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/302\">#302</a>) (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/307\">#307</a>) (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/308\">#308</a>) (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/310\">#310</a>)</li>\n</ul>\n<h2>Changes</h2>\n<p>This release contains a minor behavioral change for users of the <code>tracing</code>\nfeature flag to be aware of.</p>\n<p>This feature flag was introduced in v0.1.11. When enabled,\n<code>rt::TokioExecutor&lt;E&gt;</code> began propagating the currently active <code>tracing::Span</code>\nto spawned tasks when <code>hyper::rt::Executor::execute()</code> is called. This caused\nissues for some users, due to background tasks keeping a span open for the\nduration of a long-lived connection.</p>\n<p>This behavior has now been removed from <code>rt::TokioExecutor&lt;E&gt;</code>\n(<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/322\">#322</a>) by default. A\ncollection of executor wrappers have been added to a new <code>rt::tracing</code>\nsubmodule, to provide facilities for instrumenting a client or server's spawned\ntasks. See the module-level documentation of <code>rt::tracing</code> for more\ninformation.</p>\n<p>To temporarily preserve the previous <code>rt::TokioExecutor&lt;E&gt;</code> span propagation\nbehavior, enable the <code>rt-tracing-exec-force</code> feature. Note that this feature\nflag will be removed in a future release.</p>\n<p>This release bumps the minimal supported Rust version (MSRV) from 1.64 to 1.85.</p>\n<p>This release bumps the rust edition from 2021 to 2024.</p>\n<!-- raw HTML omitted -->\n</blockquote>\n<p>... (truncated)</p>\n</details>\n<details>\n<summary>Changelog</summary>\n<p><em>Sourced from <a href=\"https://github.com/hyperium/hyper-util/blob/master/CHANGELOG.md\">hyper-util's changelog</a>.</em></p>\n<blockquote>\n<h1>0.1.21 (2026-09-24)</h1>\n<p>This release bumps the minimal supported Rust version (MSRV) from 1.64 to 1.85.</p>\n<p>This release bumps the rust edition from 2021 to 2024.</p>\n<h2>Additions</h2>\n<ul>\n<li>Add crate-level documentation. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/327\">#327</a>)</li>\n<li>Add <code>client::legacy::Builder::http2_header_table_size()</code> method. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/274\">#274</a>)</li>\n<li>Add <code>client::legacy::Builder::http2_max_concurrent_streams()</code> method. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/274\">#274</a>)</li>\n<li>Add <code>client::legacy::Builder::http2_max_local_error_reset_streams()</code> method. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/277\">#277</a>)</li>\n<li>Add <code>client::legacy::connect::HttpConnector::set_mark()</code> method. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/303\">#303</a>)</li>\n<li>Add <code>rt::tracing::WithSpanExecutor&lt;E&gt;</code>, <code>hyper_util::rt::tracing::CurrentSpanExecutor&lt;E&gt;</code>, and <code>hyper_util::rt::tracing::MkSpanExecutor&lt;E, F&gt;</code> executors. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/323\">#323</a>)</li>\n</ul>\n<h2>Fixes</h2>\n<ul>\n<li>Fix <code>client::legacy::Client</code> so that it properly validates CONNECT responses. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/315\">#315</a>)</li>\n<li>Fix <code>client::legacy::Client</code> to cancel the idle interval once its pool empties. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/292\">#292</a>)</li>\n<li>Fix <code>client::legacy::Client</code> to properly handle IPv6 addresses when using a SOCKS proxy. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/302\">#302</a>)</li>\n<li>Fix <code>client::pool::cache</code> to preserve readiness with clones. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/297\">#297</a>)</li>\n<li>Fix <code>client::pool::cache</code> to wake its waiters in FIFO order. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/298\">#298</a>)</li>\n<li>Fix <code>client::pool::singleton::Singleton</code> to properly handle cancellation. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/299\">#299</a>)</li>\n<li>Fix <code>client::pool::singleton::Singleton</code> to share errors with all waiters. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/296\">#296</a>)</li>\n<li>Fix <code>client::proxy::matcher</code> handling for IP wildcards. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/309\">#309</a>)</li>\n<li>The <code>tokio/net</code> feature is narrowed to the <code>client-legacy</code> feature flag, from the <code>client</code> feature flag. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/276\">#276</a>)</li>\n<li>Various fixes to the <code>client::legacy::Client</code>'s SOCKS proxying. (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/302\">#302</a>) (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/307\">#307</a>) (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/308\">#308</a>) (<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/310\">#310</a>)</li>\n</ul>\n<h2>Changes</h2>\n<p>This release contains a minor behavioral change for users of the <code>tracing</code>\nfeature flag to be aware of.</p>\n<p>This feature flag was introduced in v0.1.11. When enabled,\n<code>rt::TokioExecutor&lt;E&gt;</code> began propagating the currently active <code>tracing::Span</code>\nto spawned tasks when <code>hyper::rt::Executor::execute()</code> is called. This caused\nissues for some users, due to background tasks keeping a span open for the\nduration of a long-lived connection.</p>\n<p>This behavior has now been removed from <code>rt::TokioExecutor&lt;E&gt;</code>\n(<a href=\"https://redirect.github.com/hyperium/hyper-util/pull/322\">#322</a>) by default. A\ncollection of executor wrappers have been added to a new <code>rt::tracing</code>\nsubmodule, to provide facilities for instrumenting a client or server's spawned\ntasks. See the module-level documentation of <code>rt::tracing</code> for more\ninformation.</p>\n<p>To temporarily preserve the previous <code>rt::TokioExecutor&lt;E&gt;</code> span propagation\nbehavior, enable the <code>rt-tracing-exec-force</code> feature. Note that this feature\nflag will be removed in a future release.</p>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a href=\"https://github.com/hyperium/hyper-util/commit/23a868965964c1d6bb1b94f30ba4c420a4bebe7c\"><code>23a8689</code></a> v0.1.21</li>\n<li><a href=\"https://github.com/hyperium/hyper-util/commit/cdb2346fed0af8283d5358d1d3fd5f5064db41d7\"><code>cdb2346</code></a> doc(client/pool): add <code>broken_intra_doc_links</code> allowance (<a href=\"https://redirect.github.com/hyperium/hyper-util/issues/326\">#326</a>)</li>\n<li><a href=\"https://github.com/hyperium/hyper-util/commit/13b61105d417524c2c5b4738d6907a7534dda858\"><code>13b6110</code></a> chore(error): remove disabled <code>hyper_util::error</code> submodule (<a href=\"https://redirect.github.com/hyperium/hyper-util/issues/325\">#325</a>)</li>\n<li><a href=\"https://github.com/hyperium/hyper-util/commit/b9ee45111645900e0557aecd9f19cfb5fd01d77f\"><code>b9ee451</code></a> docs(lib): add crate-level documentation (<a href=\"https://redirect.github.com/hyperium/hyper-util/issues/327\">#327</a>)</li>\n<li><a href=\"https://github.com/hyperium/hyper-util/commit/d6b7d7e6a0fc568a1485a8199254305be50dde26\"><code>d6b7d7e</code></a> feat(rt/tracing): introduce tracing executors (<a href=\"https://redirect.github.com/hyperium/hyper-util/issues/323\">#323</a>)</li>\n<li><a href=\"https://github.com/hyperium/hyper-util/commit/f2da9150f081a6a74e40bd82b0b51f91216fa23b\"><code>f2da915</code></a> feat(client): add HttpConnector::set_mark for SO_MARK (<a href=\"https://redirect.github.com/hyperium/hyper-util/issues/303\">#303</a>)</li>\n<li><a href=\"https://github.com/hyperium/hyper-util/commit/4dbd4945f566e2b2a40d247c4281164258bbe1a5\"><code>4dbd494</code></a> feat(rt): change <code>TokioExecutor</code> to not trace, add rt-tracing-exec-force feat...</li>\n<li><a href=\"https://github.com/hyperium/hyper-util/commit/d480d9f802c7062cb0aeece9ee0020ecce840521\"><code>d480d9f</code></a> fix(client): parse proxy CONNECT response with httparse (<a href=\"https://redirect.github.com/hyperium/hyper-util/issues/315\">#315</a>)</li>\n<li><a href=\"https://github.com/hyperium/hyper-util/commit/7e0958bb537fb8b7901bae60d43a322c8f9a8a63\"><code>7e0958b</code></a> chore(ci): simplify msrv check (<a href=\"https://redirect.github.com/hyperium/hyper-util/issues/317\">#317</a>)</li>\n<li><a href=\"https://github.com/hyperium/hyper-util/commit/07345689c815e115e616ce78a6a02c5df6c7081f\"><code>0734568</code></a> chore(ci): update to actions/checkout@v7 (<a href=\"https://redirect.github.com/hyperium/hyper-util/issues/316\">#316</a>)</li>\n<li>Additional commits viewable in <a href=\"https://github.com/hyperium/hyper-util/compare/v0.1.20...v0.1.21\">compare view</a></li>\n</ul>\n</details>\n<br />\n\nUpdates `redis` from 1.7.1 to 1.8.0\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/redis-rs/redis-rs/releases\">redis's releases</a>.</em></p>\n<blockquote>\n<h2>redis-1.8.0</h2>\n<h4>Changes &amp; Bug fixes</h4>\n<ul>\n<li>Use a const chunking function in tuple impl of FromRedisValue (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2424\">#2424</a> by <a href=\"https://github.com/nihohit\"><code>@\u200bnihohit</code></a>)</li>\n<li>lint: Add <code>FromStr</code> for <code>NodeAddress</code> (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2444\">#2444</a> by <a href=\"https://github.com/somechris\"><code>@\u200bsomechris</code></a>)</li>\n<li>Add Debug implementation to AsyncConnectionConfig, PubSubSink and dependent types (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2450\">#2450</a> by <a href=\"https://github.com/nihohit\"><code>@\u200bnihohit</code></a>)</li>\n<li>Add Debug implementation to Sentinel configuration types (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2451\">#2451</a> by <a href=\"https://github.com/nihohit\"><code>@\u200bnihohit</code></a>)</li>\n<li>Add debug impl for cluster config types (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2453\">#2453</a> by <a href=\"https://github.com/nihohit\"><code>@\u200bnihohit</code></a>)</li>\n<li>Add Debug impls for command input types (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2454\">#2454</a> by <a href=\"https://github.com/nihohit\"><code>@\u200bnihohit</code></a>)</li>\n<li>Add Debug impls for return types (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2455\">#2455</a> by <a href=\"https://github.com/nihohit\"><code>@\u200bnihohit</code></a>)</li>\n<li>Add FLAT vector field support for <code>FT.CREATE</code> [5/8] (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2319\">#2319</a> by <a href=\"https://github.com/StefanPalashev\"><code>@\u200bStefanPalashev</code></a>)</li>\n<li>Replace assert with an error when a multi-slot shard returns a wrong result count (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2471\">#2471</a> by <a href=\"https://github.com/17krishna8\"><code>@\u200b17krishna8</code></a>)</li>\n<li>Handle TLS handshake errors when connecting with a timeout (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2473\">#2473</a> by <a href=\"https://github.com/17krishna8\"><code>@\u200b17krishna8</code></a>)</li>\n<li>Add HNSW vector field support for <code>FT.CREATE</code> [6/8] (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2467\">#2467</a> by <a href=\"https://github.com/StefanPalashev\"><code>@\u200bStefanPalashev</code></a>)</li>\n<li>Add SVS-VAMANA vector field support for <code>FT.CREATE</code> [7/8] (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2468\">#2468</a> by <a href=\"https://github.com/StefanPalashev\"><code>@\u200bStefanPalashev</code></a>)</li>\n<li>Route <code>FT.CREATE</code> as a keyless command and add cluster integration tests [8/8] (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2469\">#2469</a> by <a href=\"https://github.com/StefanPalashev\"><code>@\u200bStefanPalashev</code></a>)</li>\n<li>Reject mismatched shard response lengths in logical_aggregate (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2472\">#2472</a> by <a href=\"https://github.com/17krishna8\"><code>@\u200b17krishna8</code></a>)</li>\n<li>Redact secrets in Debug for BasicAuth and ClientCertificate (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2487\">#2487</a> by <a href=\"https://github.com/varun3257\"><code>@\u200bvarun3257</code></a>)</li>\n<li>AsyncPubsub: await all confirmations of subscription commands (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2475\">#2475</a> by <a href=\"https://github.com/nihohit\"><code>@\u200bnihohit</code></a>)</li>\n<li>Multiplexed Connection: await all confirmations of subscription commands (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2491\">#2491</a> by <a href=\"https://github.com/nihohit\"><code>@\u200bnihohit</code></a>)</li>\n<li>fix(streams): parse the fields of XINFO STREAM's first and last entries (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2494\">#2494</a> by <a href=\"https://github.com/LindseyZ1205\"><code>@\u200bLindseyZ1205</code></a>)</li>\n<li>Support custom root certificates under <code>tls-native-tls</code> (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2488\">#2488</a> by <a href=\"https://github.com/MohitKS5\"><code>@\u200bMohitKS5</code></a>)</li>\n<li>Reject mixed TLS initial nodes regardless of order in ClusterClientBuilder (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2496\">#2496</a> by <a href=\"https://github.com/varun3257\"><code>@\u200bvarun3257</code></a>)</li>\n<li>fix(types): forward num_of_args and describe_numeric_behavior for Cow (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2500\">#2500</a> by <a href=\"https://github.com/LindseyZ1205\"><code>@\u200bLindseyZ1205</code></a>)</li>\n<li>fix(connection-manager, cluster): await all confirmations of subscription commands (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2504\">#2504</a> by <a href=\"https://github.com/nihohit\"><code>@\u200bnihohit</code></a>)</li>\n<li>sentinel: ask the next sentinel when one has no valid master for the name (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2427\">#2427</a> by <a href=\"https://github.com/1jeffchristensen\"><code>@\u200b1jeffchristensen</code></a>)</li>\n</ul>\n<h4>CI &amp; operational improvements</h4>\n<ul>\n<li>ci: Fix Valkey Bloom module caching (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2420\">#2420</a> by <a href=\"https://github.com/nkaradzhov\"><code>@\u200bnkaradzhov</code></a>)</li>\n<li>Add test harness and CI support for the Search module [4/8] (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2318\">#2318</a> by <a href=\"https://github.com/StefanPalashev\"><code>@\u200bStefanPalashev</code></a>)</li>\n<li>doc: Add the environment variable for the search module (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2429\">#2429</a> by <a href=\"https://github.com/somechris\"><code>@\u200bsomechris</code></a>)</li>\n<li>feat: add a seeded randomized test to ensure that interleaved MOVED/broken_connection does not cause a deadlock (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2425\">#2425</a> by <a href=\"https://github.com/virratanasangpunth\"><code>@\u200bvirratanasangpunth</code></a>)</li>\n<li>Fix new nightly lints lints (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2460\">#2460</a> by <a href=\"https://github.com/nihohit\"><code>@\u200bnihohit</code></a>)</li>\n<li>ci: Switch <code>lint-and-check</code> to stabilized dependencies format (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2477\">#2477</a> by <a href=\"https://github.com/somechris\"><code>@\u200bsomechris</code></a>)</li>\n<li>Pin all github runners (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2501\">#2501</a> by <a href=\"https://github.com/nihohit\"><code>@\u200bnihohit</code></a>)</li>\n<li>Add asserts on error content in tests. (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2498\">#2498</a> by <a href=\"https://github.com/nihohit\"><code>@\u200bnihohit</code></a>)</li>\n<li>Improve caching (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2497\">#2497</a> by <a href=\"https://github.com/nihohit\"><code>@\u200bnihohit</code></a>)</li>\n<li>Pick the parser microbenchmark harnesses over from <a href=\"https://redirect.github.com/redis-rs/redis-rs/issues/2199\">#2199</a> (<a href=\"https://redirect.github.com/redis-rs/redis-rs/pull/2484\">#2484</a> by <a href=\"https://github.com/nihohit\"><code>@\u200bnihohit</code></a>)</li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a href=\"https://github.com/redis-rs/redis-rs/commit/fec5ef0127a34a3e2096bbc014f18305859223e3\"><code>fec5ef0</code></a> Prepare version 1.8.0 (<a href=\"https://redirect.github.com/redis-rs/redis-rs/issues/2507\">#2507</a>)</li>\n<li><a href=\"https://github.com/redis-rs/redis-rs/commit/9758f38650eabaca06688d5739252ff2f327fd41\"><code>9758f38</code></a> sentinel: ask the next sentinel when one has no valid master for the name (<a href=\"https://redirect.github.com/redis-rs/redis-rs/issues/2\">#2</a>...</li>\n<li><a href=\"https://github.com/redis-rs/redis-rs/commit/1d666d18747905dbfa4640e24e28ffb55a93f9b3\"><code>1d666d1</code></a> fix(connection-manager, cluster): await all confirmations of subscription com...</li>\n<li><a href=\"https://github.com/redis-rs/redis-rs/commit/a61f7358e9b0644a4acb96a332bb14dd5fa26efd\"><code>a61f735</code></a> fix(types): forward num_of_args and describe_numeric_behavior for Cow (<a href=\"https://redirect.github.com/redis-rs/redis-rs/issues/2500\">#2500</a>)</li>\n<li><a href=\"https://github.com/redis-rs/redis-rs/commit/d7f0bcc196e9d3efb60b4322a9b5abcb7776f4d9\"><code>d7f0bcc</code></a> build(deps): bump xxhash-rust from 0.8.15 to 0.8.16 (<a href=\"https://redirect.github.com/redis-rs/redis-rs/issues/2503\">#2503</a>)</li>\n<li><a href=\"https://github.com/redis-rs/redis-rs/commit/ceec30970eacfd398d800303b2320bc813e44f82\"><code>ceec309</code></a> benches: bring the parser microbenchmark harnesses over from pr-2199 (<a href=\"https://redirect.github.com/redis-rs/redis-rs/issues/2484\">#2484</a>)</li>\n<li><a href=\"https://github.com/redis-rs/redis-rs/commit/78e1da0f02d6a0c2564efdf02d1f65cdb8afd3d8\"><code>78e1da0</code></a> Improve caching (<a href=\"https://redirect.github.com/redis-rs/redis-rs/issues/2497\">#2497</a>)</li>\n<li><a href=\"https://github.com/redis-rs/redis-rs/commit/f54cc502c50aedf39456fe6355fd322a5853c6d3\"><code>f54cc50</code></a> Add asserts on error content in tests. (<a href=\"https://redirect.github.com/redis-rs/redis-rs/issues/2498\">#2498</a>)</li>\n<li><a href=\"https://github.com/redis-rs/redis-rs/commit/d415e4b684b1305e3535a0d5786bf6ce41225b6c\"><code>d415e4b</code></a> Pin all github runners (<a href=\"https://redirect.github.com/redis-rs/redis-rs/issues/2501\">#2501</a>)</li>\n<li><a href=\"https://github.com/redis-rs/redis-rs/commit/3911503acfe7c0f243e7045f08ed2bdf59ab97cf\"><code>3911503</code></a> Reject mixed TLS initial nodes regardless of order in ClusterClientBuilder (#...</li>\n<li>Additional commits viewable in <a href=\"https://github.com/redis-rs/redis-rs/compare/redis-1.7.1...redis-1.8.0\">compare view</a></li>\n</ul>\n</details>\n<br />\n\nUpdates `tokio` from 1.53.3 to 1.54.1\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/tokio-rs/tokio/releases\">tokio's releases</a>.</em></p>\n<blockquote>\n<h2>Tokio v1.54.1</h2>\n<h1>1.54.1 (October 21st, 2026)</h1>\n<h3>Fixed</h3>\n<ul>\n<li>time: revert &quot;remove the runtime handle from timers&quot; (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8692\">#8692</a>)</li>\n</ul>\n<p><a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8692\">#8692</a>: <a href=\"https://redirect.github.com/tokio-rs/tokio/pull/8692\">tokio-rs/tokio#8692</a></p>\n<h2>Tokio v1.54.0</h2>\n<h1>1.54.0 (October 19th, 2026)</h1>\n<p>The 1.54.0 release includes all changes up to 1.53.3.</p>\n<p>The MSRV is increased to 1.85. (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8514\">#8514</a>)</p>\n<h3>Added</h3>\n<ul>\n<li>fs: add <code>File::set_times</code>, <code>File::set_modified</code>, and <code>fs::FileTimes</code> (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8504\">#8504</a>)</li>\n<li>net: implement <code>Default</code> for <code>named_pipe::{ClientOptions, ServerOptions}</code> (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8378\">#8378</a>)</li>\n<li>runtime: add <code>Builder::max_io_events_per_busy_tick</code> (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8410\">#8410</a>)</li>\n<li>runtime: stabilize <code>tokio::runtime::worker_index()</code> (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8431\">#8431</a>)</li>\n<li>sync: add <code>SemaphorePermit::semaphore()</code> (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8482\">#8482</a>)</li>\n<li>sync: add <code>blocking_acquire</code> methods to <code>Semaphore</code> (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8269\">#8269</a>)</li>\n<li>sync: add <code>watch::Receiver::is_closed</code> (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8481\">#8481</a>)</li>\n<li>wasm: support JSPI for Emscripten target (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8285\">#8285</a>, <a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8627\">#8627</a>)</li>\n<li>wasm: support the <code>wasm32-unknown-emscripten</code> target (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8281\">#8281</a>, <a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8422\">#8422</a>, <a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8528\">#8528</a>, <a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8628\">#8628</a>)</li>\n</ul>\n<h3>Changed</h3>\n<ul>\n<li>fs: reject zero in <code>File::set_max_buf_size</code> (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8449\">#8449</a>)</li>\n<li>io: make <code>copy_buf</code> cooperative (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8459\">#8459</a>)</li>\n<li>io: panic when <code>BufReader</code> or <code>BufStream</code> is created with zero capacity (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8494\">#8494</a>)</li>\n<li>io: panic when in-memory pipe is created with zero capacity (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8397\">#8397</a>)</li>\n<li>io: reject zero buffer size in <code>copy_bidirectional_with_sizes</code> (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8454\">#8454</a>)</li>\n<li>io: support vectored writes in <code>Sink</code> (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8663\">#8663</a>)</li>\n<li>net: start <code>UnixStream::pair</code> and <code>UnixDatagram::pair</code> sockets as writable (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8444\">#8444</a>)</li>\n<li>net: start accepted sockets as readable and writable (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8435\">#8435</a>)</li>\n<li>net: support <code>UCred</code> on Fuchsia (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8257\">#8257</a>)</li>\n<li>process: use <code>mio::unix::pipe</code> for Unix child stdio (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8603\">#8603</a>)</li>\n<li>runtime: cache-pad the shared injection queue and idle state (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8622\">#8622</a>)</li>\n<li>runtime: decide auto-boxing of spawned futures at monomorphization time (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8414\">#8414</a>)</li>\n<li>runtime: make <code>enable_io</code> available whenever <code>rt</code> is enabled (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8387\">#8387</a>)</li>\n<li>runtime: move <code>block_in_place</code> setup into a non-generic function (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8315\">#8315</a>)</li>\n<li>runtime: move the multi-thread inject queue to its own mutex (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8382\">#8382</a>)</li>\n<li>runtime: panic when <code>max_io_events_per_tick</code> is zero (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8476\">#8476</a>)</li>\n<li>runtime: suggest <code>.await</code> in nested <code>block_on</code> panic message (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8501\">#8501</a>)</li>\n<li>sync: avoid atomic reader count in broadcast slots (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8357\">#8357</a>)</li>\n<li>sync: use acquire/release orderings in <code>Notify</code> (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8325\">#8325</a>)</li>\n<li>time: remove the runtime handle from timers (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8458\">#8458</a>)</li>\n</ul>\n<!-- raw HTML omitted -->\n</blockquote>\n<p>... (truncated)</p>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a href=\"https://github.com/tokio-rs/tokio/commit/b53b2001ed2ccfd9b87e32a0c6da1a1eebdc80b8\"><code>b53b200</code></a> chore: prepare Tokio v1.54.1 (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8693\">#8693</a>)</li>\n<li><a href=\"https://github.com/tokio-rs/tokio/commit/5ed619bbaba87357ee5103d71b75e7c84cad99c9\"><code>5ed619b</code></a> time: revert &quot;remove the runtime handle from timers&quot; (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8692\">#8692</a>)</li>\n<li><a href=\"https://github.com/tokio-rs/tokio/commit/66d34e45c9c850ed72bc61f2ad107368217f040d\"><code>66d34e4</code></a> chore: prepare Tokio v1.54.0 (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8667\">#8667</a>)</li>\n<li><a href=\"https://github.com/tokio-rs/tokio/commit/0d322ce79aef3df11d2bfa87d379ac1d06168ade\"><code>0d322ce</code></a> io: support vectored writes in sink (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8663\">#8663</a>)</li>\n<li><a href=\"https://github.com/tokio-rs/tokio/commit/4167c5634ef9cd091cc5b37156f04cfdb0595414\"><code>4167c56</code></a> codec: expose I/O sources from codec errors (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8665\">#8665</a>)</li>\n<li><a href=\"https://github.com/tokio-rs/tokio/commit/cdd9dae3aa5056e23dc4d5bc4f852ab8fbf27aff\"><code>cdd9dae</code></a> fs: propagate iouring stress test failures (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8644\">#8644</a>)</li>\n<li><a href=\"https://github.com/tokio-rs/tokio/commit/52ac7816230efabcae6fcc09cbe7ae630a48eddf\"><code>52ac781</code></a> ci: run the emscripten JSPI tests as an auto-initialized ES module (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8640\">#8640</a>)</li>\n<li><a href=\"https://github.com/tokio-rs/tokio/commit/4890d027f8a566ccf081e7f019ed766f780df1af\"><code>4890d02</code></a> stream: implement <code>FusedStream</code> for <code>JoinSetStream</code> (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8629\">#8629</a>)</li>\n<li><a href=\"https://github.com/tokio-rs/tokio/commit/a6bd8e170c4e895fab26024bdfeea1c568567545\"><code>a6bd8e1</code></a> wasm: check Emscripten version when using JSPI (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8627\">#8627</a>)</li>\n<li><a href=\"https://github.com/tokio-rs/tokio/commit/9dd749d33408ffee1a4fd7c462546651416428a8\"><code>9dd749d</code></a> Merge 'tokio-1.53.3' into 'master' (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8641\">#8641</a>)</li>\n<li>Additional commits viewable in <a href=\"https://github.com/tokio-rs/tokio/compare/tokio-1.53.3...tokio-1.54.1\">compare view</a></li>\n</ul>\n</details>\n<br />\n\nUpdates `uuid` from 1.28.0 to 1.29.0\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/uuid-rs/uuid/releases\">uuid's releases</a>.</em></p>\n<blockquote>\n<h2>v1.29.0</h2>\n<h2>What's Changed</h2>\n<ul>\n<li>Add versioned constructors to NonNilUuid by <a href=\"https://github.com/RanaPriyansh\"><code>@\u200bRanaPriyansh</code></a> in <a href=\"https://redirect.github.com/uuid-rs/uuid/pull/919\">uuid-rs/uuid#919</a></li>\n<li>Prepare for 1.29.0 release by <a href=\"https://github.com/KodrAus\"><code>@\u200bKodrAus</code></a> in <a href=\"https://redirect.github.com/uuid-rs/uuid/pull/920\">uuid-rs/uuid#920</a></li>\n</ul>\n<p><strong>Full Changelog</strong>: <a href=\"https://github.com/uuid-rs/uuid/compare/v1.28.0...v1.29.0\">https://github.com/uuid-rs/uuid/compare/v1.28.0...v1.29.0</a></p>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a href=\"https://github.com/uuid-rs/uuid/commit/4643e607d0ded1f2f95c1c427456e17bd5edf708\"><code>4643e60</code></a> Merge pull request <a href=\"https://redirect.github.com/uuid-rs/uuid/issues/920\">#920</a> from uuid-rs/cargo/v1.29.0</li>\n<li><a href=\"https://github.com/uuid-rs/uuid/commit/a3631fd73dd228a50f6bc7a544b2f5e05134bbc8\"><code>a3631fd</code></a> prepare for 1.29.0 release</li>\n<li><a href=\"https://github.com/uuid-rs/uuid/commit/304913efacbf3ed0023b9d8af3bd59cbfa236b60\"><code>304913e</code></a> Merge pull request <a href=\"https://redirect.github.com/uuid-rs/uuid/issues/919\">#919</a> from RanaPriyansh/fix/non-nil-versioned-constructors-901</li>\n<li><a href=\"https://github.com/uuid-rs/uuid/commit/d49f963255bde95edd0a36369263520b1dd67308\"><code>d49f963</code></a> Reuse existing version tests for NonNilUuid constructors</li>\n<li><a href=\"https://github.com/uuid-rs/uuid/commit/2f024047699f8ad721dcc44fce9171b88aa5aab1\"><code>2f02404</code></a> Add versioned constructors to NonNilUuid</li>\n<li>See full diff in <a href=\"https://github.com/uuid-rs/uuid/compare/v1.28.0...v1.29.0\">compare view</a></li>\n</ul>\n</details>\n<br />\n\n\nDependabot will resolve any conflicts with this PR as long as you don't alter it yourself. You can also trigger a rebase manually by commenting `@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits that have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all of the ignore conditions of the specified dependency\n- `@dependabot ignore <dependency name> major version` will close this group update PR and stop Dependabot creating any more for the specific dependency's major version (unless you unignore this specific dependency's major version or upgrade to it yourself)\n- `@dependabot ignore <dependency name> minor version` will close this group update PR and stop Dependabot creating any more for the specific dependency's minor version (unless you unignore this specific dependency's minor version or upgrade to it yourself)\n- `@dependabot ignore <dependency name>` will close this group update PR and stop Dependabot creating any more for the specific dependency (unless you unignore this specific dependency or upgrade to it yourself)\n- `@dependabot unignore <dependency name>` will remove all of the ignore conditions of the specified dependency\n- `@dependabot unignore <dependency name> <ignore condition>` will remove the ignore condition of the specified dependency and ignore conditions\n\n\n</details>",
+    "labels": [
+      {
+        "name": "dependencies"
+      },
+      {
+        "name": "rust"
+      }
+    ],
+    "mergeable": true,
+    "mergeable_state": "clean",
+    "merged": false,
+    "user": {
+      "login": "dependabot[bot]",
+      "id": 49699333,
+      "type": "Bot"
+    },
+    "head": {
+      "ref": "dependabot/cargo/minor-and-patch-17fd222038",
+      "sha": "2030420928e4debaceb5bf8e9eaf658f6beb4ad5",
+      "repo": {
+        "full_name": "yadgarhq/gateway"
+      }
+    },
+    "base": {
+      "ref": "main",
+      "sha": "d65cfd40f08f2f192c3ee138c9ebcd058b96c2cb",
+      "repo": {
+        "full_name": "yadgarhq/gateway"
+      }
+    },
+    "changed_files": 1
+  },
+  "repos/yadgarhq/gateway/pulls/159/reviews?per_page=100": [],
+  "graphql": {
+    "data": {
+      "repository": {
+        "pullRequest": {
+          "reviewThreads": {
+            "totalCount": 0,
+            "nodes": []
+          }
+        }
+      }
+    }
+  },
+  "repos/yadgarhq/gateway/issues/159/timeline?per_page=100": [
+    {
+      "event": "committed"
+    },
+    {
+      "event": "labeled",
+      "actor": {
+        "id": 49699333,
+        "login": "dependabot[bot]"
+      },
+      "created_at": "2026-10-31T03:53:37Z"
+    },
+    {
+      "event": "labeled",
+      "actor": {
+        "id": 49699333,
+        "login": "dependabot[bot]"
+      },
+      "created_at": "2026-10-31T03:53:37Z"
+    },
+    {
+      "event": "committed"
+    }
+  ],
+  "repos/yadgarhq/gateway/pulls/159/commits?per_page=100": [
+    {
+      "sha": "d08320b49ab51f3459ddf54f2731b4729e78ca83",
+      "author": {
+        "id": 49699333,
+        "login": "dependabot[bot]",
+        "type": "Bot"
+      },
+      "committer": {
+        "id": 19864447,
+        "login": "web-flow"
+      },
+      "commit": {
+        "verification": {
+          "verified": true
+        },
+        "message": "build(deps): bump the minor-and-patch group with 5 updates\n\nBumps the minor-and-patch group with 5 updates:\n\n| Package | From | To |\n| --- | --- | --- |\n| [hyper](https://github.com/hyperium/hyper) | `1.11.1` | `1.12.0` |\n| [hyper-util](https://github.com/hyperium/hyper-util) | `0.1.20` | `0.1.21` |\n| [redis](https://github.com/redis-rs/redis-rs) | `1.7.1` | `1.8.0` |\n| [tokio](https://github.com/tokio-rs/tokio) | `1.53.3` | `1.54.1` |\n| [uuid](https://github.com/uuid-rs/uuid) | `1.28.0` | `1.29.0` |\n\n\nUpdates `hyper` from 1.11.1 to 1.12.0\n- [Release notes](https://github.com/hyperium/hyper/releases)\n- [Changelog](https://github.com/hyperium/hyper/blob/master/CHANGELOG.md)\n- [Commits](https://github.com/hyperium/hyper/compare/v1.11.1...v1.12.0)\n\nUpdates `hyper-util` from 0.1.20 to 0.1.21\n- [Release notes](https://github.com/hyperium/hyper-util/releases)\n- [Changelog](https://github.com/hyperium/hyper-util/blob/master/CHANGELOG.md)\n- [Commits](https://github.com/hyperium/hyper-util/compare/v0.1.20...v0.1.21)\n\nUpdates `redis` from 1.7.1 to 1.8.0\n- [Release notes](https://github.com/redis-rs/redis-rs/releases)\n- [Commits](https://github.com/redis-rs/redis-rs/compare/redis-1.7.1...redis-1.8.0)\n\nUpdates `tokio` from 1.53.3 to 1.54.1\n- [Release notes](https://github.com/tokio-rs/tokio/releases)\n- [Commits](https://github.com/tokio-rs/tokio/compare/tokio-1.53.3...tokio-1.54.1)\n\nUpdates `uuid` from 1.28.0 to 1.29.0\n- [Release notes](https://github.com/uuid-rs/uuid/releases)\n- [Commits](https://github.com/uuid-rs/uuid/compare/v1.28.0...v1.29.0)\n\n---\nupdated-dependencies:\n- dependency-name: hyper\n  dependency-version: 1.12.0\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n  dependency-group: minor-and-patch\n- dependency-name: hyper-util\n  dependency-version: 0.1.21\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: minor-and-patch\n- dependency-name: redis\n  dependency-version: 1.8.0\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n  dependency-group: minor-and-patch\n- dependency-name: tokio\n  dependency-version: 1.54.1\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n  dependency-group: minor-and-patch\n- dependency-name: uuid\n  dependency-version: 1.29.0\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n  dependency-group: minor-and-patch\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>"
+      },
+      "parents": [
+        {
+          "sha": "dee030d60dcf904f91fb98d7e2227fbc9cd2249f"
+        }
+      ]
+    },
+    {
+      "sha": "2030420928e4debaceb5bf8e9eaf658f6beb4ad5",
+      "author": {
+        "id": 64974579,
+        "login": "m-agahi",
+        "type": "User"
+      },
+      "committer": {
+        "id": 19864447,
+        "login": "web-flow"
+      },
+      "commit": {
+        "verification": {
+          "verified": true
+        },
+        "message": "Merge branch 'main' into dependabot/cargo/minor-and-patch-17fd222038"
+      },
+      "parents": [
+        {
+          "sha": "d08320b49ab51f3459ddf54f2731b4729e78ca83"
+        },
+        {
+          "sha": "d65cfd40f08f2f192c3ee138c9ebcd058b96c2cb"
+        }
+      ]
+    }
+  ],
+  "repos/yadgarhq/gateway/git/ref/heads/main": {
+    "ref": "refs/heads/main",
+    "object": {
+      "sha": "d65cfd40f08f2f192c3ee138c9ebcd058b96c2cb",
+      "type": "commit"
+    }
+  },
+  "repos/yadgarhq/gateway/commits/2030420928e4debaceb5bf8e9eaf658f6beb4ad5/check-runs?per_page=100": {
+    "total_count": 20,
+    "check_runs": [
+      {
+        "name": "ci / passed",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "2030420928e4debaceb5bf8e9eaf658f6beb4ad5",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111800131225
+        }
+      },
+      {
+        "name": "CodeQL",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "2030420928e4debaceb5bf8e9eaf658f6beb4ad5",
+        "app": {
+          "id": 57789
+        },
+        "check_suite": {
+          "id": 111800308343
+        }
+      },
+      {
+        "name": "ci / hook_tools_adopted",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "2030420928e4debaceb5bf8e9eaf658f6beb4ad5",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111800131225
+        }
+      },
+      {
+        "name": "ci / test",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "2030420928e4debaceb5bf8e9eaf658f6beb4ad5",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111800131225
+        }
+      },
+      {
+        "name": "ci / proto",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "2030420928e4debaceb5bf8e9eaf658f6beb4ad5",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111800131225
+        }
+      },
+      {
+        "name": "ci / vulnerabilities",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "2030420928e4debaceb5bf8e9eaf658f6beb4ad5",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111800131225
+        }
+      },
+      {
+        "name": "ci / service_immutable",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "2030420928e4debaceb5bf8e9eaf658f6beb4ad5",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111800131225
+        }
+      },
+      {
+        "name": "ci / release_ready",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "2030420928e4debaceb5bf8e9eaf658f6beb4ad5",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111800131225
+        }
+      },
+      {
+        "name": "ci / workflows",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "2030420928e4debaceb5bf8e9eaf658f6beb4ad5",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111800131225
+        }
+      },
+      {
+        "name": "ci / pre_pin_parent",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "2030420928e4debaceb5bf8e9eaf658f6beb4ad5",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111800131225
+        }
+      },
+      {
+        "name": "ci / portability",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "2030420928e4debaceb5bf8e9eaf658f6beb4ad5",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111800131225
+        }
+      },
+      {
+        "name": "ci / precommit",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "2030420928e4debaceb5bf8e9eaf658f6beb4ad5",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111800131225
+        }
+      },
+      {
+        "name": "main",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "2030420928e4debaceb5bf8e9eaf658f6beb4ad5",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111800131225
+        }
+      },
+      {
+        "name": "release",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "2030420928e4debaceb5bf8e9eaf658f6beb4ad5",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111800131225
+        }
+      },
+      {
+        "name": "ci / template",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "2030420928e4debaceb5bf8e9eaf658f6beb4ad5",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111800131225
+        }
+      },
+      {
+        "name": "ci / version",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "2030420928e4debaceb5bf8e9eaf658f6beb4ad5",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111800131225
+        }
+      },
+      {
+        "name": "ci / detect",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "2030420928e4debaceb5bf8e9eaf658f6beb4ad5",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111800131225
+        }
+      },
+      {
+        "name": "Analyze (rust)",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "2030420928e4debaceb5bf8e9eaf658f6beb4ad5",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111800121117
+        }
+      },
+      {
+        "name": "Analyze (actions)",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "2030420928e4debaceb5bf8e9eaf658f6beb4ad5",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111800121117
+        }
+      },
+      {
+        "name": "Analyze (python)",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "2030420928e4debaceb5bf8e9eaf658f6beb4ad5",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111800121117
+        }
+      }
+    ]
+  },
+  "repos/yadgarhq/gateway/actions/runs?head_sha=2030420928e4debaceb5bf8e9eaf658f6beb4ad5&per_page=100": {
+    "total_count": 2,
+    "workflow_runs": [
+      {
+        "path": ".github/workflows/ci.yaml",
+        "event": "pull_request",
+        "head_sha": "2030420928e4debaceb5bf8e9eaf658f6beb4ad5",
+        "head_branch": "dependabot/cargo/minor-and-patch-17fd222038",
+        "status": "completed",
+        "conclusion": "success",
+        "check_suite_id": 111800131225,
+        "referenced_workflows": [
+          {
+            "path": "yadgarhq/actions/.github/workflows/ci-pr.yaml@main",
+            "sha": "33cd5ccd0c79448325c84aa73e8c7e1c2b8ded1b"
+          },
+          {
+            "path": "yadgarhq/actions/.github/workflows/ci-release.yaml@main",
+            "sha": "33cd5ccd0c79448325c84aa73e8c7e1c2b8ded1b"
+          }
+        ]
+      },
+      {
+        "path": "dynamic/github-code-scanning/codeql",
+        "event": "dynamic",
+        "head_sha": "2030420928e4debaceb5bf8e9eaf658f6beb4ad5",
+        "head_branch": "refs/pull/159/head",
+        "status": "completed",
+        "conclusion": "success",
+        "check_suite_id": 111800121117,
+        "referenced_workflows": []
+      }
+    ]
+  },
+  "repos/yadgarhq/actions/compare/33cd5ccd0c79448325c84aa73e8c7e1c2b8ded1b...main": {
+    "status": "identical",
+    "behind_by": 0
+  },
+  "repos/yadgarhq/gateway/compare/d65cfd40f08f2f192c3ee138c9ebcd058b96c2cb...2030420928e4debaceb5bf8e9eaf658f6beb4ad5": {
+    "status": "ahead",
+    "ahead_by": 2,
+    "behind_by": 0,
+    "total_commits": 2
+  },
+  "repos/yadgarhq/gateway/compare/d65cfd40f08f2f192c3ee138c9ebcd058b96c2cb...d65cfd40f08f2f192c3ee138c9ebcd058b96c2cb": {
+    "status": "identical",
+    "ahead_by": 0,
+    "behind_by": 0
+  },
+  "repos/yadgarhq/gateway/pulls/159/files?per_page=100": [
+    {
+      "filename": "Cargo.lock",
+      "status": "modified"
+    }
+  ],
+  "repos/yadgarhq/gateway/activity?ref=refs/heads/dependabot/cargo/minor-and-patch-17fd222038&per_page=100": [
+    {
+      "activity_type": "push",
+      "actor": {
+        "id": 64974579,
+        "login": "m-agahi"
+      },
+      "after": "2030420928e4debaceb5bf8e9eaf658f6beb4ad5",
+      "timestamp": "2026-10-31T22:03:39Z"
+    },
+    {
+      "activity_type": "branch_creation",
+      "actor": {
+        "id": 49699333,
+        "login": "dependabot[bot]"
+      },
+      "after": "d08320b49ab51f3459ddf54f2731b4729e78ca83",
+      "timestamp": "2026-10-31T03:53:34Z"
+    }
+  ]
+}

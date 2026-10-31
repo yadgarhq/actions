@@ -94,6 +94,12 @@ class Fake:
         self.writes.append(("rewrite", owner, name, branch, parent, path, text, message, exists,
                             expect))
 
+    def comment(self, owner, name, n, body):
+        self.writes.append(("comment", owner, name, n, body))
+
+    def delete_branch(self, owner, name, branch):
+        self.writes.append(("delete", owner, name, branch))
+
 
 class Case:
     """One fixture, with named handles on the responses tests change."""
@@ -192,8 +198,8 @@ def merge_case():
     return Case("store-45")
 
 
-def skipped(case, code, cfg=None, now=NOW):
-    got = case.judge(cfg, now)
+def skipped(case, code, cfg=None, now=None):
+    got = case.judge(cfg) if now is None else case.judge(cfg, now)
     assert got["action"] == "skip", got
     assert got["reason"].startswith(code), got["reason"]
     return got
@@ -581,6 +587,10 @@ def estate(*names):
     # absent here as they are from the real listing (yaadgaar 467).
     listing += [{"name": "actions", "topics": []}]
     data[f"orgs/{OWNER}/repos?type=public&per_page=100&page=1"] = listing
+    # ADR-1106: every listed repository's open pull requests are read for bot
+    # pull requests. None here, so the adoption rows are all there is.
+    for m in listing:
+        data.setdefault(f"repos/{OWNER}/{m['name']}/pulls?state=open&per_page=100", [])
     for status in ("in_progress", "queued"):
         data[f"repos/{OWNER}/actions/actions/workflows/fan-out.yaml/runs?status={status}"] = {
             "total_count": 0}
@@ -910,6 +920,8 @@ def test_the_sweep_ships_armed_with_the_half_hour_soak():
     assert shipped["soak_hours"] == 0.5
     assert shipped["max_merges"] == 10
     assert shipped["max_refreshes_per_pr_per_day"] == 3
+    # ADR-1106 soak parity: the bot soak ships equal to the adoption soak.
+    assert shipped["bot_soak_hours"] == shipped["soak_hours"]
 
 
 @pytest.mark.parametrize("change", [
@@ -929,6 +941,11 @@ def test_the_sweep_ships_armed_with_the_half_hour_soak():
     lambda s: s.update(max_refreshes_per_pr_per_day=0.5),
     lambda s: s.update(exclude={"docs": ""}),
     lambda s: s.update(exclude=["docs"]),
+    lambda s: s.pop("bot_soak_hours"),
+    lambda s: s.update(bot_soak_hours=-1),
+    lambda s: s.update(bot_soak_hours=True),
+    lambda s: s.update(bot_soak_hours="0.5"),
+    lambda s: s.update(bot_soak_hours=float("nan")),
 ])
 def test_a_malformed_sweep_block_is_refused(change):
     data = json.loads(CLASSES_TEXT)
@@ -1117,9 +1134,15 @@ def test_only_sweep_py_can_merge():
 
 
 def test_nothing_calls_update_branch():
+    """ADR-0693: an adoption pull request is refreshed by `rewrite_branch`. A
+    bot pull request (ADR-1106) is never update-branched either: that merges
+    the base in, and a merge commit is refused by B3. Dependabot rebases its
+    own branch on `@dependabot rebase`, and re-signs it."""
     for path in (SCRIPT, WORKFLOW):
         assert "/update-branch" not in path.read_text()
         assert "pr update-branch" not in path.read_text()
+        assert "updatePullRequestBranch" not in path.read_text()
+    assert not hasattr(fan_out.Gh, "update_branch") and not hasattr(sweep.SweepGh, "update_branch")
 
 
 def workflow():
@@ -1156,12 +1179,34 @@ def test_the_evaluate_job_mints_nothing():
 
 
 def test_every_write_mint_names_one_repository_and_only_contents_write():
-    found = mints("act")
+    """An adoption leg (no `kind`) mints exactly what it always did."""
+    found = [m for m in mints("act") if m["id"] == "app"]
     assert len(found) == 1
+    assert found[0]["if"] == "${{ !matrix.kind }}"
     with_ = found[0]["with"]
     assert with_["repositories"] == "${{ matrix.repo }}"
     assert {k: v for k, v in with_.items() if k.startswith("permission-")} == {
         "permission-contents": "write"}
+
+
+def test_a_bot_leg_mints_for_one_repository_what_a_merge_and_a_comment_need():
+    """ADR-1106. A dependabot pull request can change `.github/workflows/`, and
+    an App may not merge that without `workflows: write`; the rebase comment
+    needs `pull_requests: write`. Only a leg whose kind is a known bot gets them."""
+    assert [m["id"] for m in mints("act")] == ["app", "app-bot"]
+    [bot] = [m for m in mints("act") if m["id"] == "app-bot"]
+    assert bot["if"] == "${{ matrix.kind == 'dependabot' || matrix.kind == 'repin' }}"
+    assert bot["with"]["repositories"] == "${{ matrix.repo }}"
+    assert {k: v for k, v in bot["with"].items() if k.startswith("permission-")} == {
+        "permission-contents": "write", "permission-pull-requests": "write",
+        "permission-workflows": "write"}
+    names = [s.get("id") or s.get("name") for s in steps("act")]
+    assert names.index("leg") < names.index("app-bot")
+    [go] = [s for s in steps("act") if s.get("name") == "merge or refresh"]
+    assert go["env"]["SWEEP_WRITE_TOKEN"] == \
+        "${{ steps.app.outputs.token || steps.app-bot.outputs.token }}"
+    assert go["env"]["KIND"] == "${{ matrix.kind }}"
+    assert '--kind "$KIND"' in go["run"]
 
 
 def test_the_act_job_runs_only_live_and_checks_the_name_before_the_mint():
@@ -1325,3 +1370,724 @@ def test_two_runs_never_act_on_one_repository_at_once():
 def test_the_wait_job_has_time_for_the_longest_wait():
     assert workflow()["jobs"]["wait"]["timeout-minutes"] >= sweep.MAX_WAIT_MINUTES + 1
     assert workflow()["jobs"]["evaluate"]["timeout-minutes"] <= 20
+
+
+
+
+# --------------------------------------------------------------------------
+# ADR-1106: dependabot and repin pull requests
+# --------------------------------------------------------------------------
+#
+# Recorded read-only on 2026-10-31, each normalised as its `__about__` lists:
+#
+#   task-106     dependabot, one verified dependabot commit, up to date, green:
+#                the merge baseline. Its timeline holds dependabot's own
+#                force-push, the rebase a `@dependabot rebase` comment asks for.
+#   gateway-159  dependabot, green, but carrying m-agahi's merge commit from a
+#                merge-method update-branch: B3 leaves it for a person.
+#   gateway-160  repin, really BEHIND, green. Its commit is the App's unsigned
+#                `git push`, so B3 leaves it for a person; `signed` shows what
+#                an API-made repin commit would be.
+#
+# `up_to_date` moves the base ref back to the pull request's own `base.sha`;
+# `behind` moves it on. Neither touches a commit.
+
+# The bot fixtures were recorded on 2026-10-31, after the adoption suite's NOW.
+BOT_NOW = datetime.datetime(2026, 11, 1, 12, 0, tzinfo=datetime.timezone.utc)
+
+
+class BotCase(Case):
+    def judge(self, cfg=None, now=BOT_NOW):
+        return sweep.judge(Fake(self.data), OWNER, self.repo, self.n, cfg or classes(), now)
+
+    @property
+    def activity(self):
+        return self.one(rf"^{self.r}/activity\?")
+
+
+DEPENDABOT_BRANCH = "dependabot/cargo/minor-and-patch-3a28fe187f"
+REPIN_BRANCH = "repin/dial-v0.2.28_lifecycle-v0.3.4_telemetry-v0.2.9"
+REBASE = "@dependabot rebase"
+
+
+def up_to_date(case):
+    base = case.pr["base"]["sha"]
+    old = case.compare
+    case.data[f"{case.r}/git/ref/heads/main"]["object"]["sha"] = base
+    case.tip = base
+    case.data[f"{case.r}/compare/{base}...{case.head}"] = dict(old, status="ahead", behind_by=0)
+    return case
+
+
+def behind(case):
+    tip = "9" * 40
+    old = case.compare
+    case.data[f"{case.r}/git/ref/heads/main"]["object"]["sha"] = tip
+    case.data[f"{case.r}/compare/{tip}...{case.head}"] = dict(old, status="diverged", behind_by=1)
+    case.tip = tip
+    return case
+
+
+def signed(case):
+    """The repin commit as the API would make it: verified, committed by web-flow."""
+    for c in case.commits:
+        if c["author"]["id"] == BOT:
+            c["commit"]["verification"]["verified"] = True
+            c["committer"] = {"id": WEB_FLOW, "login": "web-flow"}
+    return case
+
+
+def dependabot_merge():
+    return BotCase("task-106")
+
+
+def dependabot_behind():
+    return behind(BotCase("task-106"))
+
+
+def repin_merge():
+    return signed(up_to_date(BotCase("gateway-160")))
+
+
+def test_the_bot_baselines_are_what_they_say():
+    assert dependabot_merge().compare["status"] == "ahead"
+    assert len(dependabot_merge().commits) == 1
+    case = BotCase("gateway-160")
+    assert case.compare["status"] == "diverged" and case.compare["behind_by"] == 1
+    assert [len(c["parents"]) for c in BotCase("gateway-159").commits] == [1, 2]
+
+
+@pytest.mark.parametrize("make, kind, branch", [
+    (dependabot_merge, "dependabot", DEPENDABOT_BRANCH),
+    (repin_merge, "repin", REPIN_BRANCH),
+])
+def test_an_up_to_date_green_bot_pull_request_is_merged(make, kind, branch):
+    got = make().judge()
+    assert got["action"] == "merge", got
+    assert (got["kind"], got["branch"]) == (kind, branch)
+
+
+def test_a_behind_green_dependabot_pull_request_asks_dependabot_to_rebase():
+    got = dependabot_behind().judge()
+    assert got["action"] == "refresh", got
+    assert got["kind"] == "dependabot"
+
+
+def test_a_behind_repin_pull_request_has_no_refresh():
+    """Nothing can rebase a repin commit and keep it the App's signed commit."""
+    skipped(signed(BotCase("gateway-160")), "B5")
+
+
+def test_a_major_dependabot_bump_qualifies_like_any_other():
+    case = dependabot_merge()
+    case.pr["title"] = "build(deps): bump tokio from 1.54.1 to 2.0.0"
+    assert case.judge()["action"] == "merge"
+
+
+@pytest.mark.parametrize("make, change, code", [
+    (dependabot_merge, lambda c: c.pr["user"].update(id=12345), "P1"),
+    (dependabot_merge, lambda c: c.pr["user"].update(type="User"), "P1"),
+    (dependabot_merge, lambda c: c.pr["user"].update(login="someone"), "P1"),
+    (dependabot_merge, lambda c: c.pr["head"].update(ref="feature/dependabot-looking"), "P1"),
+    (repin_merge, lambda c: c.pr["user"].update(id=12345, login="someone", type="User"), "P1"),
+    # the App's own pull request on another branch is judged as an adoption one
+    (repin_merge, lambda c: c.pr["head"].update(ref="repin/../main"), "P2"),
+    (repin_merge, lambda c: c.pr["head"].update(ref="dependabot/cargo/x"), "P2"),
+    (dependabot_merge, lambda c: c.pr["head"]["repo"].update(full_name="someone/task"), "B2"),
+    (dependabot_merge, lambda c: c.pr["base"].update(ref="release"), "B2"),
+    (dependabot_merge, lambda c: c.pr.update(state="closed"), "B2"),
+    (dependabot_merge, lambda c: c.pr.update(draft=True), "B2"),
+    (dependabot_merge, lambda c: c.pr.update(locked=True), "B2"),
+    (dependabot_merge, lambda c: c.pr["labels"].append({"name": "no-auto-merge"}), "B2"),
+    (dependabot_merge, lambda c: c.meta.update(private=True), "R1"),
+    (dependabot_merge, lambda c: c.meta.update(archived=True), "R3"),
+    (dependabot_merge, lambda c: c.meta.update(fork=True), "R3"),
+    (dependabot_merge, lambda c: c.meta.update(owner={"login": "someone"}), "R3"),
+    (dependabot_merge, lambda c: c.reviews.append({"state": "CHANGES_REQUESTED"}), "P5"),
+    (dependabot_merge, lambda c: c.data["graphql"]["data"]["repository"]["pullRequest"]
+     ["reviewThreads"].update(totalCount=1, nodes=[{"isResolved": False}]), "P5"),
+])
+def test_a_bot_pull_request_that_is_not_admitted_is_skipped(make, change, code):
+    case = make()
+    change(case)
+    skipped(case, code)
+
+
+def test_an_excluded_repository_is_skipped_for_bot_pull_requests_too():
+    skipped(dependabot_merge(), "R2: excluded", classes(exclude={"task": "a reason"}))
+
+
+def test_a_bot_pull_request_needs_no_class_topic_and_is_not_exempted():
+    case = dependabot_merge()
+    case.meta["topics"] = []
+    assert case.judge()["action"] == "merge"
+    meta = dict(case.meta, name="actions")  # exempt from ADOPTION, not from this
+    assert sweep.check_bot_repo(meta, OWNER, classes()) is None
+
+
+# B3, PROVENANCE: every commit the bot's, verified, committed by GitHub; no merge
+
+
+def extra(case, **fields):
+    c = copy.deepcopy(case.commits[-1])
+    c.update(sha="e" * 40, **fields)
+    case.commits.insert(0, c)
+
+
+@pytest.mark.parametrize("make, change", [
+    # the bot's id alone is an email match: it needs GitHub's proof too
+    (dependabot_merge, lambda c: c.commits[0]["commit"]["verification"].update(verified=False)),
+    (dependabot_merge, lambda c: c.commits[0].update(committer={"id": DEPENDABOT})),
+    (dependabot_merge, lambda c: c.commits[0].update(committer={"id": 7})),
+    (dependabot_merge, lambda c: c.commits[0].update(committer=None)),
+    (repin_merge, lambda c: c.commits[0]["commit"]["verification"].update(verified=False)),
+    (repin_merge, lambda c: c.commits[0].update(committer={"id": BOT, "login": "yadgarhq-bot[bot]"})),
+    # another author, however well signed
+    (dependabot_merge, lambda c: c.commits[0].update(author={"id": 7, "login": "x", "type": "User"})),
+    (dependabot_merge, lambda c: c.commits[0].update(author=None)),
+    (dependabot_merge, lambda c: c.commits[0]["author"].update(type="User")),
+    (repin_merge, lambda c: c.commits[0]["author"].update(id=DEPENDABOT)),
+    (dependabot_merge, lambda c: extra(c, author={"id": BOT, "login": "yadgarhq-bot[bot]",
+                                                  "type": "Bot"})),
+    # a merge commit, even the bot's own, verified and GitHub-committed
+    (dependabot_merge, lambda c: extra(c, parents=[{"sha": "1" * 40}, {"sha": "2" * 40}])),
+    (dependabot_merge, lambda c: c.commits[0].update(parents=[{"sha": "1" * 40}, {"sha": "2" * 40}])),
+    (dependabot_merge, lambda c: c.commits[0].update(parents=[])),
+    # the head is the last commit
+    (dependabot_merge, lambda c: c.commits[-1].update(sha="a" * 40)),
+    (dependabot_merge, lambda c: c.commits.clear()),
+    # a force-push by anyone but the bot
+    (dependabot_merge, lambda c: c.timeline.append(
+        {"event": "head_ref_force_pushed", "actor": {"id": 7}})),
+    (repin_merge, lambda c: c.timeline.append(
+        {"event": "head_ref_force_pushed", "actor": {"id": DEPENDABOT}})),
+])
+def test_a_commit_without_the_bots_provenance_is_skipped(make, change):
+    case = make()
+    change(case)
+    skipped(case, "B3")
+
+
+def test_a_recorded_person_s_merge_commit_is_left_for_a_person():
+    """gateway#159 as it really was: green, mergeable, and one verified web-flow
+    merge commit by m-agahi. A merge can carry any edit (conflict resolution)."""
+    case = BotCase("gateway-159")
+    assert case.pr["user"]["id"] == DEPENDABOT
+    skipped(case, "B3")
+
+
+def test_the_recorded_unsigned_repin_commit_is_left_for_a_person():
+    """repin.yaml pushes with git: unsigned, committed by the App."""
+    case = up_to_date(BotCase("gateway-160"))
+    assert case.commits[0]["commit"]["verification"]["verified"] is False
+    skipped(case, "B3")
+    assert signed(case).judge()["action"] == "merge"
+
+
+def test_the_bots_own_force_push_is_accepted():
+    case = dependabot_merge()
+    assert any(e["event"] == "head_ref_force_pushed" for e in case.timeline)
+    assert case.judge()["action"] == "merge"
+
+
+# V and U: red, pending or conflicting is left alone
+
+
+@pytest.mark.parametrize("make", [dependabot_merge, dependabot_behind])
+@pytest.mark.parametrize("change, code", [
+    (lambda c: [c.checks["check_runs"].remove(r) for r in
+                [r for r in c.checks["check_runs"] if r["name"] == "ci / passed"]], "V1"),
+    (lambda c: c.checks["check_runs"][[r["name"] for r in c.checks["check_runs"]]
+                                      .index("ci / passed")].update(conclusion="failure"), "V1"),
+    (lambda c: c.checks["check_runs"][[r["name"] for r in c.checks["check_runs"]]
+                                      .index("ci / passed")].update(status="in_progress",
+                                                                     conclusion=None), "V1"),
+    (lambda c: [r["app"].update(id=99) for r in c.checks["check_runs"]
+                if r["name"] == "ci / passed"], "V2"),
+    (lambda c: [w.update(head_branch="main") for w in c.runs["workflow_runs"]], "V2"),
+    (lambda c: [w.update(event="pull_request_target") for w in c.runs["workflow_runs"]], "V2"),
+    (lambda c: c.pr.update(mergeable=None), "U3"),
+    (lambda c: c.pr.update(mergeable=False), "U3"),
+])
+def test_a_bot_pull_request_that_is_red_pending_or_conflicting_is_left_alone(make, change, code):
+    case = make()
+    change(case)
+    skipped(case, code)
+
+
+def test_a_bot_pull_request_needs_no_precommit_check():
+    case = dependabot_merge()
+    for r in case.checks["check_runs"]:
+        if r["name"] == "ci / precommit":
+            r["conclusion"] = "skipped"
+    assert case.judge()["action"] == "merge"
+
+
+def test_the_producers_bot_pull_request_reads_ci_self():
+    assert sweep.ci_shape("actions") == (".github/workflows/ci-self.yaml", None)
+    assert sweep.ci_shape("task") == (sweep.CI_WORKFLOW, sweep.CI_PR)
+
+
+def test_a_bot_pull_request_whose_base_sha_is_stale_is_not_merged():
+    case = dependabot_merge()
+    case.pr["base"]["sha"] = "a" * 40
+    skipped(case, "U2")
+
+
+def test_a_compare_neither_ahead_nor_behind_is_skipped():
+    case = dependabot_merge()
+    case.compare["status"] = "identical"
+    skipped(case, "U1")
+
+
+# the rebase request and its cap
+
+
+def rebase_comment(case, hours_ago, actor=BOT, body=REBASE):
+    when = (BOT_NOW - datetime.timedelta(hours=hours_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    case.timeline.append({"event": "commented", "actor": {"id": actor}, "body": body,
+                          "created_at": when})
+
+
+def test_a_rebase_asked_within_the_hour_is_not_asked_again():
+    case = dependabot_behind()
+    rebase_comment(case, 0.5)
+    skipped(case, "B6")
+    case.timeline.pop()
+    rebase_comment(case, 2)
+    assert case.judge()["action"] == "refresh"
+
+
+def test_the_rebase_requests_per_day_are_capped():
+    case = dependabot_behind()
+    for hours in (2, 5, 9):
+        rebase_comment(case, hours)
+    skipped(case, "B6")
+    case.timeline.pop()
+    assert case.judge()["action"] == "refresh"
+
+
+def test_only_the_apps_own_rebase_comments_count():
+    case = dependabot_behind()
+    rebase_comment(case, 0.5, actor=7)
+    rebase_comment(case, 0.5, body="looks fine")
+    assert case.judge()["action"] == "refresh"
+
+
+# the act legs
+
+
+def bot_act(case, action, kind, **fake):
+    writes = []
+    done = sweep.act(Fake(case.data, writes), Fake(case.data, writes, **fake), OWNER, case.repo,
+                     case.n, case.head, action, classes(), BOT_NOW, kind)
+    return done, writes
+
+
+def test_a_bot_merge_squashes_at_the_head_and_deletes_the_branch():
+    """The title is the bot's own commit subject (B3 proved the bot wrote it),
+    never the editable pull request title; the message is fixed text."""
+    case = dependabot_merge()
+    done, writes = bot_act(case, "merge", "dependabot")
+    assert done.startswith("merged yadgarhq/task#106")
+    assert writes == [
+        ("merge", OWNER, "task", 106, {
+            "merge_method": "squash", "sha": case.head,
+            "commit_title": "build(deps): bump tokio (#106)",
+            "commit_message": sweep.BOT_MESSAGE}),
+        ("delete", OWNER, "task", DEPENDABOT_BRANCH),
+    ]
+
+
+def test_an_edited_bot_pull_request_cannot_write_history():
+    """Adversarial review F1. A person edits the body and the title of a bot
+    pull request; the body gate skips bots, so a `feat!` bullet would reach
+    `derive` and cut a major tag. Neither edit reaches the merge payload."""
+    case = dependabot_merge()
+    case.pr["body"] = "- feat!: x\n- feat: y\n"
+    case.pr["title"] = "feat!: drop everything"
+    _, writes = bot_act(case, "merge", "dependabot")
+    payload = writes[0][4]
+    assert "feat" not in payload["commit_message"] and "feat" not in payload["commit_title"]
+    assert payload["commit_message"] == sweep.BOT_MESSAGE
+    import pr_body
+    assert pr_body.commit_entries(pr_body.body_lines(
+        f"{payload['commit_title']}\n\n{payload['commit_message']}")) == ([], [], [])
+
+
+@pytest.mark.parametrize("message", ["", "\n\nbody", 7, None, "x" * 300])
+def test_a_bot_commit_subject_that_cannot_be_a_title_is_skipped(message):
+    case = dependabot_merge()
+    case.commits[0]["commit"]["message"] = message
+    skipped(case, "B7")
+
+
+def test_a_repin_merge_title_is_the_repin_commit_subject():
+    _, writes = bot_act(repin_merge(), "merge", "repin")
+    assert writes[0][4]["commit_title"] == "chore(deps): re-pin dial, lifecycle, telemetry (#160)"
+
+
+# F3: the files a bot pull request may change, by ecosystem
+
+
+def files(case):
+    return case.data[f"{case.r}/pulls/{case.n}/files?per_page=100"]
+
+
+def with_files(case, names, status="modified"):
+    files(case)[:] = [{"filename": n, "status": status} for n in names]
+    case.pr["changed_files"] = len(names)
+    return case
+
+
+def as_ecosystem(case, eco):
+    branch = f"dependabot/{eco}/x-1"
+    old = case.pr["head"]["ref"]
+    case.data[f"{case.r}/activity?ref=refs/heads/{branch}&per_page=100"] = case.data.pop(
+        f"{case.r}/activity?ref=refs/heads/{old}&per_page=100")
+    case.pr["head"]["ref"] = branch
+    for w in case.runs["workflow_runs"]:
+        w["head_branch"] = branch
+    return case
+
+
+@pytest.mark.parametrize("eco, names", [
+    ("cargo", ["Cargo.lock"]),
+    ("cargo", ["Cargo.toml", "Cargo.lock", "crates/a/Cargo.toml"]),
+    ("github_actions", [".github/workflows/ci.yaml", ".github/workflows/release.yml"]),
+    ("github_actions", ["action.yml", "hooks/thing/action.yaml"]),
+    ("docker", ["Dockerfile", "containers/rust-build/Containerfile", "x/Dockerfile.dev"]),
+])
+def test_an_ecosystem_s_own_files_are_admitted(eco, names):
+    case = with_files(as_ecosystem(dependabot_merge(), eco), names)
+    assert case.judge()["action"] == "merge"
+
+
+@pytest.mark.parametrize("eco, names", [
+    ("cargo", ["Cargo.lock", "src/main.rs"]),
+    ("cargo", [".github/workflows/ci.yaml"]),
+    ("cargo", ["Cargo.lock.bak"]),
+    ("github_actions", [".github/workflows/sub/ci.yaml"]),
+    ("github_actions", [".github/workflows/ci.sh"]),
+    ("github_actions", ["Cargo.lock"]),
+    ("github_actions", [".github/dependabot.yml"]),
+    ("docker", ["Cargo.toml"]),
+    ("docker", ["notDockerfile"]),
+    # ecosystems no yadgarhq dependabot.yml uses are left for a person
+    ("pip", ["requirements.txt"]),
+    ("npm_and_yarn", ["package.json"]),
+    ("gomod", ["go.mod"]),
+])
+def test_a_file_outside_the_ecosystem_is_skipped(eco, names):
+    case = with_files(as_ecosystem(dependabot_merge(), eco), names)
+    skipped(case, "B8")
+
+
+@pytest.mark.parametrize("names", [["Cargo.lock", "src/lib.rs"], [".github/workflows/ci.yaml"],
+                                   ["Containerfile"]])
+def test_a_repin_pull_request_changes_cargo_files_only(names):
+    skipped(with_files(repin_merge(), names), "B8")
+
+
+@pytest.mark.parametrize("status", ["removed", "renamed", "added", "copied", "changed"])
+def test_a_file_not_merely_modified_is_skipped(status):
+    skipped(with_files(dependabot_merge(), ["Cargo.lock"], status), "B8")
+
+
+def test_a_files_listing_that_may_be_truncated_or_disagrees_is_skipped():
+    case = dependabot_merge()
+    case.pr["changed_files"] = 2
+    skipped(case, "B8")
+    case = with_files(dependabot_merge(), [f"c{i}/Cargo.toml" for i in range(100)])
+    skipped(case, "B8")
+    case = dependabot_merge()
+    del case.pr["changed_files"]
+    skipped(case, "unexpected API shape")
+
+
+def test_a_repin_merge_deletes_the_repin_branch():
+    _, writes = bot_act(repin_merge(), "merge", "repin")
+    assert writes[-1] == ("delete", OWNER, "gateway", REPIN_BRANCH)
+
+
+def test_a_dependabot_refresh_is_one_rebase_comment():
+    case = dependabot_behind()
+    done, writes = bot_act(case, "refresh", "dependabot")
+    assert writes == [("comment", OWNER, "task", 106, REBASE)]
+    assert done.startswith("asked dependabot to rebase yadgarhq/task#106")
+
+
+def test_a_refused_bot_merge_is_a_skip_and_deletes_nothing():
+    case = dependabot_merge()
+    writes = []
+    with pytest.raises(sweep.Skip, match="M2"):
+        sweep.act(Fake(case.data, writes), Fake(case.data, writes, refuse_merge="HTTP 405"), OWNER,
+                  "task", 106, case.head, "merge", classes(), BOT_NOW, "dependabot")
+    assert [w[0] for w in writes] == ["merge"]
+
+
+def test_the_merge_re_checks_provenance_on_the_head_it_merges():
+    """B3 is read again by `act` right before the merge, on the same head."""
+    case = dependabot_merge()
+    case.commits[0]["commit"]["verification"]["verified"] = False
+    writes = []
+    with pytest.raises(sweep.Skip, match="M1"):
+        sweep.act(Fake(case.data, writes), Fake(case.data, writes), OWNER, "task", 106,
+                  case.head, "merge", classes(), BOT_NOW, "dependabot")
+    assert writes == []
+
+
+def test_a_leg_whose_kind_is_not_the_verdicts_writes_nothing():
+    case = dependabot_merge()
+    for kind in ("", "repin"):
+        writes = []
+        with pytest.raises(sweep.Skip, match="M1"):
+            sweep.act(Fake(case.data, writes), Fake(case.data, writes), OWNER, "task", 106,
+                      case.head, "merge", classes(), BOT_NOW, kind)
+        assert writes == []
+
+
+def test_an_adoption_leg_is_not_handed_a_bot_kind():
+    case = merge_case()
+    writes = []
+    with pytest.raises(sweep.Skip, match="M1"):
+        sweep.act(Fake(case.data, writes), Fake(case.data, writes), OWNER, "store", 45, case.head,
+                  "merge", classes(), BOT_NOW, "dependabot")
+    assert writes == []
+
+
+def test_a_bot_head_that_moved_since_evaluate_is_not_merged():
+    case = dependabot_merge()
+    writes = []
+    with pytest.raises(sweep.Skip, match="M1: the head moved"):
+        sweep.act(Fake(case.data, writes), Fake(case.data, writes), OWNER, "task", 106,
+                  "a" * 40, "merge", classes(), BOT_NOW, "dependabot")
+    assert writes == []
+
+
+# the real client
+
+
+def test_the_real_client_comments_exactly_the_rebase_command():
+    gh = sweep.SweepGh("token")
+    calls = []
+    gh._api = lambda *a, **k: calls.append((a, k))
+    gh.comment(OWNER, "task", 106, REBASE)
+    assert calls == [(("-X", "POST", "repos/yadgarhq/task/issues/106/comments"),
+                      {"payload": {"body": REBASE}})]
+    with pytest.raises(Refusal):
+        gh.comment(OWNER, "task", 106, "@dependabot merge")
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("branch", ["main", "actions-adopt", "repin", "repin/", "repin/../main",
+                                    "dependabot/", "feature/dependabot/x", "repin/a/b"])
+def test_the_real_client_deletes_no_branch_but_a_bots(branch):
+    gh = sweep.SweepGh("token")
+    calls = []
+    gh._api = lambda *a, **k: calls.append(a)
+    with pytest.raises(Refusal):
+        gh.delete_branch(OWNER, "task", branch)
+    assert calls == []
+
+
+def test_the_real_client_deletes_a_bot_branch_and_tolerates_it_gone():
+    gh = sweep.SweepGh("token")
+    calls = []
+
+    def api(*a, **k):
+        calls.append((a, k))
+        raise Refusal("gh api: Reference does not exist (HTTP 422)")
+
+    gh._api = api
+    gh.delete_branch(OWNER, "task", DEPENDABOT_BRANCH)
+    assert calls == [(("-X", "DELETE", f"repos/yadgarhq/task/git/refs/heads/{DEPENDABOT_BRANCH}"),
+                      {"missing_ok": True})]
+
+
+# the sweep and the plan
+
+
+def bot_estate(*cases, adoption=()):
+    data = estate(*adoption)
+    listing = data[f"orgs/{OWNER}/repos?type=public&per_page=100&page=1"]
+    for case in cases:
+        for k, v in case.data.items():
+            data.setdefault(k, v)
+        if case.repo not in [m["name"] for m in listing]:
+            listing.append({"name": case.repo, "topics": case.meta["topics"]})
+        data.setdefault(f"repos/{OWNER}/{case.repo}/pulls?head={OWNER}:actions-adopt&state=open"
+                        f"&per_page=10", [])
+        data.setdefault(f"repos/{OWNER}/{case.repo}/pulls?state=open&per_page=100", []).append(
+            {"number": case.n, "user": {"login": case.pr["user"]["login"]},
+             "head": {"ref": case.pr["head"]["ref"]}})
+    return data
+
+
+def test_the_sweep_finds_bot_pull_requests_in_every_repository():
+    data = bot_estate(dependabot_merge(), repin_merge())
+    rows, todo = sweep.sweep(Fake(data), OWNER, classes(), BOT_NOW)
+    assert sorted(r["n"] for r in rows if r.get("kind")) == [106, 160]
+    assert todo == [
+        {"repo": "gateway", "n": 160, "head": BotCase("gateway-160").head, "action": "merge",
+         "kind": "repin"},
+        {"repo": "task", "n": 106, "head": BotCase("task-106").head, "action": "merge",
+         "kind": "dependabot"}]
+
+
+def test_an_adoption_write_keeps_its_plan_row_unchanged():
+    data = bot_estate(dependabot_merge(), adoption=("store-45",))
+    _, todo = sweep.sweep(Fake(data), OWNER, classes(), BOT_NOW)
+    assert todo[0] == {"repo": "store", "n": 45, "head": Case("store-45").head, "action": "merge"}
+    assert [t["repo"] for t in todo] == ["store", "task"]
+
+
+def test_a_bot_write_yields_its_repository_to_an_adoption_write():
+    case = Case("store-45")
+    rows = [{"repo": "store", "n": 45, "head": case.head, "action": "merge"},
+            {"repo": "store", "n": 7, "head": "b" * 40, "action": "merge", "kind": "dependabot"}]
+    assert sweep.plan(rows, 10) == [{"repo": "store", "n": 45, "head": case.head, "action": "merge"}]
+    assert rows[1]["reason"].startswith("M5")
+
+
+def test_one_bot_write_per_repository_per_run():
+    rows = [{"repo": "a", "n": 1, "head": "a" * 40, "action": "merge", "kind": "dependabot"},
+            {"repo": "a", "n": 2, "head": "b" * 40, "action": "refresh", "kind": "dependabot"}]
+    assert [t["n"] for t in sweep.plan(rows, 10)] == [1]
+    assert rows[1]["reason"].startswith("M5")
+
+
+def test_bot_merges_count_against_the_merge_cap_after_adoption_merges():
+    rows = [{"repo": "a", "n": 1, "head": "a" * 40, "action": "merge", "kind": "repin"},
+            {"repo": "b", "n": 2, "head": "b" * 40, "action": "merge"}]
+    assert sweep.plan(rows, 1) == [{"repo": "b", "n": 2, "head": "b" * 40, "action": "merge"}]
+    assert rows[0]["reason"].startswith("M4")
+
+
+def test_the_sweep_reads_bot_pull_requests_in_a_repository_with_no_class_topic():
+    data = bot_estate(dependabot_merge())
+    listing = data[f"orgs/{OWNER}/repos?type=public&per_page=100&page=1"]
+    [m] = [m for m in listing if m["name"] == "task"]
+    m["topics"] = []
+    _, todo = sweep.sweep(Fake(data), OWNER, classes(), BOT_NOW)
+    assert [t["n"] for t in todo] == [106]
+
+
+def test_an_archived_or_excluded_repository_has_no_bot_listing_read():
+    data = bot_estate(dependabot_merge())
+    listing = data[f"orgs/{OWNER}/repos?type=public&per_page=100&page=1"]
+    [m] = [m for m in listing if m["name"] == "task"]
+    m["archived"] = True
+    del data[f"repos/{OWNER}/task/pulls?state=open&per_page=100"]
+    assert sweep.sweep(Fake(data), OWNER, classes(), BOT_NOW)[1] == []
+    m["archived"] = False
+    assert sweep.sweep(Fake(data), OWNER, classes(exclude={"task": "r"}), BOT_NOW)[1] == []
+
+
+def test_a_person_s_pull_request_is_never_judged_as_a_bot_s():
+    data = bot_estate(dependabot_merge())
+    data[f"repos/{OWNER}/task/pulls?state=open&per_page=100"].append(
+        {"number": 200, "user": {"login": "m-agahi"}, "head": {"ref": "dependabot/cargo/x"}})
+    rows, _ = sweep.sweep(Fake(data), OWNER, classes(), BOT_NOW)
+    assert 200 not in [r["n"] for r in rows]
+
+
+def test_a_full_bot_listing_page_is_a_skip_row_not_a_silent_miss():
+    data = bot_estate(dependabot_merge())
+    data[f"repos/{OWNER}/task/pulls?state=open&per_page=100"] = [{"number": i} for i in range(100)]
+    rows, todo = sweep.sweep(Fake(data), OWNER, classes(), BOT_NOW)
+    assert todo == []
+    assert any(r["repo"] == "task" and "truncated" in r["reason"] for r in rows)
+
+
+def test_only_the_newest_open_repin_pull_request_in_a_repository_is_judged():
+    """2026-10-31: a repin run opened a NEW pull request on the SAME head branch
+    while an older one stayed open (task-db #122 and #125, project-db #97 and
+    #100, iam-db #124 and #126). Only the newest is judged."""
+    data = bot_estate(repin_merge())
+    data[f"repos/{OWNER}/gateway/pulls?state=open&per_page=100"].insert(
+        0, {"number": 150, "user": {"login": "yadgarhq-bot[bot]"}, "head": {"ref": REPIN_BRANCH}})
+    rows, todo = sweep.sweep(Fake(data), OWNER, classes(), BOT_NOW)
+    [old] = [r for r in rows if r["n"] == 150]
+    assert old["action"] == "skip" and old["reason"].startswith("B4") and "#160" in old["reason"]
+    assert [t["n"] for t in todo] == [160]
+
+
+def test_the_act_command_takes_the_legs_kind(tmp_path, monkeypatch):
+    case = dependabot_merge()
+    armed_act(tmp_path, monkeypatch, case, Fake)
+    monkeypatch.setattr(sweep, "now_utc", lambda: BOT_NOW)
+    code = sweep.main(["act", "--owner", OWNER, "--repo", "task", "--n", "106",
+                       "--head", case.head, "--action", "merge", "--kind", "dependabot"])
+    assert code == 0
+    assert "merged yadgarhq/task#106" in (tmp_path / "summary").read_text()
+
+
+# B9: who pushed every ref update of the head branch (repository activity API)
+
+
+def test_the_activity_api_shows_a_person_s_push_on_the_recorded_pr():
+    """gateway#159 as recorded: m-agahi's update-branch is a `push` by m-agahi."""
+    case = BotCase("gateway-159")
+    assert [(a["activity_type"], a["actor"]["login"]) for a in case.activity][0] == ("push", "m-agahi")
+    case.commits[:] = case.commits[:1]  # even with the merge commit gone from the list
+    case.commits[0]["sha"] = case.head
+    skipped(case, "B9")
+
+
+@pytest.mark.parametrize("make, change", [
+    (dependabot_merge, lambda c: c.activity[0]["actor"].update(id=7, login="x")),
+    (dependabot_merge, lambda c: c.activity[-1]["actor"].update(id=BOT)),
+    (dependabot_merge, lambda c: c.activity.insert(0, {"activity_type": "push", "actor": {"id": 7},
+                                                       "after": c.head,
+                                                       "timestamp": "2026-10-31T22:00:00Z"})),
+    (dependabot_merge, lambda c: c.activity[0].update(after="a" * 40)),
+    (dependabot_merge, lambda c: c.activity[0].update(activity_type="merge_queue_merge")),
+    (dependabot_merge, lambda c: c.activity[0].update(activity_type="branch_deletion")),
+    (dependabot_merge, lambda c: c.activity.clear()),
+    (dependabot_merge, lambda c: c.activity.extend([dict(c.activity[-1])] * 100)),
+    (repin_merge, lambda c: c.activity[0]["actor"].update(id=DEPENDABOT)),
+])
+def test_a_ref_update_not_pushed_by_the_bot_is_skipped(make, change):
+    case = make()
+    change(case)
+    skipped(case, "B9")
+
+
+def test_the_bots_own_pushes_are_admitted():
+    case = dependabot_merge()
+    assert {a["actor"]["id"] for a in case.activity} == {DEPENDABOT}
+    assert case.judge()["action"] == "merge"
+
+
+# B10: the bot soak, parity with the adoption path's T5
+
+
+def test_a_head_pushed_inside_the_bot_soak_is_not_merged():
+    case = dependabot_merge()
+    pushed = datetime.datetime(2026, 10, 31, 21, 57, 31, tzinfo=datetime.timezone.utc)
+    skipped(case, "B10", now=pushed + datetime.timedelta(minutes=29))
+    assert case.judge(now=pushed + datetime.timedelta(minutes=30))["action"] == "merge"
+    skipped(case, "B10", cfg=classes(bot_soak_hours=24))
+
+
+def test_the_bot_soak_counts_from_the_push_of_the_head_not_the_commit_date():
+    case = dependabot_merge()
+    case.activity[0]["timestamp"] = "2026-11-01T11:50:00Z"
+    skipped(case, "B10")
+
+
+def test_a_behind_pull_request_is_asked_to_rebase_inside_the_soak():
+    case = dependabot_behind()
+    assert case.judge(cfg=classes(bot_soak_hours=24))["action"] == "refresh"
+
+
+@pytest.mark.parametrize("make", [dependabot_merge, dependabot_behind])
+def test_a_timeline_that_may_be_truncated_is_skipped(make):
+    """A full page hides older events: the force-push actors (B3) and the
+    rebase-ask caps (B6) would read only part of it."""
+    case = make()
+    case.timeline.extend({"event": "labeled"} for _ in range(100 - len(case.timeline)))
+    skipped(case, "B3: the timeline may be truncated")
+    case.timeline.pop()
+    assert case.judge()["action"] in ("merge", "refresh")

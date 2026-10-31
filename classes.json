@@ -17,6 +17,7 @@
       "argocd-verify": "Private: the public-only listing never reaches it, and R1 would refuse it. The report renders this entry from here, so it says why it is never swept."
     },
     "soak_hours": 0.5,
+    "bot_soak_hours": 0.5,
     "max_merges": 10,
     "max_refreshes_per_pr_per_day": 3
   },

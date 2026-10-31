@@ -1,0 +1,630 @@
+{
+  "__about__": {
+    "pull_request": "yadgarhq/task#106",
+    "recorded": "2026-10-31, read-only GETs as m-agahi",
+    "normalised": [
+      "merged by m-agahi before it was read: state closed -> open, merged true -> false",
+      "mergeable -> true, mergeable_state -> clean",
+      "timeline: merged, closed, head_ref_deleted and referenced events dropped",
+      "base branch ref a0a9f60c76a6382f7a8d5bc91552550c67eabb6d -> the pull request's base.sha",
+      "compare re-keyed to base.sha...head: -> ahead/behind 0",
+      "added 2026-11-01, read-only: changed_files, the files listing, and each commit's message",
+      "added 2026-11-01, read-only: the branch's repository activity up to the recorded head; later entries dropped: ['branch_deletion by m-agahi']"
+    ],
+    "shape": "ADR-1106 dependabot pull request: one verified dependabot commit, up to date, ci / passed green on the head"
+  },
+  "repos/yadgarhq/task": {
+    "name": "task",
+    "private": false,
+    "visibility": "public",
+    "owner": {
+      "login": "yadgarhq"
+    },
+    "archived": false,
+    "disabled": false,
+    "fork": false,
+    "topics": ["yadgar-class-service", "yadgar-deployable"],
+    "default_branch": "main"
+  },
+  "repos/yadgarhq/task/pulls/106": {
+    "number": 106,
+    "state": "open",
+    "draft": false,
+    "locked": false,
+    "title": "build(deps): bump tokio from 1.53.3 to 1.54.1 in the minor-and-patch group across 1 directory",
+    "body": "Bumps the minor-and-patch group with 1 update in the / directory: [tokio](https://github.com/tokio-rs/tokio).\n\nUpdates `tokio` from 1.53.3 to 1.54.1\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/tokio-rs/tokio/releases\">tokio's releases</a>.</em></p>\n<blockquote>\n<h2>Tokio v1.54.1</h2>\n<h1>1.54.1 (October 21st, 2026)</h1>\n<h3>Fixed</h3>\n<ul>\n<li>time: revert &quot;remove the runtime handle from timers&quot; (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8692\">#8692</a>)</li>\n</ul>\n<p><a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8692\">#8692</a>: <a href=\"https://redirect.github.com/tokio-rs/tokio/pull/8692\">tokio-rs/tokio#8692</a></p>\n<h2>Tokio v1.54.0</h2>\n<h1>1.54.0 (October 19th, 2026)</h1>\n<p>The 1.54.0 release includes all changes up to 1.53.3.</p>\n<p>The MSRV is increased to 1.85. (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8514\">#8514</a>)</p>\n<h3>Added</h3>\n<ul>\n<li>fs: add <code>File::set_times</code>, <code>File::set_modified</code>, and <code>fs::FileTimes</code> (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8504\">#8504</a>)</li>\n<li>net: implement <code>Default</code> for <code>named_pipe::{ClientOptions, ServerOptions}</code> (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8378\">#8378</a>)</li>\n<li>runtime: add <code>Builder::max_io_events_per_busy_tick</code> (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8410\">#8410</a>)</li>\n<li>runtime: stabilize <code>tokio::runtime::worker_index()</code> (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8431\">#8431</a>)</li>\n<li>sync: add <code>SemaphorePermit::semaphore()</code> (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8482\">#8482</a>)</li>\n<li>sync: add <code>blocking_acquire</code> methods to <code>Semaphore</code> (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8269\">#8269</a>)</li>\n<li>sync: add <code>watch::Receiver::is_closed</code> (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8481\">#8481</a>)</li>\n<li>wasm: support JSPI for Emscripten target (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8285\">#8285</a>, <a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8627\">#8627</a>)</li>\n<li>wasm: support the <code>wasm32-unknown-emscripten</code> target (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8281\">#8281</a>, <a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8422\">#8422</a>, <a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8528\">#8528</a>, <a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8628\">#8628</a>)</li>\n</ul>\n<h3>Changed</h3>\n<ul>\n<li>fs: reject zero in <code>File::set_max_buf_size</code> (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8449\">#8449</a>)</li>\n<li>io: make <code>copy_buf</code> cooperative (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8459\">#8459</a>)</li>\n<li>io: panic when <code>BufReader</code> or <code>BufStream</code> is created with zero capacity (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8494\">#8494</a>)</li>\n<li>io: panic when in-memory pipe is created with zero capacity (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8397\">#8397</a>)</li>\n<li>io: reject zero buffer size in <code>copy_bidirectional_with_sizes</code> (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8454\">#8454</a>)</li>\n<li>io: support vectored writes in <code>Sink</code> (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8663\">#8663</a>)</li>\n<li>net: start <code>UnixStream::pair</code> and <code>UnixDatagram::pair</code> sockets as writable (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8444\">#8444</a>)</li>\n<li>net: start accepted sockets as readable and writable (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8435\">#8435</a>)</li>\n<li>net: support <code>UCred</code> on Fuchsia (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8257\">#8257</a>)</li>\n<li>process: use <code>mio::unix::pipe</code> for Unix child stdio (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8603\">#8603</a>)</li>\n<li>runtime: cache-pad the shared injection queue and idle state (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8622\">#8622</a>)</li>\n<li>runtime: decide auto-boxing of spawned futures at monomorphization time (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8414\">#8414</a>)</li>\n<li>runtime: make <code>enable_io</code> available whenever <code>rt</code> is enabled (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8387\">#8387</a>)</li>\n<li>runtime: move <code>block_in_place</code> setup into a non-generic function (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8315\">#8315</a>)</li>\n<li>runtime: move the multi-thread inject queue to its own mutex (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8382\">#8382</a>)</li>\n<li>runtime: panic when <code>max_io_events_per_tick</code> is zero (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8476\">#8476</a>)</li>\n<li>runtime: suggest <code>.await</code> in nested <code>block_on</code> panic message (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8501\">#8501</a>)</li>\n<li>sync: avoid atomic reader count in broadcast slots (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8357\">#8357</a>)</li>\n<li>sync: use acquire/release orderings in <code>Notify</code> (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8325\">#8325</a>)</li>\n<li>time: remove the runtime handle from timers (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8458\">#8458</a>)</li>\n</ul>\n<!-- raw HTML omitted -->\n</blockquote>\n<p>... (truncated)</p>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a href=\"https://github.com/tokio-rs/tokio/commit/b53b2001ed2ccfd9b87e32a0c6da1a1eebdc80b8\"><code>b53b200</code></a> chore: prepare Tokio v1.54.1 (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8693\">#8693</a>)</li>\n<li><a href=\"https://github.com/tokio-rs/tokio/commit/5ed619bbaba87357ee5103d71b75e7c84cad99c9\"><code>5ed619b</code></a> time: revert &quot;remove the runtime handle from timers&quot; (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8692\">#8692</a>)</li>\n<li><a href=\"https://github.com/tokio-rs/tokio/commit/66d34e45c9c850ed72bc61f2ad107368217f040d\"><code>66d34e4</code></a> chore: prepare Tokio v1.54.0 (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8667\">#8667</a>)</li>\n<li><a href=\"https://github.com/tokio-rs/tokio/commit/0d322ce79aef3df11d2bfa87d379ac1d06168ade\"><code>0d322ce</code></a> io: support vectored writes in sink (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8663\">#8663</a>)</li>\n<li><a href=\"https://github.com/tokio-rs/tokio/commit/4167c5634ef9cd091cc5b37156f04cfdb0595414\"><code>4167c56</code></a> codec: expose I/O sources from codec errors (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8665\">#8665</a>)</li>\n<li><a href=\"https://github.com/tokio-rs/tokio/commit/cdd9dae3aa5056e23dc4d5bc4f852ab8fbf27aff\"><code>cdd9dae</code></a> fs: propagate iouring stress test failures (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8644\">#8644</a>)</li>\n<li><a href=\"https://github.com/tokio-rs/tokio/commit/52ac7816230efabcae6fcc09cbe7ae630a48eddf\"><code>52ac781</code></a> ci: run the emscripten JSPI tests as an auto-initialized ES module (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8640\">#8640</a>)</li>\n<li><a href=\"https://github.com/tokio-rs/tokio/commit/4890d027f8a566ccf081e7f019ed766f780df1af\"><code>4890d02</code></a> stream: implement <code>FusedStream</code> for <code>JoinSetStream</code> (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8629\">#8629</a>)</li>\n<li><a href=\"https://github.com/tokio-rs/tokio/commit/a6bd8e170c4e895fab26024bdfeea1c568567545\"><code>a6bd8e1</code></a> wasm: check Emscripten version when using JSPI (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8627\">#8627</a>)</li>\n<li><a href=\"https://github.com/tokio-rs/tokio/commit/9dd749d33408ffee1a4fd7c462546651416428a8\"><code>9dd749d</code></a> Merge 'tokio-1.53.3' into 'master' (<a href=\"https://redirect.github.com/tokio-rs/tokio/issues/8641\">#8641</a>)</li>\n<li>Additional commits viewable in <a href=\"https://github.com/tokio-rs/tokio/compare/tokio-1.53.3...tokio-1.54.1\">compare view</a></li>\n</ul>\n</details>\n<br />\n",
+    "labels": [
+      {
+        "name": "dependencies"
+      },
+      {
+        "name": "rust"
+      }
+    ],
+    "mergeable": true,
+    "mergeable_state": "clean",
+    "merged": false,
+    "user": {
+      "login": "dependabot[bot]",
+      "id": 49699333,
+      "type": "Bot"
+    },
+    "head": {
+      "ref": "dependabot/cargo/minor-and-patch-3a28fe187f",
+      "sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+      "repo": {
+        "full_name": "yadgarhq/task"
+      }
+    },
+    "base": {
+      "ref": "main",
+      "sha": "3f2f92ad5f29ab444a04d688df481e7c828b94f6",
+      "repo": {
+        "full_name": "yadgarhq/task"
+      }
+    },
+    "changed_files": 1
+  },
+  "repos/yadgarhq/task/pulls/106/reviews?per_page=100": [],
+  "graphql": {
+    "data": {
+      "repository": {
+        "pullRequest": {
+          "reviewThreads": {
+            "totalCount": 0,
+            "nodes": []
+          }
+        }
+      }
+    }
+  },
+  "repos/yadgarhq/task/issues/106/timeline?per_page=100": [
+    {
+      "event": "labeled",
+      "actor": {
+        "id": 49699333,
+        "login": "dependabot[bot]"
+      },
+      "created_at": "2026-10-31T00:43:14Z"
+    },
+    {
+      "event": "labeled",
+      "actor": {
+        "id": 49699333,
+        "login": "dependabot[bot]"
+      },
+      "created_at": "2026-10-31T00:43:15Z"
+    },
+    {
+      "event": "committed"
+    },
+    {
+      "event": "renamed",
+      "actor": {
+        "id": 49699333,
+        "login": "dependabot[bot]"
+      },
+      "created_at": "2026-10-31T21:57:32Z"
+    },
+    {
+      "event": "head_ref_force_pushed",
+      "actor": {
+        "id": 49699333,
+        "login": "dependabot[bot]"
+      },
+      "created_at": "2026-10-31T21:57:32Z"
+    }
+  ],
+  "repos/yadgarhq/task/pulls/106/commits?per_page=100": [
+    {
+      "sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+      "author": {
+        "id": 49699333,
+        "login": "dependabot[bot]",
+        "type": "Bot"
+      },
+      "committer": {
+        "id": 19864447,
+        "login": "web-flow"
+      },
+      "commit": {
+        "verification": {
+          "verified": true
+        },
+        "message": "build(deps): bump tokio\n\nBumps the minor-and-patch group with 1 update in the / directory: [tokio](https://github.com/tokio-rs/tokio).\n\n\nUpdates `tokio` from 1.53.3 to 1.54.1\n- [Release notes](https://github.com/tokio-rs/tokio/releases)\n- [Commits](https://github.com/tokio-rs/tokio/compare/tokio-1.53.3...tokio-1.54.1)\n\n---\nupdated-dependencies:\n- dependency-name: tokio\n  dependency-version: 1.54.1\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n  dependency-group: minor-and-patch\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>"
+      },
+      "parents": [
+        {
+          "sha": "3f2f92ad5f29ab444a04d688df481e7c828b94f6"
+        }
+      ]
+    }
+  ],
+  "repos/yadgarhq/task/git/ref/heads/main": {
+    "ref": "refs/heads/main",
+    "object": {
+      "sha": "3f2f92ad5f29ab444a04d688df481e7c828b94f6",
+      "type": "commit"
+    }
+  },
+  "repos/yadgarhq/task/commits/3f0cd4fd2089c61ad756df4f361c2400ae1e58cd/check-runs?per_page=100": {
+    "total_count": 33,
+    "check_runs": [
+      {
+        "name": "ci / passed",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798913031
+        }
+      },
+      {
+        "name": "ci / hook_tools_adopted",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798913031
+        }
+      },
+      {
+        "name": "ci / service_immutable",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798913031
+        }
+      },
+      {
+        "name": "ci / pre_pin_parent",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798913031
+        }
+      },
+      {
+        "name": "ci / proto",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798913031
+        }
+      },
+      {
+        "name": "ci / precommit",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798913031
+        }
+      },
+      {
+        "name": "ci / release_ready",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798913031
+        }
+      },
+      {
+        "name": "ci / portability",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798913031
+        }
+      },
+      {
+        "name": "ci / workflows",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798913031
+        }
+      },
+      {
+        "name": "ci / test",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798913031
+        }
+      },
+      {
+        "name": "ci / vulnerabilities",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798913031
+        }
+      },
+      {
+        "name": "ci / pre_pin_parent",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798915091
+        }
+      },
+      {
+        "name": "ci / precommit",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798915091
+        }
+      },
+      {
+        "name": "ci / proto",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798915091
+        }
+      },
+      {
+        "name": "ci / service_immutable",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798915091
+        }
+      },
+      {
+        "name": "ci / hook_tools_adopted",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798915091
+        }
+      },
+      {
+        "name": "ci / portability",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798915091
+        }
+      },
+      {
+        "name": "ci / vulnerabilities",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798915091
+        }
+      },
+      {
+        "name": "ci / workflows",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798915091
+        }
+      },
+      {
+        "name": "ci / release_ready",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798915091
+        }
+      },
+      {
+        "name": "ci / test",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798915091
+        }
+      },
+      {
+        "name": "ci / passed",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798915091
+        }
+      },
+      {
+        "name": "ci / template",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798915091
+        }
+      },
+      {
+        "name": "ci / version",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798915091
+        }
+      },
+      {
+        "name": "release",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798915091
+        }
+      },
+      {
+        "name": "main",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798915091
+        }
+      },
+      {
+        "name": "ci / detect",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798915091
+        }
+      },
+      {
+        "name": "ci / template",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798913031
+        }
+      },
+      {
+        "name": "ci / version",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798913031
+        }
+      },
+      {
+        "name": "main",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798913031
+        }
+      },
+      {
+        "name": "release",
+        "status": "completed",
+        "conclusion": "skipped",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798913031
+        }
+      },
+      {
+        "name": "ci / detect",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 15368
+        },
+        "check_suite": {
+          "id": 111798913031
+        }
+      },
+      {
+        "name": "CodeQL",
+        "status": "completed",
+        "conclusion": "neutral",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "app": {
+          "id": 57789
+        },
+        "check_suite": {
+          "id": 111798905075
+        }
+      }
+    ]
+  },
+  "repos/yadgarhq/task/actions/runs?head_sha=3f0cd4fd2089c61ad756df4f361c2400ae1e58cd&per_page=100": {
+    "total_count": 2,
+    "workflow_runs": [
+      {
+        "path": ".github/workflows/ci.yaml",
+        "event": "pull_request",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "head_branch": "dependabot/cargo/minor-and-patch-3a28fe187f",
+        "status": "completed",
+        "conclusion": "success",
+        "check_suite_id": 111798915091,
+        "referenced_workflows": [
+          {
+            "path": "yadgarhq/actions/.github/workflows/ci-release.yaml@main",
+            "sha": "33cd5ccd0c79448325c84aa73e8c7e1c2b8ded1b"
+          },
+          {
+            "path": "yadgarhq/actions/.github/workflows/ci-pr.yaml@main",
+            "sha": "33cd5ccd0c79448325c84aa73e8c7e1c2b8ded1b"
+          }
+        ]
+      },
+      {
+        "path": ".github/workflows/ci.yaml",
+        "event": "pull_request",
+        "head_sha": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+        "head_branch": "dependabot/cargo/minor-and-patch-3a28fe187f",
+        "status": "completed",
+        "conclusion": "success",
+        "check_suite_id": 111798913031,
+        "referenced_workflows": [
+          {
+            "path": "yadgarhq/actions/.github/workflows/ci-pr.yaml@main",
+            "sha": "33cd5ccd0c79448325c84aa73e8c7e1c2b8ded1b"
+          },
+          {
+            "path": "yadgarhq/actions/.github/workflows/ci-release.yaml@main",
+            "sha": "33cd5ccd0c79448325c84aa73e8c7e1c2b8ded1b"
+          }
+        ]
+      }
+    ]
+  },
+  "repos/yadgarhq/actions/compare/33cd5ccd0c79448325c84aa73e8c7e1c2b8ded1b...main": {
+    "status": "identical",
+    "behind_by": 0
+  },
+  "repos/yadgarhq/task/compare/3f2f92ad5f29ab444a04d688df481e7c828b94f6...3f0cd4fd2089c61ad756df4f361c2400ae1e58cd": {
+    "status": "ahead",
+    "ahead_by": 1,
+    "behind_by": 0,
+    "total_commits": 1
+  },
+  "repos/yadgarhq/task/pulls/106/files?per_page=100": [
+    {
+      "filename": "Cargo.lock",
+      "status": "modified"
+    }
+  ],
+  "repos/yadgarhq/task/activity?ref=refs/heads/dependabot/cargo/minor-and-patch-3a28fe187f&per_page=100": [
+    {
+      "activity_type": "force_push",
+      "actor": {
+        "id": 49699333,
+        "login": "dependabot[bot]"
+      },
+      "after": "3f0cd4fd2089c61ad756df4f361c2400ae1e58cd",
+      "timestamp": "2026-10-31T21:57:31Z"
+    },
+    {
+      "activity_type": "branch_creation",
+      "actor": {
+        "id": 49699333,
+        "login": "dependabot[bot]"
+      },
+      "after": "68d384d480e0adb1f35ad9932fb30487a1626788",
+      "timestamp": "2026-10-31T00:43:11Z"
+    }
+  ]
+}
