@@ -11,7 +11,7 @@
     "`rust_bump` is ADR-1120: `.github/workflows/rust-bump.yaml` opens one bot pull request per public Rust repository whose Rust version fields differ from `versions.yaml` rust-toolchain (`scripts/rust_propagate.py`). `rust_bump.live` ARMS ITS SCHEDULE AND PUSH TRIGGER and ships false; set it true only in a reviewed pull request, after a dry run from main."
   ],
   "live": true,
-  "rust_bump": { "live": false },
+  "rust_bump": { "live": true },
   "sweep": {
     "live": true,
     "exclude": {

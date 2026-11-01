@@ -265,9 +265,11 @@ def test_armed_reads_a_json_boolean_only():
             rprop.armed(bad)
 
 
-def test_classes_json_ships_dry():
+def test_classes_json_ships_armed():
+    # Armed by ADR-1120 rollout step 3, after dry run 41336035199 on main
+    # listed the 14 repositories and the one rust-version line each would move.
     data = json.loads((Path(__file__).resolve().parents[2] / "classes.json").read_text())
-    assert rprop.armed(data) is False
+    assert rprop.armed(data) is True
 
 
 def test_the_version_is_read_from_versions_yaml():
