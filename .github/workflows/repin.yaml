@@ -38,8 +38,10 @@ name: repin
 # clause: the `sweep` workflow in this repository merges a repin pull request
 # (author `yadgarhq-bot[bot]`, head `repin/...`) once `ci / passed` is green on
 # its head, but only when every commit is verified and committed by GitHub.
-# The commit this workflow pushes with git below is unsigned, so until it is
-# made through the API a repin pull request is still merged by a person.
+# So the commit is made through the git data API with the App's token, which
+# GitHub signs as the App with `web-flow` as committer, and the branch moves
+# through the refs API with the same token (`scripts/repin_publish.py`,
+# yaadgaar 517). A `git push` commit is unsigned and would fail that gate.
 #
 # NOTHING HERE KNOWS THE FOUR CRATE NAMES OR WHICH REPOSITORY HOLDS WHICH.
 # `scripts/repin.py` derives both from the manifest it is looking at — the
@@ -64,7 +66,7 @@ on:
       RELEASE_APP_PRIVATE_KEY:
         required: false
 
-# CONTENTS: READ, AND THE BRANCH PUSH BELOW DOES NOT CONTRADICT IT. Every write
+# CONTENTS: READ, AND THE BRANCH WRITE BELOW DOES NOT CONTRADICT IT. Every write
 # goes through the short-lived App installation token, which is not
 # `GITHUB_TOKEN` and which this block does not constrain. That is the point
 # rather than a loophole, and it is the same argument `ci-pr.yaml` makes about
@@ -80,13 +82,11 @@ jobs:
   repin:
     runs-on: ubuntu-latest
     steps:
-      # fetch-depth: 0 because the commit below is pushed to a branch of this
-      # repository, and a shallow clone's push is refused by some server
-      # configurations. The `version` job checks out the same way.
+      # A shallow checkout is enough: nothing here pushes with git. The commit is
+      # made through the API on this checkout's HEAD (yaadgaar 517).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 0
 
       # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
       # the commit THIS workflow file runs at, never `main`. Read through
@@ -148,10 +148,12 @@ jobs:
           else
             dir=.ci-actions/scripts
           fi
-          if [ ! -f "$dir/repin.py" ]; then
-            echo "::error::the re-pin planner is missing at $dir/repin.py"
-            exit 1
-          fi
+          for script in repin.py repin_publish.py; do
+            if [ ! -f "$dir/$script" ]; then
+              echo "::error::the re-pin script is missing at $dir/$script"
+              exit 1
+            fi
+          done
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
           if [ -f Cargo.toml ]; then
             echo "rust=true" >> "$GITHUB_OUTPUT"
@@ -251,91 +253,43 @@ jobs:
       # telemetry-v0.1.17` — so a second run of the same bump asks about the same
       # head and finds the first run's pull request.
       #
-      # ANY STATE STOPS IT, and the three mean three different things, all of
-      # which say do nothing. OPEN: it is already proposed and possibly already
-      # under review. CLOSED without a merge: a human declined THIS EXACT BUMP,
-      # and re-proposing it every week is spam rather than automation. MERGED:
-      # unreachable in practice, because the pins would then equal the greatest
-      # tags and `plan` would have written `stale=false` — belt and braces.
+      # OPEN IS A REFRESH, NOT A STOP (yaadgaar 517). The steps below rebuild the
+      # commit on this run's base, so a BEHIND repin pull request comes current
+      # on the next daily run; nothing is pushed when the head already is that
+      # commit, because a push re-runs CI and restarts the sweeper's soak.
       #
-      # THE CLOSED ARM HAS A COST AND IT IS NOT SMALL, said here rather than
-      # discovered from a pin that stopped moving. The head branch is derived from
-      # the bump CONTENT, so closing a pull request suppresses that bump for as
-      # long as it remains the greatest — permanently, if the producer cuts no
-      # further tag. Somebody who closes one because CI was red for an unrelated
-      # reason has opted this repository out until the next producer release. The
-      # alternative is worse in the common case: re-proposing a bump a human
-      # deliberately declined, every week, forever.
+      # CLOSED without a merge STOPS: a human declined THIS EXACT BUMP, and
+      # re-proposing it every day is spam rather than automation. MERGED stops
+      # too (unreachable in practice: the pins would equal the greatest tags).
       #
-      # AND `workflow_dispatch` IS NOT THE WAY BACK IN. An earlier revision of
-      # this comment said it was, and that was false. `gh pr list --head` matches
-      # the pull request record's `headRefName`, which OUTLIVES the branch ref —
-      # measured on `yadgarhq/gateway`, where
-      # `git/ref/heads/dependabot/cargo/yadgar-telemetry-v0.1.9` answers 404 and
-      # `gh pr list --head` on that same name still returns `#86 CLOSED`. A
-      # dispatched run recomputes the identical branch name from the identical
-      # bump, finds that record, and skips exactly as the scheduled run did.
-      # Reopening is not free either: GitHub refuses to reopen a pull request
-      # whose head branch was deleted until the branch is restored.
+      # THE CLOSED ARM HAS A COST AND IT IS NOT SMALL. The head branch is derived
+      # from the bump CONTENT, so closing a pull request suppresses that bump for
+      # as long as it remains the greatest — permanently, if the producer cuts no
+      # further tag. `workflow_dispatch` is not the way back in: `headRefName`
+      # outlives the branch ref (measured on `yadgarhq/gateway`, `#86 CLOSED`), so
+      # a dispatched run recomputes the same name and finds the same record. The
+      # ways back in are manual — reopen that pull request (restoring its branch
+      # first if it was deleted), or re-pin by hand — so the CLOSED arm writes a
+      # `::warning::` on the run rather than a summary line nobody opens
+      # (ADR-0689, ADR-0691).
       #
-      # SO THE SUPPRESSION IS ANNOUNCED RATHER THAN MERELY LOGGED. The ways back
-      # in are all manual and none of them is this workflow: reopen the pull
-      # request (restoring its branch first if it was deleted), or re-pin the
-      # crate by hand. A step-summary line on a green job is the silent-success
-      # class ADR-0689 and ADR-0691 condemn, so the CLOSED arm below writes a
-      # `::warning::` that names the suppressed bump on the run itself.
+      # A HEAD BRANCH WITH NO PULL REQUEST, which a run that pushed and then died
+      # leaves behind, is NOT refused: the publish step moves it and opens the
+      # pull request. Only this workflow writes `repin/*`.
       #
-      # WHAT THIS DELIBERATELY DOES NOT REFUSE: a head branch that exists with NO
-      # pull request, which is what a run that pushed and then died leaves behind.
-      # Refusing on the branch instead of on the pull request would wedge that
-      # state forever, so the push below is a force-push and the pull request is
-      # opened against it. Only this workflow writes `repin/*`, and the name is
-      # derived from content, so there is nothing of anybody else's to overwrite.
+      # Every API error reddens the step (`gh api` exits non-zero and the script
+      # refuses); none reads as "no pull request exists".
       - name: has this exact bump already been proposed
         id: proposed
         if: steps.cred.outputs.configured == 'true'
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
+          DIR: ${{ steps.where.outputs.dir }}
           BRANCH: ${{ steps.plan.outputs.branch }}
           TITLE: ${{ steps.plan.outputs.title }}
         run: |
-          # `pipefail` IS LOAD-BEARING ON THE NEXT LINE, not boilerplate. `gh` is
-          # the FIRST command of a pipeline whose exit status would otherwise be
-          # `tr`'s, so a rate limit or a transient 502 would yield an empty
-          # `states`, read as "no pull request exists", and force-push over
-          # whatever is there. Measured rather than reasoned: under `set -eu`
-          # alone, `x=$(false | sort -u | tr '\n' ' ')` reaches the next line with
-          # `x` empty and exit 0; adding `pipefail` exits 1 at the assignment.
-          # This is the one step here where an API error could become a WRONG
-          # ACTION rather than a red, so it must fail loudly instead.
           set -euo pipefail
-          states=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" \
-                     --state all --json state --jq '.[].state' | sort -u | tr '\n' ' ')
-          if [ -z "$states" ]; then
-            echo "proceed=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "proceed=false" >> "$GITHUB_OUTPUT"
-          # CLOSED IS NOT THE SAME OUTCOME AS OPEN, and reporting them the same
-          # way is what made this silent. OPEN means the proposal is in front of
-          # somebody right now and this run has nothing to add. CLOSED means the
-          # bump is SUPPRESSED, and nothing in this workflow will ever propose it
-          # again while it stays the greatest tag — a decision worth a warning on
-          # the run rather than a line in a summary nobody opens.
-          case " $states " in
-            *" CLOSED "*)
-              echo "::warning::${TITLE} is SUPPRESSED. A closed pull request on \`${BRANCH}\` (${states}) already declined this exact bump, and nothing here proposes it again while these stay the greatest tags — a re-run and workflow_dispatch both recompute the same branch name and find the same record. To take it: reopen that pull request, restoring its head branch first if it was deleted, or re-pin the crate by hand."
-              {
-                echo "### Re-pin suppressed"
-                echo
-                echo "\`$BRANCH\` carries a CLOSED pull request (${states}), so this bump was declined and is NOT re-proposed."
-                echo "See the warning on this run for the ways back in."
-              } >> "$GITHUB_STEP_SUMMARY"
-              ;;
-            *)
-              echo "_\`$BRANCH\` already carries a pull request (${states}), so nothing was opened._" >> "$GITHUB_STEP_SUMMARY"
-              ;;
-          esac
+          python3 "$DIR/repin_publish.py" state "$BRANCH" "$TITLE"
 
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         if: steps.proposed.outputs.proceed == 'true'
@@ -370,39 +324,22 @@ jobs:
             echo "_No \`Cargo.lock\` here, so only \`Cargo.toml\` moved._" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      # ONE COMMIT, TWO FILES, and the author is the App rather than a person.
-      # The numeric user id is what links the commit to the bot account; the
-      # `<id>+<login>@users.noreply.github.com` form is GitHub's own.
+      # ONE COMMIT, TWO FILES, MADE BY THE API, NOT BY git (yaadgaar 517). The
+      # sweeper (ADR-1106) merges only a pull request whose every commit is the
+      # App's own, verified, committed by `web-flow`, with one parent (B3), and
+      # whose branch only the App moved (B9). `repin_publish.py` builds blobs and
+      # a tree on THIS checkout's commit, makes the commit with no author and no
+      # committer (GitHub then signs it as the App), checks it is verified before
+      # any ref moves, and moves the branch with the App token: created when
+      # absent, else compare-and-swap from the head it read. It refuses when
+      # the default branch has moved past this checkout, because these Cargo
+      # files laid over another base would revert that base's changes.
       #
-      # THE TOKEN TRAVELS IN A HEADER, AND IT REACHES git THROUGH THE
-      # ENVIRONMENT. Not in the remote url, which would persist it into
-      # `.git/config` for any later step to read; and not through `git -c
-      # http.extraheader=...`, which keeps it out of `.git/config` but puts it in
-      # this process's ARGUMENT VECTOR, where anything on the machine that can
-      # read `/proc` can see it for the life of the push. `GIT_CONFIG_COUNT` with
-      # `GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0` is the same configuration by the
-      # same mechanism, sourced from the environment instead, which is the one
-      # place the token already is.
-      #
-      # THE SCHEME MUST BE BASIC, WITH `x-access-token` AS THE USER. GitHub's git
-      # smart-HTTP endpoint does not accept `Authorization: Bearer` (it answers
-      # 401, and git then reports `could not read Username for
-      # 'https://github.com'`); that scheme is for the REST API only, which is
-      # why the `gh` calls below are fine. Measured: Basic of
-      # `x-access-token:<token>` answers 200. The header value is therefore
-      # `basic <base64(x-access-token:TOKEN)>`, the same form `actions/checkout`
-      # writes. The runner already registers base64 encodings of every
-      # registered secret, so the encoded value is masked anyway; the explicit
-      # `::add-mask::` of the full header value, BEFORE it is used, is
-      # belt-and-braces.
-      # `scripts/tests/test_git_extraheader_basic.py` holds both rules.
-      #
-      # `actions/checkout` IS NOT THE PRECEDENT FOR THE ARGV FORM, and an earlier
-      # revision of this comment wrongly said it was: checkout writes the header
-      # into `.git/config` with `git config --local` and removes it afterwards
-      # unless `persist-credentials` keeps it. The checkout above is
-      # `persist-credentials: false`, so the environment below is the only
-      # credential the working copy ever sees.
+      # THEN ONE REPIN PULL REQUEST PER REPOSITORY. A newer tag gives a new head
+      # branch, and the older bump's pull request used to stay open beside it
+      # (task-db #122 beside #125). Every other open `repin/` pull request the
+      # App opened here is closed with a comment linking this one; its branch is
+      # kept, since a `branch_deletion` would fail B9 if the name came back.
       #
       # THE PULL REQUEST BODY IS THE SQUASH COMMIT MESSAGE in every repository
       # here, and the `version` job derives the release from its `## Changelog`
@@ -410,33 +347,17 @@ jobs:
       # repository's own template, else the org default in yadgarhq/.github,
       # and one unwrapped `chore(deps):` bullet per bumped crate.
       # `scripts/tests/test_repin.py` runs the real `pr_body.review`
-      # over it in both of its modes rather than restating the rules.
-      - name: open one pull request for the whole bump
+      # over it in both of its modes rather than restating the rules. The
+      # sweeper itself squashes with the bot's commit subject and a fixed body.
+      - name: publish the bump as one signed commit and one pull request
         if: steps.proposed.outputs.proceed == 'true'
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
+          DIR: ${{ steps.where.outputs.dir }}
           BRANCH: ${{ steps.plan.outputs.branch }}
           TITLE: ${{ steps.plan.outputs.title }}
-          SLUG: ${{ steps.app.outputs.app-slug }}
         run: |
           set -euo pipefail
-          base=$(gh api "repos/${GITHUB_REPOSITORY}" --jq .default_branch)
-          uid=$(gh api "users/${SLUG}%5Bbot%5D" --jq .id)
-          git config user.name "${SLUG}[bot]"
-          git config user.email "${uid}+${SLUG}[bot]@users.noreply.github.com"
-          git add Cargo.toml
-          if [ -f Cargo.lock ]; then
-            git add Cargo.lock
-          fi
-          git commit --message "$TITLE"
-          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
-          echo "::add-mask::${auth}"
-          GIT_CONFIG_COUNT=1 \
-          GIT_CONFIG_KEY_0=http.extraheader \
-          GIT_CONFIG_VALUE_0="Authorization: basic ${auth}" \
-            git push --force origin "HEAD:refs/heads/${BRANCH}"
-          url=$(gh pr create --repo "$GITHUB_REPOSITORY" --base "$base" \
-                  --head "$BRANCH" --title "$TITLE" \
-                  --body-file "$RUNNER_TEMP/repin_body.md")
-          echo "::notice::opened ${url}"
-          echo "Opened ${url} from \`${BRANCH}\`." >> "$GITHUB_STEP_SUMMARY"
+          parent=$(git rev-parse HEAD)
+          python3 "$DIR/repin_publish.py" publish "$BRANCH" "$TITLE" \
+            "$RUNNER_TEMP/repin_body.md" "$parent"

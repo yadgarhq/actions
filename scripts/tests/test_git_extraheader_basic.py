@@ -95,11 +95,25 @@ def test_no_git_extraheader_uses_bearer_or_an_unmasked_basic():
     assert not found, "\n".join(found)
 
 
-def test_the_scan_still_sees_the_repin_push():
-    text = workflow_texts()["repin.yaml"]
-    assert "GIT_CONFIG_VALUE_0" in text
-    assert BASIC_VAR.search(text), "repin.yaml no longer sends a Basic header"
-    assert "::add-mask::${auth}" in text
+def test_repin_no_longer_pushes_with_git():
+    """yaadgaar 517: repin.yaml makes its commit through the git data API, so
+    GitHub signs it, and no workflow here hands git a header any more. The
+    scan above stays for the next one; the red cases below keep it honest."""
+    found = workflow_texts()
+    assert "repin.yaml" in found
+    for name, text in found.items():
+        run_blocks = [
+            step.get("run") or ""
+            for job in (yaml.safe_load(text).get("jobs") or {}).values()
+            for step in job.get("steps") or []
+        ]
+        assert not any(HEADER_CONTEXT.search(r) for r in run_blocks), name
+    repin_runs = "\n".join(
+        step.get("run") or ""
+        for step in yaml.safe_load(found["repin.yaml"])["jobs"]["repin"]["steps"]
+    )
+    assert "git push" not in repin_runs and "git commit" not in repin_runs
+    assert "repin_publish.py\" publish" in repin_runs
 
 
 # ---------------------------------------------------------------------------
