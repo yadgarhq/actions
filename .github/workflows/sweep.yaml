@@ -22,9 +22,10 @@ name: sweep
 # merge and the branch rewrite (git data API blob, tree and commit, the ref
 # moved by a GraphQL `updateRefs` compare-and-swap, a repository read for its
 # node id, two commit reads, and a ref read after a failed swap) are the only
-# calls made with it. A BOT leg (`app-bot`, ADR-1106) gets `contents` and
-# `workflows: write`: the squash merge and the branch delete are the only calls
-# made with it. A RERUN leg of either kind (`app-rerun`, V1r) gets
+# calls made with it. A BOT merge leg (`app-bot`, ADR-1106) gets `contents`
+# and `workflows: write`: the squash merge and the branch delete are the only
+# calls made with it. A BOT refresh leg (`app-bot-refresh`, ADR-1119) adds
+# `pull_requests: write`: the one update-branch is the only call made with it. A RERUN leg of either kind (`app-rerun`, V1r) gets
 # `actions: write` only: the one rerun of the pull request's own ci run is
 # the only call made with it.
 #
@@ -50,11 +51,15 @@ name: sweep
 #
 # BOT PULL REQUESTS (ADR-1106). The same run also merges a dependabot or repin
 # pull request in any public repository once `ci / passed` is green on its
-# head; a BEHIND one merges too when its base does not require an up-to-date
-# branch and GitHub calls it `clean` (ADR-1109). Nothing asks
+# head and the head contains the base tip. A BEHIND one is never merged
+# (ADR-1119, superseding ADR-1109): when it passes every other gate it is
+# brought up to date with update-branch at the judged head, and a later hop
+# (the follow-up) merges it once CI is green on the new head. Nothing asks
 # dependabot to rebase: it ignores `@dependabot rebase` from the App. Such a
-# leg carries `kind`, and its token is minted by `app-bot` with `contents` and
-# `workflows: write`; an adoption leg's mint is unchanged.
+# leg carries `kind`. A merge leg's token is minted by `app-bot` with
+# `contents` and `workflows: write`; a refresh leg's by `app-bot-refresh` with
+# `contents`, `pull_requests` and `workflows: write`; an adoption leg's mint
+# is unchanged.
 # Merges made with the App token are pushes by the App, not by GITHUB_TOKEN,
 # so the consumer's push workflows (version, tag, release) run as they do for
 # a merge by hand. The squash commit's author is the pull request's author.
@@ -71,7 +76,7 @@ name: sweep
 #
 # THE FOLLOW-UP (ADR-1108: bot merges within minutes, not at the next
 # throttled cron). A live run whose evaluation left a pull request held back
-# only by the bot soak (B10), by a rerun still running, or by its own plan
+# only by the bot soak (B10), refreshed (ADR-1119), by a rerun still running, or by its own plan
 # (M4, M5) outputs `follow_up` minutes, and planned reruns as `reruns`; after
 # `act`, the `follow-up` job runs `sweep.py follow-up`, which reads each
 # rerun's run (GITHUB_TOKEN, public repositories) and gives the minutes left,
@@ -256,7 +261,7 @@ jobs:
       # reds on the missing token.
       - name: mint the bot write token for this one repository
         id: app-bot
-        if: ${{ (matrix.kind == 'dependabot' || matrix.kind == 'repin') && matrix.action != 'rerun' }}
+        if: ${{ (matrix.kind == 'dependabot' || matrix.kind == 'repin') && matrix.action == 'merge' }}
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
@@ -264,6 +269,25 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ matrix.repo }}
           permission-contents: write
+          permission-workflows: write
+      # ADR-1119. A behind bot pull request is brought up to date: the pull
+      # request's update-branch, with `expected_head_sha`. GitHub's App
+      # permission table lists that call under `pull_requests: write`, and its
+      # endpoint page asks an App for write on the head repository's contents.
+      # `workflows: write` as for `app-bot`: the merge commit brings the base's
+      # `.github/workflows/` changes onto the branch (unmeasured for
+      # update-branch). The update-branch is the only call made with it.
+      - name: mint the bot refresh token for this one repository
+        id: app-bot-refresh
+        if: ${{ (matrix.kind == 'dependabot' || matrix.kind == 'repin') && matrix.action == 'refresh' }}
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ matrix.repo }}
+          permission-contents: write
+          permission-pull-requests: write
           permission-workflows: write
       # V1r (yaadgaar 518 item 4). A leg whose `ci / passed` check GitHub lost
       # reruns that pull request's own ci run once: POST
@@ -282,7 +306,7 @@ jobs:
       - name: merge or refresh
         env:
           GH_TOKEN: ${{ github.token }}
-          SWEEP_WRITE_TOKEN: ${{ steps.app.outputs.token || steps.app-bot.outputs.token || steps.app-rerun.outputs.token }}
+          SWEEP_WRITE_TOKEN: ${{ steps.app.outputs.token || steps.app-bot.outputs.token || steps.app-bot-refresh.outputs.token || steps.app-rerun.outputs.token }}
           OWNER: ${{ github.repository_owner }}
           EVENT: ${{ github.event_name }}
           DRY_RUN: ${{ inputs.dry_run }}

@@ -342,7 +342,8 @@ jobs:
       # branch has moved past this checkout, the commit still goes on THIS
       # checkout and the pull request opens behind main, because these Cargo
       # files laid over the newer base would revert its changes; the sweeper
-      # merges a clean behind bot pull request (ADR-1109). It refuses a
+      # brings a behind bot pull request up to date with update-branch, which
+      # merges the base in, and merges it after CI (ADR-1119). It refuses a
       # checkout the default branch does not contain (a dispatch from another
       # branch), and a commit that would change nothing.
       #

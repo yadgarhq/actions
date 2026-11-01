@@ -16,10 +16,12 @@ exactly as before. A bot pull request needs: head and base in this repository,
 base the default branch, open, not draft, not locked, no `no-auto-merge` label
 (B2); no change request and no unresolved thread (P5); PROVENANCE (B3): every
 commit authored by that bot, verified, committed by `web-flow`, and not a merge,
+save the sweeper's own update-branch commit in its exact shape (ADR-1119),
 and every force-push the bot's; every changed file MODIFIED and owned by the
 ecosystem (B8: `FILES` for dependabot's cargo, github_actions and docker,
 Cargo files for repin; any other ecosystem is left for a person); every ref
-update of the head branch pushed by the bot, the newest one the head (B9, the
+update of the head branch pushed by the bot, or by the App for an
+update-branch commit B3 admitted, the newest one the head (B9, the
 repository activity API); `ci / passed` green on the head from the
 repository's own pull_request CI run on that branch (V1, V2; `ci-self.yaml` in
 the producer, which calls `ci-pr.yaml` by local path; V3 is not asked); and
@@ -36,17 +38,27 @@ Up to date (U1, U2): a squash merge at the head sha (GitHub refuses it if the
 head moved), titled with the bot's own first commit subject (B7) and with the
 fixed `BOT_MESSAGE`, never the editable pull request title or body, so no text
 a person typed reaches history or `derive`; then the bot's branch is deleted, as `delete_branch_on_merge` is
-off. BEHIND (ADR-1109; strict up-to-date checks are off estate-wide):
-the same squash merge at the head sha, when the base's rules do not require an
-up-to-date branch (U4, read from `rules/branches/<base>`) AND GitHub itself
-calls the pull request `clean` (U5, `mergeable_state`). Either one says no: a
-skip. A base that still requires up to date (U4) is a skip, and nothing is
-asked of anyone: dependabot ignores `@dependabot rebase` from the App (chart#84,
-two comments, no reaction), so the comment path is gone. Never update-branch,
-which adds a merge commit B3 refuses. Red, pending or conflicting: a skip, left
-for a person. `act` judges the pull request again from scratch, B3 included,
-on the same head before it writes. The plan takes adoption writes first, then at most one bot write per
-repository per run (M5) within the same merge cap (M4).
+off. A pull request merges ONLY when its head contains the base tip.
+
+BEHIND (ADR-1119, superseding ADR-1109 and, for bot pull requests, ADR-0693):
+never a merge. A behind bot pull request that passes every other gate (B2-B10,
+V1 and V2 green on its current head, U3 mergeable) is REFRESHED: one
+update-branch with `expected_head_sha` the judged head (GitHub answers 422 if
+it moved), which merges the base tip into the branch. The row is due when CI
+on the new head and the restarted B10 soak should be done
+(`REFRESH_WAIT_MINUTES` or the soak, whichever is longer), so the follow-up
+(ADR-1108) asks for a later hop, which judges the new head from scratch and
+merges it. The commit GitHub makes for it is the one merge commit B3 admits
+(App author, `web-flow` committer, verified, parents [previous head, a commit
+on the base tip], GitHub's message), and B9 admits the App's push of exactly
+that commit. Strict up-to-date rules and `mergeable_state` (the old U4 and U5)
+are no longer read. Dependabot stops rebasing a pull request once someone else
+has pushed to it, so a refreshed dependabot pull request is kept current by
+this sweeper from then on. Red, pending or conflicting: a skip, left for a
+person. `act` judges the pull request again from scratch, B3 included, on the
+same head before it writes. The plan takes adoption writes first, then at most
+one bot write per repository per run (M5) within the same merge cap (M4); a
+refresh is a write but not a merge.
 
 A BEHIND pull request whose base did not touch `.pre-commit-config.yaml` is
 REFRESHED instead: `actions-adopt` is moved, in one ref write, to a new commit
@@ -54,9 +66,10 @@ on the base tip carrying the same file (`fan_out.Gh.rewrite_branch`; never
 through the base tip itself, which closes the pull request, yaadgaar 466), so
 CI runs fresh and a later sweep can merge it. That write is a compare-and-swap
 from the head evaluated (yaadgaar 470): a fan-out rewrite that lands first is
-kept, and the refresh is a skip. Never through
-`update-branch` (ADR-0693) and never through `fan_out.one`, which no-ops on a
-behind pull request whose config is unchanged.
+kept, and the refresh is a skip. An adoption pull request is still never
+update-branched (ADR-0693 stands there; ADR-1119 sanctions it for bot pull
+requests only): its one commit is what K2 proves. Never through
+`fan_out.one`, which no-ops on a behind pull request whose config is unchanged.
 
 THE MERGE IS A SQUASH that sends the head sha, the title and the body itself.
 The body carries no Conventional Commits bullet (P7), so the consumer's
@@ -75,9 +88,9 @@ one green `ci / passed` job whose check run, read by id, is green on this
 head in that run's suite, and the run was created less than `LOST_MAX_AGE`
 ago. The probe's verdict counts only once every gate that can still refuse
 the pull request has passed (yaadgaar 518 item 5 (c)): U2 and U3 for an
-adoption pull request; U3, U2 or U4 and U5, and B10 for a bot one, where U5
-also takes `blocked` for the rerun alone, as a missing required check is what
-makes GitHub say that (a merge still needs `clean`). Then the row is `rerun`:
+adoption pull request; U3, U2 or U1, and B10 for a bot one. A behind bot pull
+request with a lost check is rerun, never refreshed: a refresh needs
+`ci / passed` proven green, and a later hop refreshes it. Then the row is `rerun`:
 `act` reruns that run once, re-reading the attempt up to `RERUN_READS` times
 (item 5 (d)), and the row is handed to the follow-up as due
 `RERUN_WAIT_MINUTES` later. A run already rerun and completed, still running
@@ -91,7 +104,8 @@ chain.
 THE FOLLOW-UP (ADR-1108: bot merges within minutes). GitHub fires the
 cron every 3-4 hours, and no event in another repository reaches this one
 without a new credential or a webhook. So a LIVE run that leaves a pull request
-held back only by time (B10, whose row carries `due`) or by its own plan (M4,
+held back only by time (B10, whose row carries `due`), refreshed (ADR-1119,
+due once CI on the new head should be done), or held by its own plan (M4,
 M5) dispatches the next run of this workflow for when that pull request is due:
 `follow_up` gives the minutes, the `follow-up` job sleeps them and dispatches
 with GITHUB_TOKEN (`actions: write`, this repository only). A planned rerun's
@@ -112,7 +126,9 @@ rewrite makes (the repository's node id, the parent commit, the new commit, and
 the branch after a failed swap), are the only calls made with the App token,
 minted per repository with `contents: write`. A bot leg's token (ADR-1106) is
 minted per repository with `contents` and `workflows: write`, for the merge and
-the branch delete. A rerun leg's token (V1r) is minted per repository with
+the branch delete. A bot refresh leg's token (ADR-1119) is minted per
+repository with `contents`, `pull_requests` and `workflows: write`, for the
+one update-branch. A rerun leg's token (V1r) is minted per repository with
 `actions: write` only, for the one rerun.
 
 Commands:
@@ -211,6 +227,10 @@ WRITES = ("merge", "refresh", "rerun")  # the actions a plan row can carry
 # (yadgar run 41290991069, 2026-11-01), a cargo suite takes longer. GitHub's
 # run timestamps were skewed that day, so no duration is read from them.
 RERUN_WAIT_MINUTES = 15
+# ADR-1119. A refresh row is due this long after the run that planned it, or
+# after the bot soak if that is longer: ci p95 is under 5 minutes, the cold
+# maximum 13.
+REFRESH_WAIT_MINUTES = 15
 # (b) yaadgaar 518 item 5. A V1-pending row whose own ci run is at attempt 2 or
 # more, not completed, and started (`run_started_at`, the latest attempt's
 # start) less than this long ago, either way, is due RERUN_WAIT_MINUTES later.
@@ -805,28 +825,58 @@ def check_bot_pr(pr, meta, owner):
     return kind, pr["head"]["ref"]
 
 
-def check_bot_commits(commits, timeline, kind, head):
+def check_bot_commits(commits, timeline, kind, head, base, branch, on_base):
     """B3, PROVENANCE. EVERY commit is the bot's own (author id and type Bot),
-    verified, and committed by GitHub's `web-flow`, with exactly one parent.
-    An author id is only an email match, so it never admits a commit alone,
-    and a merge commit is never admitted: one can carry any edit (conflict
-    resolution), whoever signed it. repin.yaml makes its commit through the
-    git data API (actions#153), which GitHub signs and `web-flow` commits; an
-    older repin pull request's `git push` commit is unsigned and committed by
-    the App, so it fails this and waits for a person. Every force-push is the
-    bot's."""
+    verified, and committed by GitHub's `web-flow`, with exactly one parent;
+    or it is the sweeper's own update-branch commit (ADR-1119), and nothing
+    else. An author id is only an email match, so it never admits a commit
+    alone. repin.yaml makes its commit through the git data API (actions#153),
+    which GitHub signs and `web-flow` commits; an older repin pull request's
+    `git push` commit is unsigned and committed by the App, so it fails this
+    and waits for a person. Every force-push is the bot's.
+
+    THE ONE MERGE COMMIT ADMITTED is the shape GitHub's update-branch makes,
+    measured on gateway#159 (a person's): authored here by the App (BOT_ID,
+    type Bot), verified, committed by `web-flow`, EXACTLY two parents, the
+    first the commit before it in this list, the second on the base branch
+    tip at judge time (`on_base`, a compare), and the message
+    `Merge branch '<base>' into <branch>`. Never the first commit: there is no
+    bot commit for it to bring up to date. A merge can carry any edit, and
+    this shape does not prove there is none. What bounds it: GitHub's own
+    update-branch never resolves a conflict, so a merge GitHub made is a clean
+    one; after it the merge base is the base tip, so an edit to a file outside
+    the ecosystem's allowlist is a changed file B8 refuses. An edit INSIDE a
+    file B8 admits (more `Cargo.lock`, another workflow file for
+    github_actions) is not caught here: a forged commit of this shape needs the
+    App's key, for the commit and for the push B9 binds to it, which is the
+    App-key trust repin and the ruleset bypass already rest on. Any other
+    merge commit, whoever made or signed it, is refused.
+
+    Returns the B7 subject and the set of admitted update-branch commits."""
     bot_id = BOTS[kind][0]
     commits = as_list(commits, "commits")
     need(len(commits) >= 1 and dig(commits, -1, "sha") == head, "B3: the last commit is not the head")
-    for commit in commits:
+    refreshes = set()
+    for i, commit in enumerate(commits):
         author, committer = dig(commit, "author"), dig(commit, "committer")
-        need(isinstance(author, dict) and is_int(author.get("id")) and author["id"] == bot_id
-             and author.get("type") == "Bot", f"B3: a commit not authored by the {kind} bot")
         need(dig(commit, "commit", "verification", "verified") is True
              and isinstance(committer, dict) and is_int(committer.get("id"))
              and committer["id"] == WEB_FLOW_ID, "B3: a commit not verified and committed by GitHub")
         parents = dig(commit, "parents")
-        need(isinstance(parents, list) and len(parents) == 1, "B3: a merge commit (or a root commit)")
+        need(isinstance(parents, list) and len(parents) in (1, 2), "B3: a root commit or an octopus merge")
+        if len(parents) == 1:
+            need(isinstance(author, dict) and is_int(author.get("id")) and author["id"] == bot_id
+                 and author.get("type") == "Bot", f"B3: a commit not authored by the {kind} bot")
+            continue
+        sha, first, second = dig(commit, "sha"), dig(parents, 0, "sha"), dig(parents, 1, "sha")
+        need(i > 0 and isinstance(author, dict) and is_int(author.get("id")) and author["id"] == BOT_ID
+             and author.get("type") == "Bot"
+             and dig(commit, "commit", "message") == f"Merge branch '{base}' into {branch}"
+             and first == dig(commits, i - 1, "sha")
+             and isinstance(second, str) and bool(SHA.fullmatch(second)) and on_base(second)
+             and isinstance(sha, str) and bool(SHA.fullmatch(sha)),
+             "B3: a merge commit that is not the sweeper's update-branch (ADR-1119)")
+        refreshes.add(sha)
     for event in as_list(timeline, "timeline"):
         if dig(event, "event") == "head_ref_force_pushed":
             need(dig(event, "actor", "id") == bot_id, "B3: someone else force-pushed the branch")
@@ -835,7 +885,7 @@ def check_bot_commits(commits, timeline, kind, head):
     message = dig(commits, 0, "commit", "message")
     subject = message.split("\n")[0].strip() if isinstance(message, str) else ""
     need(0 < len(subject) <= TITLE_MAX, "B7: the bot's commit has no usable subject for a title")
-    return subject
+    return subject, refreshes
 
 
 def check_bot_files(files, pr, kind, branch):
@@ -858,47 +908,47 @@ def check_bot_files(files, pr, kind, branch):
 PUSHES = ("branch_creation", "push", "force_push")
 
 
-def check_bot_pushes(activity, kind, head):
+def check_bot_pushes(activity, kind, head, refreshes):
     """B9. WHO PUSHED, which a commit cannot claim. The repository activity API
     names the actor of every ref update of the head branch, a plain push
-    included. Every one must be the bot, and the newest must have put `head`
-    there. Returns when the head arrived, where the bot soak (B10) counts from.
-    It also closes the API-commit forgery B3 cannot: a commit made through the
-    API with the bot's author email may verify, but its push is the forger's."""
+    included. Every one must be the bot, or a plain `push` by the App
+    (BOT_ID) of an update-branch commit B3 admitted (ADR-1119: GitHub records
+    the App as the pusher of its update-branch, as gateway#159 recorded
+    m-agahi for his; the App's case is not yet measured). The newest must have
+    put `head` there. Returns when the head arrived, where the bot soak (B10)
+    counts from: a refresh push restarts it. It also closes the API-commit
+    forgery B3 cannot: a commit made through the API with the bot's author
+    email may verify, but its push is the forger's."""
     bot_id = BOTS[kind][0]
     need(isinstance(activity, list) and 1 <= len(activity) < PAGE,
          "B9: the branch activity is empty or may be truncated")
     for event in activity:
-        need(dig(event, "activity_type") in PUSHES, f"B9: a {event.get('activity_type')!r} on the branch")
-        need(dig(event, "actor", "id") == bot_id, "B9: a ref update not pushed by the bot")
+        kind_of = dig(event, "activity_type")
+        need(kind_of in PUSHES, f"B9: a {event.get('activity_type')!r} on the branch")
+        actor = dig(event, "actor", "id")
+        refresh = kind_of == "push" and actor == BOT_ID and dig(event, "after") in refreshes
+        need(refresh or (actor == bot_id and dig(event, "after") not in refreshes),
+             "B9: a ref update not pushed by the bot")
     need(dig(activity, 0, "after") == head, "B9: the newest ref update is not the head")
     return parse_time(dig(activity, 0, "timestamp"))
 
 
-def strict_base(rules):
-    """U4 (ADR-1109). True unless the base branch's rules are read in full and no
-    `required_status_checks` rule on it asks for an up-to-date branch. A rule
-    whose `strict_required_status_checks_policy` is missing or not a boolean
-    may ask for it, so it counts as strict: fail closed."""
-    if not isinstance(rules, list) or len(rules) >= PAGE:
-        return True
-    for rule in rules:
-        if not isinstance(rule, dict):
-            return True
-        if rule.get("type") != "required_status_checks":
-            continue
-        params = rule.get("parameters")
-        policy = params.get("strict_required_status_checks_policy") if isinstance(params, dict) else None
-        if policy is not False:
-            return True
-    return False
+def contains(api, owner, name, tip):
+    """For B3: whether the base tip `tip` contains commit `sha`, by a compare
+    from `sha` to the tip. Anything but identical or ahead with nothing behind
+    is no."""
+    def on_base(sha):
+        compare = api.get(f"repos/{owner}/{name}/compare/{sha}...{tip}")
+        return dig(compare, "status") in ("identical", "ahead") and dig(compare, "behind_by") == 0
+    return on_base
 
 
 def evaluate_bot(api, owner, name, n, classes, now):
     """ADR-1106: merge a bot pull request whose `ci / passed` is green on its
-    head. Up to date, or BEHIND on a base that does not require up-to-date
-    branches and that GitHub calls `clean` (U4, U5). Red, pending, conflicting
-    or behind a strict base: a skip."""
+    head, which contains the base tip. ADR-1119 (supersedes ADR-1109): a
+    BEHIND one is never merged. When it passes every other gate it is
+    REFRESHED (update-branch at its head), and a later run merges it once CI is
+    green on the new head. Red, pending or conflicting: a skip."""
     meta = api.get(f"repos/{owner}/{name}")
     check_bot_repo(meta, owner, classes)
     pr = api.get(f"repos/{owner}/{name}/pulls/{int(n)}")
@@ -916,12 +966,13 @@ def evaluate_bot(api, owner, name, n, classes, now):
     # A full page hides older events: B3's force-push actors must read the
     # whole timeline, or the pull request is a skip.
     need(isinstance(timeline, list) and len(timeline) < PAGE, "B3: the timeline may be truncated")
-    subject = check_bot_commits(api.get(f"repos/{owner}/{name}/pulls/{n}/commits?per_page={PAGE}"),
-                                timeline, kind, head)
+    subject, refreshes = check_bot_commits(
+        api.get(f"repos/{owner}/{name}/pulls/{n}/commits?per_page={PAGE}"), timeline, kind, head,
+        base, branch, contains(api, owner, name, tip))
     check_bot_files(api.get(f"repos/{owner}/{name}/pulls/{n}/files?per_page={PAGE}"), pr, kind, branch)
     ref = urllib.parse.quote(f"refs/heads/{branch}", safe="/")
     pushed = check_bot_pushes(api.get(f"repos/{owner}/{name}/activity?ref={ref}&per_page={PAGE}"),
-                              kind, head)
+                              kind, head, refreshes)
     compare = fetcher(api)(ci_verdict.compare_url(f"{owner}/{name}", tip, head))
     status, behind = dig(compare, "status"), dig(compare, "behind_by")
     workflow, caller = ci_shape(name)
@@ -929,32 +980,18 @@ def evaluate_bot(api, owner, name, n, classes, now):
     try:
         check_ci(api, owner, name, head, now=now, branch=branch, workflow=workflow, caller=caller,
                  precommit=False)
-    except Lost as found:  # (c): rerun only after U3, U2 or U4/U5, and B10 admit it
+    except Lost as found:  # (c): rerun only after U3, U2 or U1, and B10 admit it
         found.kind = kind
         lost = found
     need(dig(pr, "mergeable") is True, "U3: GitHub does not call it mergeable")
     verdict = {"repo": name, "n": n, "head": head, "title": subject, "body": BOT_MESSAGE,
                "kind": kind, "branch": branch, "reason": f"{kind} (ADR-1106)"}
-    if status == "ahead" and behind == 0:
+    up_to_date = status == "ahead" and behind == 0
+    if up_to_date:
         need(dig(pr, "base", "sha") == tip, "U2: the pull request's base sha is not the base tip")
     else:
-        need(status == "diverged" and is_int(behind) and behind > 0, f"U1: compare status {status!r}")
         # BEHIND. U2 does not apply: `base.sha` is the old base by definition.
-        # The merge is still bound to the head sha. Two independent readings
-        # must both say an out-of-date branch may merge: the rule itself, and
-        # GitHub's verdict for this pull request.
-        # A full page: GitHub answers 30 rules without `per_page`, and
-        # `strict_base` can only tell a list of PAGE or more as truncated.
-        rules = api.get(f"repos/{owner}/{name}/rules/branches/"
-                        f"{urllib.parse.quote(base, safe='/')}?per_page={PAGE}")
-        need(not strict_base(rules), "U4: behind, and the base requires an up-to-date branch")
-        # U5 (ADR-1109). A missing required check is what makes GitHub say
-        # `blocked`, so for the RERUN of a lost check `blocked` passes too. A
-        # merge never does: `act` judges the pull request again after the rerun.
-        states = ("clean",) if lost is None else ("clean", "blocked")
-        state = pr.get("mergeable_state")
-        need(isinstance(state, str) and state in states,
-             f"U5: behind, and GitHub calls it {state!r}, not {' or '.join(map(repr, states))}")
+        need(status == "diverged" and is_int(behind) and behind > 0, f"U1: compare status {status!r}")
     # B10, parity with T5: the head must have sat on the branch this long.
     # Every other gate passed, so the row says when it is due (the follow-up).
     soak = datetime.timedelta(hours=classes["sweep"]["bot_soak_hours"])
@@ -963,7 +1000,15 @@ def evaluate_bot(api, owner, name, n, classes, now):
                      pushed + soak)
     if lost is not None:
         raise lost
-    return dict(verdict, action="merge")
+    if up_to_date:
+        return dict(verdict, action="merge")
+    # ADR-1119. Every gate passed on this head but U1: bring it up to date. The
+    # refresh push is the branch's newest, so B10 restarts from it, and the
+    # row is due once CI on the new head and that soak should both be done.
+    return dict(verdict, action="refresh",
+                reason=f"U: behind base by {behind}; brought up to date (update-branch), "
+                       f"merges after CI on the new head",
+                due=now + max(datetime.timedelta(minutes=REFRESH_WAIT_MINUTES), soak))
 
 
 def route(api, owner, name, n, classes, now):
@@ -1137,7 +1182,7 @@ def hop_input(text):
 def follow_up(rows, now, hop):
     """ADR-1108. Minutes until the next run should start, or None for no follow-up.
 
-    A row with `due` (B10, or a V1r rerun still running) is due a minute after
+    A row with `due` (B10, a bot refresh, or a V1r rerun still running) is due a minute after
     that time; a row the plan held back (M4, M5) is due at once, one minute,
     after this run's `act`. A PLANNED rerun is not, here: whether it took is
     known only after `act`, so its due goes to `reruns_due` and `after_act`
@@ -1304,9 +1349,19 @@ def act_bot(reader, writer, owner, name, n, head, action, verdict):
     scratch (B3 included) on this same head. A merge is the same squash at the
     head sha as an adoption merge (GitHub refuses it if the head moved), then
     the bot's branch is deleted (`delete_branch_on_merge` is off estate-wide).
-    A bot verdict is never a refresh. Never update-branch: that adds a merge
-    commit."""
-    need(action == "merge", f"M1: a bot leg only merges, not {action!r}")
+    A REFRESH (ADR-1119) is one update-branch with `expected_head_sha` the
+    judged head, and nothing else: no merge, no delete. GitHub answers it 202
+    and makes the merge commit later, so no head move is asserted here; the
+    next run judges whatever head is there from scratch."""
+    if action == "refresh":
+        try:
+            writer.update_branch(owner, name, n, head)
+        except Refusal as exc:
+            if REFUSED.search(str(exc)):
+                raise Skip(f"M2: update-branch was refused: {exc}") from None
+            raise Refusal(f"M2: the update-branch call was denied: {exc}") from None
+        return f"brought {owner}/{name}#{n} up to date from {head} (update-branch); merges after CI"
+    need(action == "merge", f"M1: a bot leg merges or refreshes, not {action!r}")
     try:
         writer.merge_pr(owner, name, n, head, f"{verdict['title']} (#{n})", BOT_MESSAGE)
     except Refusal as exc:
@@ -1368,6 +1423,12 @@ class SweepGh(fan_out.Gh):
         self._api("-X", "PUT", f"repos/{fan_out.q(owner)}/{fan_out.q(name)}/pulls/{int(n)}/merge",
                   payload={"merge_method": "squash", "sha": head,
                            "commit_title": title, "commit_message": message})
+
+    def update_branch(self, owner, name, n, head):
+        """ADR-1119: bring a behind bot pull request up to date, only from the
+        head the sweeper judged (GitHub answers 422 when it moved)."""
+        self._api("-X", "PUT", f"repos/{fan_out.q(owner)}/{fan_out.q(name)}/pulls/{int(n)}/update-branch",
+                  payload={"expected_head_sha": head})
 
     def rerun_run(self, owner, name, run):
         """V1r: rerun one workflow run, every job (a lost check can be any job's)."""

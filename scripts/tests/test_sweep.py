@@ -68,8 +68,9 @@ class Fake:
     """Answers `get` from a recorded dict; records every write; never reaches GitHub."""
 
     def __init__(self, data, writes=None, refuse_merge=None, refuse_rerun=None, rerun_noop=False,
-                 rerun_lag=0):
+                 rerun_lag=0, refuse_update=None):
         self.data = data
+        self.refuse_update = refuse_update
         self.writes = [] if writes is None else writes
         self.refuse_merge = refuse_merge
         self.refuse_rerun = refuse_rerun
@@ -98,6 +99,11 @@ class Fake:
             raise Refusal(f"gh api merge: {self.refuse_merge}")
         pr = self.data[f"repos/{owner}/{name}/pulls/{n}"]
         pr.update(merged=True, state="closed", merge_commit_sha="f" * 40)
+
+    def update_branch(self, owner, name, n, head):
+        self.writes.append(("update_branch", owner, name, n, {"expected_head_sha": head}))
+        if self.refuse_update:
+            raise Refusal(f"gh api update-branch: {self.refuse_update}")
 
     def rewrite_branch(self, owner, name, branch, parent, path, text, message, exists,
                        expect=None):
@@ -1148,16 +1154,20 @@ def test_only_sweep_py_can_merge():
     assert holders == [SCRIPT]
 
 
-def test_nothing_calls_update_branch():
-    """ADR-0693: an adoption pull request is refreshed by `rewrite_branch`. A
-    bot pull request (ADR-1106) is never update-branched either: that merges
-    the base in, and a merge commit is refused by B3. A behind bot pull request
-    merges as it is once the base no longer requires up-to-date branches."""
-    for path in (SCRIPT, WORKFLOW):
-        assert "/update-branch" not in path.read_text()
-        assert "pr update-branch" not in path.read_text()
-        assert "updatePullRequestBranch" not in path.read_text()
-    assert not hasattr(fan_out.Gh, "update_branch") and not hasattr(sweep.SweepGh, "update_branch")
+def test_only_the_sweepers_bot_refresh_calls_update_branch():
+    """ADR-1119 sanctions the sweeper's App update-branch for a BEHIND bot pull
+    request, superseding ADR-0693 on that one point. It lives in `SweepGh` and
+    nowhere else: the fan-out has none, and an adoption pull request is still
+    refreshed by `rewrite_branch`, whose single commit K2 proves."""
+    assert not hasattr(fan_out.Gh, "update_branch") and hasattr(sweep.SweepGh, "update_branch")
+    holders = [p for p in [*(REPO / ".github" / "workflows").glob("*.y*ml"),
+                           *(REPO / "scripts").glob("*.py")]
+               if "/update-branch" in p.read_text() or "pr update-branch" in p.read_text()
+               or "updatePullRequestBranch" in p.read_text()]
+    assert holders == [SCRIPT]
+    assert SCRIPT.read_text().count("/update-branch") == 1
+    adoption = sweep.act.__code__.co_names
+    assert "update_branch" not in adoption  # only `act_bot` calls it
 
 
 def workflow():
@@ -1215,10 +1225,10 @@ def test_a_bot_leg_mints_for_one_repository_what_a_merge_needs():
     an App may not merge that without `workflows: write`. The squash merge and
     the branch delete need `contents: write`. No `pull_requests: write`: the
     sweeper no longer comments. Only a leg whose kind is a known bot gets them."""
-    assert [m["id"] for m in mints("act")] == ["app", "app-bot", "app-rerun"]
+    assert [m["id"] for m in mints("act")] == ["app", "app-bot", "app-bot-refresh", "app-rerun"]
     [bot] = [m for m in mints("act") if m["id"] == "app-bot"]
     assert bot["if"] == ("${{ (matrix.kind == 'dependabot' || matrix.kind == 'repin')"
-                         " && matrix.action != 'rerun' }}")
+                         " && matrix.action == 'merge' }}")
     assert bot["with"]["repositories"] == "${{ matrix.repo }}"
     assert {k: v for k, v in bot["with"].items() if k.startswith("permission-")} == {
         "permission-contents": "write", "permission-workflows": "write"}
@@ -1226,9 +1236,26 @@ def test_a_bot_leg_mints_for_one_repository_what_a_merge_needs():
     assert names.index("leg") < names.index("app-bot")
     [go] = [s for s in steps("act") if s.get("name") == "merge or refresh"]
     assert go["env"]["SWEEP_WRITE_TOKEN"] == (
-        "${{ steps.app.outputs.token || steps.app-bot.outputs.token || steps.app-rerun.outputs.token }}")
+        "${{ steps.app.outputs.token || steps.app-bot.outputs.token || steps.app-bot-refresh.outputs.token"
+        " || steps.app-rerun.outputs.token }}")
     assert go["env"]["KIND"] == "${{ matrix.kind }}"
     assert '--kind "$KIND"' in go["run"]
+
+
+def test_a_bot_refresh_leg_mints_for_one_repository_what_update_branch_needs():
+    """ADR-1119. GitHub's permission table lists update-branch under `pull
+    requests: write`, and its endpoint page asks an App for write on the head
+    repository's contents too. `workflows: write` as for `app-bot`: the merge
+    commit brings the base's `.github/workflows/` changes onto the branch, and
+    GitHub refuses an App's push that changes a workflow without it
+    (unmeasured for update-branch). Nothing else, one repository."""
+    [mint] = [m for m in mints("act") if m["id"] == "app-bot-refresh"]
+    assert mint["with"]["repositories"] == "${{ matrix.repo }}"
+    assert {k: v for k, v in mint["with"].items() if k.startswith("permission-")} == {
+        "permission-contents": "write", "permission-pull-requests": "write",
+        "permission-workflows": "write"}
+    names = [s.get("id") or s.get("name") for s in steps("act")]
+    assert names.index("leg") < names.index("app-bot-refresh")
 
 
 def test_the_act_job_runs_only_live_and_checks_the_name_before_the_mint():
@@ -1509,94 +1536,68 @@ def test_an_up_to_date_green_bot_pull_request_is_merged(make, kind, branch):
     assert (got["kind"], got["branch"]) == (kind, branch)
 
 
-def test_a_behind_green_dependabot_pull_request_merges_when_the_base_is_not_strict():
-    """Strict is off (Max, 2026-11-01): GitHub calls a behind, green pull request
-    CLEAN, and it merges at its head sha like an up-to-date one."""
-    got = dependabot_behind().judge()
-    assert got["action"] == "merge", got
+# ADR-1119 (supersedes ADR-1109): a BEHIND bot pull request is never merged. One
+# that passes every other gate is brought up to date with update-branch, and a
+# later run merges it once CI is green on the new head (Max, 2026-11-01).
+
+
+def refreshed(got, behind_by=1):
+    assert got["action"] == "refresh", got
+    assert got["reason"].startswith(f"U: behind base by {behind_by}; brought up to date"), got
+    return got
+
+
+def test_a_behind_green_dependabot_pull_request_is_refreshed_never_merged():
+    got = refreshed(dependabot_behind().judge())
     assert got["kind"] == "dependabot"
+    assert "merges after CI on the new head" in got["reason"]
 
 
-def test_a_behind_signed_repin_pull_request_merges_when_the_base_is_not_strict():
-    got = signed(behind(BotCase("gateway-160"))).judge()
-    assert got["action"] == "merge", got
+def test_a_behind_signed_repin_pull_request_is_refreshed_never_merged():
+    got = refreshed(signed(behind(BotCase("gateway-160"))).judge())
     assert got["kind"] == "repin"
 
 
-def test_the_recorded_behind_repin_pull_request_under_strict_is_skipped():
-    """gateway#160 as recorded under strict: `mergeable_state` `behind`."""
+def test_the_recorded_behind_repin_pull_request_is_refreshed_whatever_github_calls_it():
+    """gateway#160 as recorded under strict: `mergeable_state` `behind`. Neither
+    the rule nor GitHub's state is read any more: behind is a refresh."""
     case = signed(BotCase("gateway-160"))
     assert case.pr["mergeable_state"] == "behind"
-    strict(case)
-    skipped(case, "U4")
+    refreshed(strict(case).judge())
+
+
+@pytest.mark.parametrize("state", ["clean", "behind", "blocked", "dirty", "unknown", "unstable",
+                                   "has_hooks", "draft", None, "", 7])
+def test_a_behind_bot_pull_request_is_never_merged_whatever_github_calls_it(state):
+    """ADR-0645: the old U5 admitted a behind merge on `clean`; no state does now."""
+    case = dependabot_behind()
+    case.pr["mergeable_state"] = state
+    refreshed(case.judge())
 
 
 @pytest.mark.parametrize("make", [dependabot_behind, lambda: signed(behind(BotCase("gateway-160")))])
-def test_a_behind_bot_pull_request_on_a_strict_base_is_skipped_not_asked_to_rebase(make):
-    """Dependabot ignores `@dependabot rebase` from the App (chart#84: two
-    comments, no reaction, head unchanged), so a strict base is a plain skip."""
+def test_a_behind_bot_pull_request_reads_no_rules_and_is_refreshed_on_a_strict_base_too(make):
     case = strict(make())
-    skipped(case, "U4")
-    # GitHub's own verdict alone, with the rule read as not strict, still skips.
-    for rule in rules(case):
-        if rule["type"] == "required_status_checks":
-            rule["parameters"]["strict_required_status_checks_policy"] = False
-    skipped(case, "U5")
-
-
-@pytest.mark.parametrize("state", ["behind", "blocked", "dirty", "unknown", "unstable", "has_hooks",
-                                   "draft", None, "", 7])
-def test_a_behind_bot_pull_request_github_does_not_call_clean_is_skipped(state):
-    case = dependabot_behind()
-    case.pr["mergeable_state"] = state
-    skipped(case, "U5")
-
-
-@pytest.mark.parametrize("change", [
-    lambda r: r.clear() or r.append({"type": "required_status_checks"}),
-    lambda r: [x["parameters"].update(strict_required_status_checks_policy="false")
-               for x in r if x["type"] == "required_status_checks"],
-    lambda r: [x["parameters"].pop("strict_required_status_checks_policy")
-               for x in r if x["type"] == "required_status_checks"],
-    lambda r: r.append({"type": "required_status_checks",
-                        "parameters": {"strict_required_status_checks_policy": True}}),
-    lambda r: r.append("not a rule"),
-])
-def test_rules_that_require_or_may_require_up_to_date_are_a_skip(change):
-    case = dependabot_behind()
-    change(rules(case))
-    skipped(case, "U4")
-
-
-def test_unreadable_rules_are_a_skip():
-    case = dependabot_behind()
     del case.data[f"{case.r}/{RULES}"]
-    assert case.judge()["action"] == "skip"
+    refreshed(case.judge())
+
+
+def test_the_refresh_is_due_when_ci_and_the_soak_on_the_new_head_should_be_done():
+    """ADR-1108's follow-up: the refresh push restarts B10 (it is the newest ref
+    update), so the row is due after the longer of CI and the bot soak."""
+    got = dependabot_behind().judge()
+    assert got["due"] == BOT_NOW + max(datetime.timedelta(minutes=sweep.REFRESH_WAIT_MINUTES),
+                                       datetime.timedelta(hours=classes()["sweep"]["bot_soak_hours"]))
+    assert sweep.follow_up([got], BOT_NOW, 0) == 31
+    got = dependabot_behind().judge(cfg=classes(bot_soak_hours=0.1))
+    assert got["due"] == BOT_NOW + datetime.timedelta(minutes=sweep.REFRESH_WAIT_MINUTES)
+    assert sweep.follow_up([got], BOT_NOW, 0) == 16
+
+
+def test_a_behind_bot_pull_request_is_refreshed_only_by_its_number_and_judged_head():
     case = dependabot_behind()
-    case.data[f"{case.r}/{RULES}"] = {"rules": []}
-    skipped(case, "U4")
-    case = dependabot_behind()
-    rules(case).extend({"type": "deletion"} for _ in range(100))
-    skipped(case, "U4")
-
-
-def test_the_rules_are_read_a_full_page_at_a_time():
-    """Adversarial review of actions#152. Without `per_page` GitHub answers 30
-    rules, which `strict_base` cannot tell from a complete list: the strict rule
-    may sit on page two. The query-less answer here is that first page (no
-    status-check rule, GitHub calls the pull request clean); it must never be
-    the one read."""
-    case = strict(dependabot_behind())
-    case.data[f"{case.r}/rules/branches/main"] = (
-        [{"type": "deletion"}] * 30)
-    case.pr["mergeable_state"] = "clean"
-    skipped(case, "U4")
-
-
-def test_a_base_with_no_rules_at_all_admits_a_clean_behind_pull_request():
-    case = dependabot_behind()
-    rules(case).clear()
-    assert case.judge()["action"] == "merge"
+    got = case.judge()
+    assert (got["n"], got["head"]) == (106, case.head)
 
 
 def test_an_up_to_date_bot_pull_request_reads_no_rules():
@@ -1702,6 +1703,150 @@ def test_a_recorded_person_s_merge_commit_is_left_for_a_person():
     case = BotCase("gateway-159")
     assert case.pr["user"]["id"] == DEPENDABOT
     skipped(case, "B3")
+
+
+# ADR-1119: the ONE merge commit B3 admits is the sweeper's own update-branch.
+# Its shape is measured from gateway#159, where m-agahi's update-branch made a
+# verified, web-flow-committed commit with parents [the previous head, the base
+# tip] and the message `Merge branch 'main' into <head ref>`, and the activity
+# API recorded a `push` by m-agahi to that sha. `app_refreshed` is that very
+# recording with the author and the pusher swapped to the App: CONSTRUCTED, as
+# the App's own author and pusher on an update-branch are not yet measured.
+
+APP_USER = {"id": BOT, "login": "yadgarhq-bot[bot]", "type": "Bot"}
+
+
+def app_refreshed():
+    case = BotCase("gateway-159")
+    case.commits[1]["author"] = dict(APP_USER)
+    case.activity[0]["actor"] = {"id": BOT, "login": "yadgarhq-bot[bot]"}
+    return case
+
+
+def test_the_sweepers_update_branch_commit_is_admitted_in_its_exact_shape():
+    """The companion assertion (ADR-0646): the pristine App shape is admitted,
+    so every refusal below is the one conjunct each mutates."""
+    case = app_refreshed()
+    merge = case.commits[1]
+    assert [p["sha"] for p in merge["parents"]] == [case.commits[0]["sha"], case.tip]
+    assert merge["commit"]["message"] == f"Merge branch 'main' into {case.pr['head']['ref']}"
+    got = case.judge()
+    assert got["action"] == "merge", got
+
+
+def foreign_parent(case):
+    """The second parent is not on the base: a merge of some other branch."""
+    other = "1" * 40
+    case.commits[1]["parents"][1]["sha"] = other
+    case.data[f"{case.r}/compare/{other}...{case.tip}"] = {"status": "diverged", "ahead_by": 1,
+                                                           "behind_by": 1}
+
+
+@pytest.mark.parametrize("change", [
+    # another author: a person, dependabot itself, anyone
+    lambda c: c.commits[1].update(author={"id": 64974579, "login": "m-agahi", "type": "User"}),
+    lambda c: c.commits[1].update(author={"id": DEPENDABOT, "login": "dependabot[bot]", "type": "Bot"}),
+    lambda c: c.commits[1]["author"].update(type="User"),
+    lambda c: c.commits[1].update(author=None),
+    # not GitHub's own commit
+    lambda c: c.commits[1].update(committer={"id": BOT, "login": "yadgarhq-bot[bot]"}),
+    lambda c: c.commits[1]["commit"]["verification"].update(verified=False),
+    # not exactly two parents, the first the previous head, the second on the base
+    lambda c: c.commits[1]["parents"].append({"sha": "2" * 40}),
+    lambda c: c.commits[1]["parents"].reverse(),
+    lambda c: c.commits[1]["parents"][0].update(sha="3" * 40),
+    foreign_parent,
+    lambda c: c.commits[1]["parents"][1].update(sha="not a sha"),
+    # not GitHub's update-branch message
+    lambda c: c.commits[1]["commit"].update(message="Merge branch 'other' into "
+                                            + c.pr["head"]["ref"]),
+    lambda c: c.commits[1]["commit"].update(message="Merge branch 'main' into main"),
+    lambda c: c.commits[1]["commit"].update(message=c.commits[1]["commit"]["message"] + "\n\nedit"),
+    # a merge commit first: there is no bot commit for it to refresh
+    lambda c: c.commits.pop(0),
+])
+def test_a_foreign_two_parent_commit_is_refused(change):
+    case = app_refreshed()
+    change(case)
+    got = case.judge()
+    assert got["action"] == "skip", got
+    assert got["reason"].startswith("B3"), got["reason"]
+
+
+def test_an_unreadable_ancestry_of_the_second_parent_is_refused():
+    case = app_refreshed()
+    del case.data[f"{case.r}/compare/{case.tip}...{case.tip}"]
+    assert case.judge()["action"] == "skip"
+
+
+def test_an_admitted_update_branch_commit_still_needs_its_push_to_be_the_apps():
+    """B9 binds the App's push to the commit B3 admitted. m-agahi pushing the
+    App-shaped commit, or the App pushing anything else, is refused."""
+    case = app_refreshed()
+    case.activity[0]["actor"] = {"id": 64974579, "login": "m-agahi"}
+    skipped(case, "B9")
+    case = dependabot_merge()
+    case.activity.insert(0, {"activity_type": "push", "actor": {"id": BOT}, "after": case.head,
+                             "timestamp": "2026-10-31T22:00:00Z"})
+    skipped(case, "B9")
+    case = app_refreshed()
+    case.activity[0]["activity_type"] = "force_push"
+    skipped(case, "B9")
+
+
+def test_a_merge_commit_that_edits_a_file_outside_the_ecosystem_is_refused_by_b8():
+    """After update-branch the merge base is the base tip, so an edit the merge
+    carries to a file outside the ecosystem's allowlist is a changed file B8
+    refuses. B8 judges paths, not contents: an edit inside an admitted file is
+    the App-key residual `check_bot_commits` names."""
+    case = app_refreshed()
+    listing = case.data[f"{case.r}/pulls/159/files?per_page=100"]
+    listing.append({"filename": "src/main.rs", "status": "modified"})
+    case.pr["changed_files"] = len(listing)
+    skipped(case, "B8")
+
+
+def unit_commits(kind="dependabot", merges=1):
+    bot = DEPENDABOT if kind == "dependabot" else BOT
+    out = [{"sha": "a" * 40, "author": {"id": bot, "type": "Bot"}, "committer": {"id": WEB_FLOW},
+            "commit": {"verification": {"verified": True}, "message": "build(deps): bump x"},
+            "parents": [{"sha": "0" * 40}]}]
+    for i in range(merges):
+        out.append({"sha": str(5 + i) * 40, "author": dict(APP_USER), "committer": {"id": WEB_FLOW},
+                    "commit": {"verification": {"verified": True},
+                               "message": "Merge branch 'main' into feature/x"},
+                    "parents": [{"sha": out[-1]["sha"]}, {"sha": "b" * 40}]})
+    return out
+
+
+@pytest.mark.parametrize("kind", ["dependabot", "repin"])
+def test_one_update_branch_commit_per_refresh_is_admitted_for_either_bot(kind):
+    commits = unit_commits(kind, merges=2)
+    subject, refreshes = sweep.check_bot_commits(commits, [], kind, commits[-1]["sha"], "main",
+                                                 "feature/x", lambda sha: sha == "b" * 40)
+    assert subject == "build(deps): bump x"
+    assert refreshes == {"5" * 40, "6" * 40}
+    with pytest.raises(sweep.Skip, match="B3"):
+        sweep.check_bot_commits(commits, [], kind, commits[-1]["sha"], "main", "feature/x",
+                                lambda sha: False)
+
+
+def test_a_merge_commit_is_never_the_first_commit_even_naming_itself_its_parent():
+    """The `i > 0` conjunct alone: a lone merge commit whose first parent names
+    itself would otherwise match "the commit before it" through index -1."""
+    [merge] = unit_commits()[1:]
+    merge["parents"][0]["sha"] = merge["sha"]
+    with pytest.raises(sweep.Skip, match="B3"):
+        sweep.check_bot_commits([merge], [], "dependabot", merge["sha"], "main", "feature/x",
+                                lambda sha: True)
+
+
+def test_the_ancestry_is_asked_only_for_a_merge_commits_second_parent():
+    asked = []
+    commits = unit_commits()
+    sweep.check_bot_commits(commits, [], "dependabot", commits[-1]["sha"], "main", "feature/x",
+                            lambda sha: asked.append(sha) or True)
+    assert asked == ["b" * 40]
 
 
 def test_the_recorded_unsigned_repin_commit_is_left_for_a_person():
@@ -1904,22 +2049,54 @@ def test_a_repin_merge_deletes_the_repin_branch():
     assert writes[-1] == ("delete", OWNER, "gateway", REPIN_BRANCH)
 
 
-def test_a_behind_bot_merge_squashes_at_the_head_and_deletes_the_branch():
+def test_a_behind_bot_refresh_is_one_update_branch_at_the_judged_head_and_deletes_nothing():
+    """ADR-1119. The refresh leg calls update-branch with `expected_head_sha` the
+    head the re-evaluation judged (GitHub answers 422 if it moved), and never
+    merges or deletes: a later run merges once CI is green on the new head."""
     case = dependabot_behind()
-    done, writes = bot_act(case, "merge", "dependabot")
-    assert done.startswith("merged yadgarhq/task#106")
-    assert [w[0] for w in writes] == ["merge", "delete"]
-    assert writes[0][4]["sha"] == case.head
+    done, writes = bot_act(case, "refresh", "dependabot")
+    assert writes == [("update_branch", OWNER, "task", 106, {"expected_head_sha": case.head})]
+    assert done.startswith("brought yadgarhq/task#106 up to date")
 
 
-def test_a_bot_leg_handed_a_refresh_writes_nothing():
-    """No bot verdict is a refresh any more, so `act` refuses it at M1."""
-    for case in (dependabot_merge(), dependabot_behind(), strict(dependabot_behind())):
+def test_a_bot_leg_never_merges_a_behind_pull_request_nor_refreshes_an_up_to_date_one():
+    """M1: the leg's action must be the re-evaluation's. A merge leg on a behind
+    pull request (it fell behind since evaluate) writes nothing, and so does a
+    refresh leg on an up-to-date one."""
+    for case, action in ((dependabot_behind(), "merge"), (strict(dependabot_behind()), "merge"),
+                         (dependabot_merge(), "refresh")):
         writes = []
         with pytest.raises(sweep.Skip, match="M1"):
             sweep.act(Fake(case.data, writes), Fake(case.data, writes), OWNER, case.repo, case.n,
-                      case.head, "refresh", classes(), BOT_NOW, "dependabot")
+                      case.head, action, classes(), BOT_NOW, "dependabot")
         assert writes == []
+
+
+@pytest.mark.parametrize("refusal", ["HTTP 422", "HTTP 409", "HTTP 405"])
+def test_a_refused_update_branch_is_a_skip(refusal):
+    case = dependabot_behind()
+    writes = []
+    with pytest.raises(sweep.Skip, match="M2"):
+        sweep.act(Fake(case.data, writes), Fake(case.data, writes, refuse_update=refusal), OWNER,
+                  "task", 106, case.head, "refresh", classes(), BOT_NOW, "dependabot")
+    assert [w[0] for w in writes] == ["update_branch"]
+
+
+@pytest.mark.parametrize("denial", ["HTTP 403", "HTTP 401", "HTTP 404", "no usable auth"])
+def test_an_update_branch_call_that_is_not_githubs_verdict_reds(denial):
+    case = dependabot_behind()
+    with pytest.raises(Refusal, match="M2"):
+        sweep.act(Fake(case.data), Fake(case.data, refuse_update=denial), OWNER, "task", 106,
+                  case.head, "refresh", classes(), BOT_NOW, "dependabot")
+
+
+def test_the_real_client_updates_a_branch_with_exactly_the_expected_head(monkeypatch):
+    calls = []
+    gh = sweep.SweepGh("t")
+    monkeypatch.setattr(gh, "_api", lambda *a, payload=None, **k: calls.append((a, payload)) or "{}")
+    gh.update_branch("yadgarhq", "task", 106, "a" * 40)
+    assert calls == [(("-X", "PUT", "repos/yadgarhq/task/pulls/106/update-branch"),
+                      {"expected_head_sha": "a" * 40})]
 
 
 def test_a_refused_bot_merge_is_a_skip_and_deletes_nothing():
@@ -2190,7 +2367,7 @@ def test_a_timeline_that_may_be_truncated_is_skipped(make):
     case.timeline.extend({"event": "labeled"} for _ in range(100 - len(case.timeline)))
     skipped(case, "B3: the timeline may be truncated")
     case.timeline.pop()
-    assert case.judge()["action"] == "merge"
+    assert case.judge()["action"] == ("merge" if make is dependabot_merge else "refresh")
 
 
 # --------------------------------------------------------------------------
@@ -2455,7 +2632,7 @@ def one_run(case):
     case.checks["total_count"] = len(case.checks["check_runs"])
     case.run["id"] = 41000000000
     case.check("ci / passed")["id"] = 124000000000
-    assert case.judge()["action"] == "merge"
+    assert case.judge()["action"] in ("merge", "refresh")  # refresh: a behind one (ADR-1119)
     return case
 
 
@@ -2644,10 +2821,12 @@ def test_a_live_evaluate_plans_the_rerun_and_the_follow_up(tmp_path, monkeypatch
 
 def test_a_rerun_leg_mints_actions_write_only_and_no_other_mint_fires_for_it():
     by = {m["id"]: m for m in mints("act")}
-    assert list(by) == ["app", "app-bot", "app-rerun"]
+    assert list(by) == ["app", "app-bot", "app-bot-refresh", "app-rerun"]
     assert by["app"]["if"] == "${{ !matrix.kind && matrix.action != 'rerun' }}"
     assert by["app-bot"]["if"] == ("${{ (matrix.kind == 'dependabot' || matrix.kind == 'repin')"
-                                   " && matrix.action != 'rerun' }}")
+                                   " && matrix.action == 'merge' }}")
+    assert by["app-bot-refresh"]["if"] == ("${{ (matrix.kind == 'dependabot' || matrix.kind == 'repin')"
+                                           " && matrix.action == 'refresh' }}")
     rerun = by["app-rerun"]
     assert rerun["if"] == "${{ matrix.action == 'rerun' }}"
     assert rerun["with"]["repositories"] == "${{ matrix.repo }}"
@@ -2657,7 +2836,8 @@ def test_a_rerun_leg_mints_actions_write_only_and_no_other_mint_fires_for_it():
     assert names.index("leg") < names.index("app-rerun")
     [go] = [s for s in steps("act") if s.get("name") == "merge or refresh"]
     assert go["env"]["SWEEP_WRITE_TOKEN"] == (
-        "${{ steps.app.outputs.token || steps.app-bot.outputs.token || steps.app-rerun.outputs.token }}")
+        "${{ steps.app.outputs.token || steps.app-bot.outputs.token || steps.app-bot-refresh.outputs.token"
+        " || steps.app-rerun.outputs.token }}")
 
 
 def test_the_act_command_takes_a_rerun_action_and_nothing_unknown(tmp_path, monkeypatch, capsys):
@@ -2809,33 +2989,27 @@ def lost_behind(state="blocked"):
     return case
 
 
-def test_a_lost_check_on_a_behind_bot_pull_request_on_a_strict_base_is_not_rerun():
-    case = lost_behind()
-    for rule in rules(case):
-        if rule["type"] == "required_status_checks":
-            rule["parameters"]["strict_required_status_checks_policy"] = True
-    skipped(case, "U4")
-
-
-def test_a_lost_check_on_a_behind_bot_pull_request_github_calls_blocked_is_rerun():
-    """GitHub calls a pull request whose required check is missing `blocked`,
-    not `clean`. For the RERUN only, U5 also takes `blocked`; the merge that
-    may follow is judged again from scratch and still needs `clean`."""
-    got = lost_behind("blocked").judge()
+@pytest.mark.parametrize("state", ["blocked", "clean", "behind", "unknown", None])
+def test_a_lost_check_on_a_behind_bot_pull_request_is_rerun_not_refreshed(state):
+    """ADR-1119. A refresh needs `ci / passed` proven green on the head; a lost
+    check is not proof, so the run is rerun first and a later hop refreshes.
+    GitHub's `mergeable_state` is no longer read (the old U5)."""
+    got = lost_behind(state).judge()
     assert got["action"] == "rerun" and got["kind"] == "dependabot", got
 
 
-@pytest.mark.parametrize("state", ["behind", "dirty", "unknown", "unstable", "has_hooks", "draft", None, "", 7])
-def test_a_lost_check_on_a_behind_bot_pull_request_neither_clean_nor_blocked_is_not_rerun(state):
-    skipped(lost_behind(state), "U5")
+def test_a_lost_check_on_a_behind_bot_pull_request_github_will_not_merge_is_not_rerun():
+    case = lost_behind()
+    case.pr["mergeable"] = False
+    skipped(case, "U3")
 
 
 def test_blocked_never_admits_a_behind_bot_merge():
-    """ADR-0645: with its `ci / passed` there and green, `blocked` is a U5 skip
-    exactly as before (the U5 parametrised test above holds it too)."""
+    """ADR-0645: with its `ci / passed` there and green, a behind pull request
+    GitHub calls `blocked` is a refresh, never a merge."""
     case = dependabot_behind()
     case.pr["mergeable_state"] = "blocked"
-    skipped(case, "U5")
+    refreshed(case.judge())
 
 
 def test_a_lost_check_on_a_bot_pull_request_inside_the_soak_waits_for_the_soak():

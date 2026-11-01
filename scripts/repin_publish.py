@@ -41,9 +41,9 @@ tree is the parent's tree with this checkout's `Cargo.toml` and `Cargo.lock`
 laid over it; on any other parent those two files would revert whatever the
 default branch changed in them since. So a default branch that moved mid-run
 gives a pull request BEHIND it, never a commit on the newer tip (RULED
-2026-11-01, "Open behind main", yaadgaar 524). ADR-1109's sweeper merges a
-clean behind bot pull request on a non-strict base, and the next run rebuilds
-it on the new tip. BEHIND, NOT ELSEWHERE: the default tip must contain the
+2026-11-01, "Open behind main", yaadgaar 524). The sweeper (ADR-1119)
+brings a behind bot pull request up to date with update-branch, and merges it
+once CI is green on the new head. BEHIND, NOT ELSEWHERE: the default tip must contain the
 parent, so a dispatch from a feature branch is a refusal. A tree equal to the parent's tree is a refusal: the commit
 would change nothing.
 
