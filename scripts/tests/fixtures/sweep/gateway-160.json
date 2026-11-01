@@ -4,7 +4,8 @@
     "recorded": "2026-10-31, read-only GETs as m-agahi",
     "normalised": [
       "added 2026-11-01, read-only: changed_files, the files listing, and each commit's message",
-      "added 2026-11-01, read-only: the branch's repository activity up to the recorded head; later entries dropped: ['push by m-agahi', 'branch_deletion by m-agahi']"
+      "added 2026-11-01, read-only: the branch's repository activity up to the recorded head; later entries dropped: ['push by m-agahi', 'branch_deletion by m-agahi']",
+      "added 2026-11-01, read-only: the base branch's rules (rules/branches/main?per_page=100), recorded after strict_required_status_checks_policy was turned off estate-wide"
     ],
     "shape": "ADR-1106 bot pull request, BEHIND its base with ci / passed green on the head"
   },
@@ -412,6 +413,61 @@
       },
       "after": "959bbabd65a6b269082562b2a111400221d382c8",
       "timestamp": "2026-10-31T10:57:19Z"
+    }
+  ],
+  "repos/yadgarhq/gateway/rules/branches/main?per_page=100": [
+    {
+      "type": "deletion",
+      "ruleset_source_type": "Repository",
+      "ruleset_source": "yadgarhq/gateway",
+      "ruleset_id": 21869964
+    },
+    {
+      "type": "non_fast_forward",
+      "ruleset_source_type": "Repository",
+      "ruleset_source": "yadgarhq/gateway",
+      "ruleset_id": 21869964
+    },
+    {
+      "type": "required_linear_history",
+      "ruleset_source_type": "Repository",
+      "ruleset_source": "yadgarhq/gateway",
+      "ruleset_id": 21869964
+    },
+    {
+      "type": "pull_request",
+      "parameters": {
+        "required_approving_review_count": 0,
+        "dismiss_stale_reviews_on_push": true,
+        "required_reviewers": [],
+        "require_code_owner_review": false,
+        "dismissal_restriction": {
+          "enabled": false,
+          "allowed_actors": []
+        },
+        "require_last_push_approval": false,
+        "required_review_thread_resolution": true,
+        "require_extra_approval_for_unattributed_changes": true,
+        "allowed_merge_methods": ["squash"]
+      },
+      "ruleset_source_type": "Repository",
+      "ruleset_source": "yadgarhq/gateway",
+      "ruleset_id": 21869964
+    },
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "strict_required_status_checks_policy": false,
+        "do_not_enforce_on_create": false,
+        "required_status_checks": [
+          {
+            "context": "ci / passed"
+          }
+        ]
+      },
+      "ruleset_source_type": "Repository",
+      "ruleset_source": "yadgarhq/gateway",
+      "ruleset_id": 21869964
     }
   ]
 }
