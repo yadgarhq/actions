@@ -319,7 +319,7 @@ jobs:
           # leaked secret or a broken contract rather than a shallow clone.
           fetch-depth: 0
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ needs.detect.outputs.python }}
 
@@ -519,7 +519,7 @@ jobs:
           toolchain: ${{ needs.detect.outputs.rust_toolchain }}
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: needs.detect.outputs.rust == 'true'
 
       - name: install cargo-deny
@@ -631,7 +631,7 @@ jobs:
         # Three attempts: GHCR OCI pulls flake (yaadgaar 345).
         run: for i in 1 2 3; do helm dependency update chart && break; [ "$i" = 3 ] && exit 1; sleep $((i * 10)); done
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ needs.detect.outputs.python }}
       # `trivy_gate.py` parses `.trivyignore.yaml` and each `Chart.lock` with
@@ -1020,7 +1020,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: ${{ needs.detect.outputs.rust_toolchain }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
       # the commit THIS workflow file runs at, never `main`. Read through
@@ -1670,7 +1670,7 @@ jobs:
         if: needs.detect.outputs.chart == 'true'
         # Three attempts: GHCR OCI pulls flake (yaadgaar 345).
         run: for i in 1 2 3; do helm dependency update chart && break; [ "$i" = 3 ] && exit 1; sleep $((i * 10)); done
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ needs.detect.outputs.python }}
       # Rendered manifests are parsed rather than grepped, so a `kind:` inside a
@@ -1836,7 +1836,7 @@ jobs:
         if: needs.detect.outputs.chart == 'true'
         # Three attempts: GHCR OCI pulls flake (yaadgaar 345).
         run: for i in 1 2 3; do helm dependency update chart && break; [ "$i" = 3 ] && exit 1; sleep $((i * 10)); done
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ needs.detect.outputs.python }}
       # Rendered manifests are parsed rather than grepped, for the reason the
@@ -2003,7 +2003,7 @@ jobs:
         # Three attempts: GHCR OCI pulls flake (yaadgaar 345).
         run: for i in 1 2 3; do helm dependency update chart && break; [ "$i" = 3 ] && exit 1; sleep $((i * 10)); done
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ needs.detect.outputs.python }}
       # Rendered manifests are parsed rather than grepped, for the reason the
@@ -2604,7 +2604,7 @@ jobs:
           set -euo pipefail
           if [ "$UNDER_REVIEW" = "yadgarhq/actions" ]; then dir=.; else dir=.ci-actions; fi
           python3 "$dir/scripts/tool_versions.py" "$dir/versions.yaml" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ steps.versions.outputs.python }}
       # The conditions are PARSED rather than grepped, so an `if:` inside a
