@@ -58,6 +58,7 @@ GATED = [
     "pre_pin_parent",
     "release_ready",
     "hook_tools_adopted",
+    "rust_parity",
 ]
 
 
@@ -72,7 +73,7 @@ def needs(results, rust="false", proto="false"):
     ctx = {}
     for job in GATED:
         default = "success"
-        if job == "test" and rust != "true":
+        if job in ("test", "rust_parity") and rust != "true":
             default = "skipped"
         if job == "proto" and proto != "true":
             default = "skipped"
@@ -829,6 +830,7 @@ SHORT_CIRCUITED = [
     "pre_pin_parent",
     "release_ready",
     "hook_tools_adopted",
+    "rust_parity",
 ]
 
 
@@ -1140,6 +1142,7 @@ def test_an_ordinary_pull_request_reads_no_check_runs():
         ctx[job]["result"] = "success"
     ctx["test"]["result"] = "skipped"
     ctx["proto"]["result"] = "skipped"
+    ctx["rust_parity"]["result"] = "skipped"  # payload() reports rust false
     ok, rows, urls = gate(ctx, payload(), token="")
     assert ok, [r for r in rows if not r[4]]
     assert urls == []
@@ -1917,6 +1920,7 @@ def test_main_arms_the_wait_with_the_workflows_sentinels(monkeypatch):
     ctx["proto"]["result"] = "skipped"
     # REPO is unset here, and `hook_tools_adopted` runs in yadgarhq/actions only.
     ctx["hook_tools_adopted"]["result"] = "skipped"
+    ctx["rust_parity"]["result"] = "skipped"
     monkeypatch.setenv("NEEDS", json.dumps(ctx))
     monkeypatch.setenv("EVENT", "pull_request")
     monkeypatch.setenv("WORKFLOW", str(CI_PR))

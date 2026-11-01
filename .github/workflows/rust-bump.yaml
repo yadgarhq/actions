@@ -25,9 +25,9 @@ name: rust-bump
 # pull request moving `versions.yaml` and the images. Until it lands, a person
 # moves `versions.yaml`, and this workflow carries it to the consumers.
 #
-# DRY UNTIL ARMED. `rust_propagate.py mode` says `live=true` for the schedule
-# or a push to main only while `classes.json` `rust_bump.live` is true (it ships
-# false), or for a dispatch from main with `dry_run` false. A dry run mints a
+# DRY UNLESS ARMED. `rust_propagate.py mode` says `live=true` for the schedule
+# or a push to main only while `classes.json` `rust_bump.live` is true (it is true now,
+# armed in actions#165), or for a dispatch from main with `dry_run` false. A dry run mints a
 # read-only token and writes nothing.
 #
 # NO OWNER-WIDE TOKEN. The sweeper merges public repositories only (R1), so the
