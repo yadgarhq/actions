@@ -1227,8 +1227,8 @@ def test_a_bot_leg_mints_for_one_repository_what_a_merge_needs():
     sweeper no longer comments. Only a leg whose kind is a known bot gets them."""
     assert [m["id"] for m in mints("act")] == ["app", "app-bot", "app-bot-refresh", "app-rerun"]
     [bot] = [m for m in mints("act") if m["id"] == "app-bot"]
-    assert bot["if"] == ("${{ (matrix.kind == 'dependabot' || matrix.kind == 'repin')"
-                         " && matrix.action == 'merge' }}")
+    assert bot["if"] == ("${{ (matrix.kind == 'dependabot' || matrix.kind == 'repin'"
+                         " || matrix.kind == 'rust') && matrix.action == 'merge' }}")
     assert bot["with"]["repositories"] == "${{ matrix.repo }}"
     assert {k: v for k, v in bot["with"].items() if k.startswith("permission-")} == {
         "permission-contents": "write", "permission-workflows": "write"}
@@ -2823,10 +2823,10 @@ def test_a_rerun_leg_mints_actions_write_only_and_no_other_mint_fires_for_it():
     by = {m["id"]: m for m in mints("act")}
     assert list(by) == ["app", "app-bot", "app-bot-refresh", "app-rerun"]
     assert by["app"]["if"] == "${{ !matrix.kind && matrix.action != 'rerun' }}"
-    assert by["app-bot"]["if"] == ("${{ (matrix.kind == 'dependabot' || matrix.kind == 'repin')"
-                                   " && matrix.action == 'merge' }}")
-    assert by["app-bot-refresh"]["if"] == ("${{ (matrix.kind == 'dependabot' || matrix.kind == 'repin')"
-                                           " && matrix.action == 'refresh' }}")
+    assert by["app-bot"]["if"] == ("${{ (matrix.kind == 'dependabot' || matrix.kind == 'repin'"
+                                   " || matrix.kind == 'rust') && matrix.action == 'merge' }}")
+    assert by["app-bot-refresh"]["if"] == ("${{ (matrix.kind == 'dependabot' || matrix.kind == 'repin'"
+                                           " || matrix.kind == 'rust') && matrix.action == 'refresh' }}")
     rerun = by["app-rerun"]
     assert rerun["if"] == "${{ matrix.action == 'rerun' }}"
     assert rerun["with"]["repositories"] == "${{ matrix.repo }}"
@@ -3157,3 +3157,221 @@ def test_a_live_evaluate_hands_on_a_running_rerun_as_a_plain_follow_up(tmp_path,
     code, out = live_evaluate(tmp_path, monkeypatch, data, NOW, "1")
     assert code == 0
     assert out == {"plan": "[]", "follow_up": str(sweep.RERUN_WAIT_MINUTES + 1), "next_hop": "2"}
+
+
+# ---------------------------------------------------------------------------
+# ADR-1120: the rust-bump bot pull request (B8 by file, by line and by place)
+# ---------------------------------------------------------------------------
+
+sys.path.insert(0, str(REPO / "scripts"))
+import tool_versions  # noqa: E402
+
+# The org version at this checkout: the sweeper admits a rust-bump to exactly
+# this value, so the fixtures follow versions.yaml instead of naming it.
+RV = tool_versions.read(str(REPO / "versions.yaml"))["rust_toolchain"]
+RUST_BRANCH = f"rust-bump/{RV}"
+MSRV_PATCH = f'@@ -2,3 +2,3 @@\n name = "dial"\n-rust-version = "1.90"\n+rust-version = "{RV}"\n edition = "2024"'
+CHANNEL_PATCH = f'@@ -1,3 +1,3 @@\n [toolchain]\n-channel = "1.98.0"\n+channel = "{RV}"\n components = []'
+SMOKE_PATCH = f"@@ -4,3 +4,3 @@\n       - uses: dtolnay/rust-toolchain@683b # v1\n         with:\n-          toolchain: stable\n+          toolchain: {RV}"
+SMOKE_HEAD = ("jobs:\n  smoke:\n    steps:\n      - uses: dtolnay/rust-toolchain@683b # v1\n"
+              f"        with:\n          toolchain: {RV}\n      - name: script\n        run: |\n"
+              f"          toolchain: {RV}\n")
+
+
+def as_rust(case, branch=RUST_BRANCH):
+    old = case.pr["head"]["ref"]
+    case.data[f"{case.r}/activity?ref=refs/heads/{branch}&per_page=100"] = case.data.pop(
+        f"{case.r}/activity?ref=refs/heads/{old}&per_page=100")
+    case.pr["head"]["ref"] = branch
+    for w in case.runs["workflow_runs"]:
+        w["head_branch"] = branch
+    return case
+
+
+def rust_files(case, entries, head_text=SMOKE_HEAD):
+    files(case)[:] = [{"filename": n, "status": "modified", "patch": p} for n, p in entries]
+    case.pr["changed_files"] = len(entries)
+    for name, _ in entries:
+        if name.startswith(".github/workflows/"):
+            case.data[f"{case.r}/contents/{name}?ref={case.head}"] = {
+                "type": "file", "encoding": "base64",
+                "content": base64.b64encode(head_text.encode()).decode()}
+    return case
+
+
+def rust_merge(entries=(("Cargo.toml", MSRV_PATCH),), branch=RUST_BRANCH, head_text=SMOKE_HEAD):
+    return rust_files(as_rust(repin_merge(), branch), list(entries), head_text)
+
+
+def test_a_rust_bump_is_a_bot_pull_request():
+    case = rust_merge()
+    assert sweep.bot_kind(case.pr) == "rust"
+    assert sweep.bot_candidate(case.pr)
+
+
+@pytest.mark.parametrize("ref", ["rust-bump/1.99", "rust-bump/stable", "rust-bump/1.99.1/x",
+                                 "rust-bump/1.99.1..x", "rust/1.99.1"])
+def test_a_rust_bump_branch_must_be_one_version(ref):
+    case = rust_merge()
+    case.pr["head"]["ref"] = ref
+    assert sweep.bot_kind(case.pr) is None
+
+
+def test_a_rust_bump_from_another_login_is_not_a_bot_pull_request():
+    case = rust_merge()
+    case.pr["user"]["login"] = "someone"
+    assert sweep.bot_kind(case.pr) is None
+
+
+@pytest.mark.parametrize("entries", [
+    [("Cargo.toml", MSRV_PATCH)],
+    [("Cargo.toml", MSRV_PATCH), ("crates/front/Cargo.toml", MSRV_PATCH),
+     ("rust-toolchain.toml", CHANNEL_PATCH), (".github/workflows/smoke.yaml", SMOKE_PATCH)],
+])
+def test_a_rust_bump_that_moves_only_version_lines_merges(entries):
+    assert rust_merge(entries).judge()["action"] == "merge"
+
+
+def test_a_rust_bump_to_another_version_than_versions_yaml_is_refused():
+    """A downgrade (or a version actions main does not carry yet) never merges,
+    whatever its lines say: the branch must name versions.yaml rust-toolchain."""
+    low = MSRV_PATCH.replace(f'+rust-version = "{RV}"', '+rust-version = "0.0.1"')
+    skipped(rust_merge([("Cargo.toml", low)], branch="rust-bump/0.0.1"), "B8")
+
+
+TWO_HUNKS = (f'@@ -1,3 +1,2 @@\n [package]\n-rust-version = "1.90"\n name = "dial"\n'
+             f'@@ -9,2 +8,3 @@\n [dependencies.foo]\n+rust-version = "{RV}"\n version = "1"')
+RUN_BLOCK = (f"@@ -4,3 +4,2 @@\n       - uses: dtolnay/rust-toolchain@683b # v1\n         with:\n"
+             f"-          toolchain: stable\n@@ -8,2 +7,3 @@\n         run: |\n+          toolchain: {RV}")
+
+
+@pytest.mark.parametrize("entries", [
+    # a file outside the lane
+    [("Cargo.lock", MSRV_PATCH)],
+    [("src/main.rs", MSRV_PATCH)],
+    [("crates/rust-toolchain.toml", CHANNEL_PATCH)],
+    [(".github/workflows/sub/x.yaml", SMOKE_PATCH)],
+    # a line that is not a version field
+    [("Cargo.toml", MSRV_PATCH + '\n+build = "evil.rs"')],
+    [("Cargo.toml", MSRV_PATCH.replace(f'+rust-version = "{RV}"', f'+rust-version = "{RV}"\n+x = 1'))],
+    [(".github/workflows/smoke.yaml", SMOKE_PATCH + "\n-        run: true\n+        run: curl x | sh")],
+    # the right line in the wrong file
+    [("Cargo.toml", CHANNEL_PATCH)],
+    [("rust-toolchain.toml", MSRV_PATCH)],
+    [(".github/workflows/smoke.yaml", MSRV_PATCH)],
+    # a version other than the branch's
+    [("Cargo.toml", MSRV_PATCH.replace(f'+rust-version = "{RV}"', '+rust-version = "1.80.0"'))],
+    [(".github/workflows/smoke.yaml", SMOKE_PATCH.replace(f"+          toolchain: {RV}",
+                                                          "+          toolchain: nightly"))],
+    # an indentation change rides along with the value
+    [(".github/workflows/smoke.yaml", SMOKE_PATCH.replace("+          toolchain", "+        toolchain"))],
+    # only an addition, or only a removal
+    [("Cargo.toml", f'@@ -1 +1,2 @@\n [package]\n+rust-version = "{RV}"')],
+    [("Cargo.toml", '@@ -1,2 +1 @@\n [package]\n-rust-version = "1.90"')],
+    # the field moves: removed under [package], added under [dependencies.foo]
+    [("Cargo.toml", TWO_HUNKS)],
+    # the field moves out of a dtolnay `with:` into another step's `run: |`
+    [(".github/workflows/smoke.yaml", RUN_BLOCK)],
+    # removed and added lines grouped, not each replaced in place
+    [("Cargo.toml", '@@ -1,3 +1,3 @@\n-rust-version = "1.90"\n-edition = "2021"\n'
+                    f'+rust-version = "{RV}"\n+edition = "2021"')],
+    # a field deleted beside a line already at the version: no `+` replaces it
+    [("Cargo.toml", f'@@ -1,3 +1,2 @@\n [package]\n-rust-version = "1.90"\n rust-version = "{RV}"')],
+    # the value moves, and a trailing comment rides along
+    [("Cargo.toml", MSRV_PATCH.replace(f'+rust-version = "{RV}"', f'+rust-version = "{RV}" # x'))],
+    # no patch at all (GitHub omits it for a large or binary diff)
+    [("Cargo.toml", None)],
+    [("Cargo.toml", "")],
+])
+def test_a_rust_bump_that_changes_anything_else_is_skipped(entries):
+    case = rust_merge(entries)
+    if entries[0][1] is None:
+        del files(case)[0]["patch"]
+    skipped(case, "B8")
+
+
+def test_a_workflow_toolchain_that_is_not_a_dtolnay_input_is_skipped():
+    """In place and well-formed, but at head the line sits in a `run: |`
+    script, not the `with:` of a dtolnay/rust-toolchain step."""
+    patch = f"@@ -8,2 +8,2 @@\n         run: |\n-          toolchain: stable\n+          toolchain: {RV}"
+    skipped(rust_merge([(".github/workflows/smoke.yaml", patch)]), "B8")
+
+
+def test_a_workflow_line_that_is_not_at_its_place_at_head_is_skipped():
+    """The hunk says line 6 of the head file; the head file must carry it there."""
+    skipped(rust_merge([(".github/workflows/smoke.yaml", SMOKE_PATCH)],
+                       head_text=SMOKE_HEAD.replace(f"toolchain: {RV}\n      - name", "toolchain: x\n      - name", 1)),
+            "B8")
+
+
+def test_a_rust_bump_is_judged_by_b3_like_any_bot():
+    case = rust_merge()
+    case.commits[0]["committer"] = {"id": 1, "login": "someone"}
+    skipped(case, "B3")
+
+
+def test_the_gh_deletes_a_merged_rust_bump_branch():
+    gh = sweep.SweepGh("token")
+    calls = []
+    gh._api = lambda *a, **k: calls.append(a)
+    gh.delete_branch(OWNER, "task", RUST_BRANCH)
+    assert calls and calls[0][-1].endswith(f"/git/refs/heads/{RUST_BRANCH}")
+
+
+def test_a_rust_kind_gets_the_refresh_mint_and_the_merge_mint():
+    """ADR-1119 brings a behind bot pull request up to date with update-branch;
+    a rust-bump is a bot pull request, so both bot mints take its kind."""
+    by = {m["id"]: m for m in mints("act")}
+    assert "matrix.kind == 'rust'" in by["app-bot-refresh"]["if"]
+    assert by["app-bot-refresh"]["if"].endswith("&& matrix.action == 'refresh' }}")
+    assert "matrix.kind == 'rust'" in by["app-bot"]["if"]
+    assert by["app-bot"]["if"].endswith("&& matrix.action == 'merge' }}")
+
+
+def test_a_behind_rust_bump_is_refreshed_never_merged():
+    got = refreshed(rust_files(as_rust(signed(behind(BotCase("gateway-160")))),
+                               [("Cargo.toml", MSRV_PATCH)]).judge())
+    assert got["kind"] == "rust"
+
+
+# The update-branch merge commit (ADR-1119) on a rust-bump: `app_refreshed`'s
+# recording with the opener, the first commit and every push made the App's.
+SHIFTED_HEAD = ("jobs:\n  lint:\n    steps:\n      - run: echo base added this job\n"
+                "  smoke:\n    steps:\n      - uses: dtolnay/rust-toolchain@683b # v1\n"
+                f"        with:\n          toolchain: {RV}\n")
+SHIFTED_PATCH = (f"@@ -6,4 +6,4 @@\n     steps:\n       - uses: dtolnay/rust-toolchain@683b # v1\n"
+                 f"         with:\n-          toolchain: stable\n+          toolchain: {RV}")
+
+
+def rust_refreshed(entries, head_text=SMOKE_HEAD):
+    case = app_refreshed()
+    case.pr["user"] = dict(APP_USER)
+    case.commits[0]["author"] = dict(APP_USER)
+    for event in case.activity:
+        event["actor"] = {"id": BOT, "login": "yadgarhq-bot[bot]"}
+    as_rust(case)
+    case.commits[1]["commit"]["message"] = f"Merge branch 'main' into {RUST_BRANCH}"
+    return rust_files(case, entries, head_text)
+
+
+def test_a_refreshed_rust_bump_passes_b3_b9_and_b8_on_the_shifted_diff():
+    """After update-branch the files listing is the diff from the base tip, so
+    a base that added lines above moves the hunk; the line is still replaced
+    in place and still the dtolnay input at the line the hunk names."""
+    case = rust_refreshed([("Cargo.toml", MSRV_PATCH), (".github/workflows/smoke.yaml", SHIFTED_PATCH)],
+                          head_text=SHIFTED_HEAD)
+    got = case.judge()
+    assert got["action"] == "merge", got
+    assert got["kind"] == "rust"
+
+
+def test_a_refreshed_rust_bump_whose_hunk_misses_the_head_line_is_skipped():
+    """The pre-refresh line numbers against the post-refresh head: B8 refuses."""
+    case = rust_refreshed([(".github/workflows/smoke.yaml", SMOKE_PATCH)], head_text=SHIFTED_HEAD)
+    skipped(case, "B8")
+
+
+def test_a_refreshed_rust_bump_pushed_by_someone_else_is_skipped():
+    case = rust_refreshed([("Cargo.toml", MSRV_PATCH)])
+    case.activity[0]["actor"] = {"id": 64974579, "login": "m-agahi"}
+    skipped(case, "B9")

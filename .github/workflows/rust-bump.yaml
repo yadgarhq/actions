@@ -1,0 +1,140 @@
+name: rust-bump
+
+# ADR-1120, on ADR-1118. `versions.yaml` rust-toolchain is THE Rust version of
+# the org, and every Rust version field equals it: each consumer's
+# `rust-toolchain.toml` channel, every `Cargo.toml` `rust-version`, and every
+# literal workflow `toolchain:`. No org variable can carry it: cargo and rustup
+# read those static files directly.
+#
+# THIS WORKFLOW CARRIES THE VALUE OUT. For every public repository with a
+# `Cargo.toml` whose fields differ from `versions.yaml` on main, it opens or
+# refreshes ONE bot pull request on `rust-bump/X.Y.Z`, as a commit GitHub
+# signs (`scripts/rust_propagate.py`, the `repin_publish` commit path). The
+# sweeper merges it once `ci / passed` is green (ADR-1106; `sweep.py` admits a
+# rust-bump only when every changed line is a Rust version field moving to the
+# branch's version). It PROPOSES AND NEVER MERGES.
+#
+# THREE TRIGGERS, ONE CONVERGENCE. A push to main that changes `versions.yaml`
+# starts it at once, so the window in which consumers differ is minutes, not a
+# day. The daily schedule retries whatever that run could not do. A dispatch is
+# the human path. A push by the sweeper's App-token merge does start
+# workflows; one by `GITHUB_TOKEN` would not.
+#
+# THE UPSTREAM HALF IS NOT HERE YET (ADR-1120 part b): a job that reads
+# `static.rust-lang.org/dist/channel-rust-stable.toml` and opens the actions
+# pull request moving `versions.yaml` and the images. Until it lands, a person
+# moves `versions.yaml`, and this workflow carries it to the consumers.
+#
+# DRY UNTIL ARMED. `rust_propagate.py mode` says `live=true` for the schedule
+# or a push to main only while `classes.json` `rust_bump.live` is true (it ships
+# false), or for a dispatch from main with `dry_run` false. A dry run mints a
+# read-only token and writes nothing.
+#
+# NO OWNER-WIDE TOKEN. The sweeper merges public repositories only (R1), so the
+# candidates are listed with `GITHUB_TOKEN`, which sees public repositories
+# only, and the App token is scoped by `repositories:` to what that listing
+# found. `fan-out.yaml` keeps the estate's one owner-wide mint (ADR-0987).
+#
+# ROLLBACK: set `rust_bump.live` false (or disable this workflow) and close the
+# open `rust-bump/` pull requests. Nothing was merged by this workflow.
+on:
+  schedule:
+    - cron: "41 6 * * *"
+  push:
+    branches: [main]
+    paths: [versions.yaml]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "report only; write nothing (live needs main)"
+        type: boolean
+        default: true
+
+permissions: {}
+
+concurrency:
+  group: rust-bump
+  cancel-in-progress: false
+
+jobs:
+  propagate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: live or dry
+        id: mode
+        env:
+          EVENT: ${{ github.event_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          REF: ${{ github.ref }}
+        run: python3 scripts/rust_propagate.py mode
+
+      # BOTH OR NEITHER, and red when absent: this workflow has no other job.
+      - name: is the release App configured here
+        env:
+          CLIENT_ID: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          APP_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CLIENT_ID" ] || [ -z "$APP_KEY" ]; then
+            echo "::error::RELEASE_APP_CLIENT_ID and RELEASE_APP_PRIVATE_KEY must both be set"
+            exit 1
+          fi
+
+      # PUBLIC REPOSITORIES WITH A Cargo.toml, read with GITHUB_TOKEN. An empty
+      # result is a refusal: an empty `repositories:` beside `owner:` would
+      # mint for every repository.
+      - name: which repositories are Rust
+        id: enumerate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+        run: python3 scripts/rust_propagate.py enumerate --owner "$OWNER" --out "$RUNNER_TEMP/repos.json"
+
+      # TWO MINTS, ONE PER MODE, so a dry run never holds a write permission.
+      # Live needs `workflows: write`: a literal `toolchain:` lives in
+      # `.github/workflows/`, and GitHub refuses an App's commit there without it.
+      - name: mint the read token for those repositories
+        id: app-read
+        if: steps.mode.outputs.live != 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.enumerate.outputs.repos }}
+          permission-contents: read
+          permission-pull-requests: read
+      - name: mint the write token for those repositories
+        id: app-write
+        if: steps.mode.outputs.live == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.enumerate.outputs.repos }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+
+      # The version is `versions.yaml` rust-toolchain in THIS checkout, which
+      # is main for every trigger that can be live.
+      - name: propagate
+        env:
+          GH_TOKEN: ${{ steps.app-write.outputs.token || steps.app-read.outputs.token }}
+          LIVE: ${{ steps.mode.outputs.live }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          args=(run --owner "$OWNER" --repos "$RUNNER_TEMP/repos.json")
+          if [ "$LIVE" = true ]; then
+            args+=(--live)
+          fi
+          python3 scripts/rust_propagate.py "${args[@]}"

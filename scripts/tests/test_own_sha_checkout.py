@@ -73,7 +73,7 @@ AFTER_FAILURE = ("always()", "failure()", "!cancelled()")
 # whose checkouts silently vanish from the scan (a parse change, a rename)
 # turns this suite red instead of passing over zero sites.
 EXPECTED_SITES = {
-    "ci-pr.yaml": 13,
+    "ci-pr.yaml": 14,
     "ci-release.yaml": 4,
     "repin.yaml": 1,
     "seed-declaration.yaml": 1,
