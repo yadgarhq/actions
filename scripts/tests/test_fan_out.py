@@ -469,7 +469,8 @@ class Fake:
         return [
             {"name": n, "archived": r.get("archived", False), "topics": r.get("topics", []),
              "default_branch": "main", "fork": r.get("fork", False),
-             "disabled": False, "owner": r.get("owner", owner)}
+             "disabled": False, "owner": r.get("owner", owner),
+             "private": r.get("private", False)}
             for n, r in self.repos.items()
         ]
 
@@ -594,6 +595,77 @@ def test_enumeration_skips_archived_exempts_actions_and_errors_on_zero_or_two_to
     touched = {repo for repo, _, _ in gh.reads}
     assert not touched & {"stray", "double", "unknown", "deploy"}
     assert gh.writes == []
+
+
+def test_a_private_consumer_with_no_private_consumers_entry_reds_the_run():
+    # yaadgaar 478 (ADR-0983 step 2). GITHUB_TOKEN at PR time cannot list a
+    # private repository, so a NEW private consumer is invisible to
+    # hook_tools_adopted.py. The fan-out lists with the owner-wide metadata
+    # token, so the completeness check lives here.
+    repos = estate()
+    repos["secret"] = {"topics": ["yadgar-class-base"], "private": True,
+                       "branches": {}, "commits": {}}
+    gh = Fake(repos, forbid_writes=True)
+    rows, code = fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=False)
+    row = by_repo(rows)["secret"]
+    assert row["status"] == "error"
+    assert "private_consumers" in row["note"]
+    assert code == 1
+    assert not [r for r in gh.reads if r[0] == "secret"]
+
+
+def test_a_private_consumer_with_an_entry_is_not_reddened_by_the_check():
+    repos = estate()
+    classes = json.loads(json.dumps(CLASSES))
+    classes["private_consumers"]["docs"] = {"rev": "v1.37.1"}
+    repos["docs"]["private"] = True
+    rows, code = fan_out.run(Fake(repos), "yadgarhq", "v1.35.0", classes, live=False)
+    assert by_repo(rows)["docs"]["status"] != "error"
+    assert code == 0
+
+
+def test_a_private_repository_with_no_class_topic_is_not_a_consumer_to_attest():
+    repos = estate()
+    repos["scratch"] = {"topics": [], "private": True, "branches": {}, "commits": {}}
+    rows, _ = fan_out.run(Fake(repos), "yadgarhq", "v1.35.0", CLASSES, live=False)
+    assert "private_consumers" not in by_repo(rows)["scratch"]["note"]
+
+
+def test_a_listing_that_omits_private_fails_closed():
+    # `Gh.list_repos` reads a missing `private` as True, and `run` agrees, so a
+    # consumer whose page omitted it needs an entry like any private one.
+    def omit(self, owner):
+        return [{k: v for k, v in m.items() if k != "private"}
+                for m in Fake.list_repos(self, owner)]
+
+    class Omitting(Fake):
+        list_repos = omit
+
+    gh = Omitting(estate(), forbid_writes=True)
+    rows, code = fan_out.run(gh, "yadgarhq", "v1.35.0", CLASSES, live=False)
+    assert by_repo(rows)["gateway"]["status"] == "error"
+    assert "private_consumers" in by_repo(rows)["gateway"]["note"]
+    assert code == 1
+
+
+def test_the_real_client_reads_a_missing_private_as_true(monkeypatch):
+    def page(self, *args, payload=None, missing_ok=False):
+        return json.dumps([{"name": "x", "archived": False, "disabled": False, "fork": False,
+                            "topics": [], "default_branch": "main",
+                            "owner": {"login": "yadgarhq"}}])
+
+    monkeypatch.setattr(fan_out.Gh, "_api", page)
+    assert fan_out.Gh().list_repos("yadgarhq")[0]["private"] is True
+
+
+def test_the_real_client_captures_private(monkeypatch):
+    def one_page(self, *args, payload=None, missing_ok=False):
+        return json.dumps([{"name": "x", "archived": False, "disabled": False, "fork": False,
+                            "topics": [], "default_branch": "main", "private": True,
+                            "owner": {"login": "yadgarhq"}}])
+
+    monkeypatch.setattr(fan_out.Gh, "_api", one_page)
+    assert fan_out.Gh().list_repos("yadgarhq")[0]["private"] is True
 
 
 def test_a_dry_run_makes_zero_writes_and_proposes_one_pull_request_per_consumer():

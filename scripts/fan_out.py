@@ -805,6 +805,15 @@ def run(client, owner, tag, classes, live, manifest_text=None):
         if names[0] not in classes["classes"]:
             row.update(status="error", note=f"no class `{names[0]}` in classes.json")
             continue
+        # YAADGAAR 478 (ADR-0983 step 2). `hook_tools_adopted.py` runs at PR time
+        # with GITHUB_TOKEN, which cannot list a private repository, so a new
+        # private consumer named nowhere is invisible to it. This run lists with
+        # the owner-wide metadata token, so the completeness check is here.
+        if meta.get("private", True) and meta["name"] not in classes.get("private_consumers", {}):
+            row.update(status="error", note=(
+                "private consumer with no classes.json `private_consumers` entry "
+                "(`{\"rev\": \"vX.Y.Z\"}` or `{\"exempt\": \"why\"}`; ADR-0983 step 2)"))
+            continue
         try:
             one(client, owner, meta, names[0], tag, classes, live, row)
         except Unverified:
@@ -911,6 +920,8 @@ class Gh:
         for page in self._pages(f"orgs/{q(owner)}/repos"):
             found += [{"name": r["name"], "archived": r["archived"],
                        "disabled": r.get("disabled", True), "fork": r["fork"],
+                       # Fail closed: a listing that omits it reads as private.
+                       "private": r.get("private", True),
                        "topics": r.get("topics", []), "default_branch": r["default_branch"],
                        "owner": r["owner"]["login"]} for r in page]
         return found
