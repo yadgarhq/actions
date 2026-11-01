@@ -317,6 +317,58 @@ def test_mutation_the_stale_match_check_is_load_bearing(tmp_path):
     assert any("matches no finding" in reason for _, reason in v.stale_entries)
 
 
+OTHER_TARGET = "chart/charts/platform/charts/nats/templates/service.yaml"
+
+
+def test_a_multi_path_entry_with_one_dead_path_names_that_path_as_stale(tmp_path):
+    """#161: staleness is per PATH. Only `NATS_TARGET` still produces the
+    finding; `OTHER_TARGET` is a dead path that would silently pre-approve a
+    future finding there."""
+    root = chart_root(tmp_path)
+    findings = [trivy_gate.Finding(target=NATS_TARGET, id="KSV-0014")]
+    e = entry(paths=[NATS_TARGET, OTHER_TARGET])
+    v = trivy_gate.evaluate(findings, [e], TODAY, root)
+    assert len(v.stale_entries) == 1
+    assert OTHER_TARGET in v.stale_entries[0][1]
+    assert NATS_TARGET not in v.stale_entries[0][1]
+    assert not v.ok
+
+
+def test_a_multi_path_entry_with_every_path_live_is_not_stale(tmp_path):
+    """#161 companion: both paths match a finding -- pristine, still green."""
+    root = chart_root(tmp_path)
+    findings = [trivy_gate.Finding(target=NATS_TARGET, id="KSV-0014"), trivy_gate.Finding(target=OTHER_TARGET, id="KSV-0014")]
+    v = trivy_gate.evaluate(findings, [entry(paths=[NATS_TARGET, OTHER_TARGET])], TODAY, root)
+    assert v.stale_entries == []
+    assert v.ok
+
+
+def test_a_multi_path_entry_with_two_dead_paths_reports_each(tmp_path):
+    root = chart_root(tmp_path)
+    findings = [trivy_gate.Finding(target=NATS_TARGET, id="KSV-0014")]
+    dead2 = "chart/charts/platform/charts/nats/templates/third.yaml"
+    v = trivy_gate.evaluate(findings, [entry(paths=[NATS_TARGET, OTHER_TARGET, dead2])], TODAY, root)
+    assert len(v.stale_entries) == 2
+    assert {OTHER_TARGET in r for _, r in v.stale_entries} == {True, False}
+    assert any(dead2 in r for _, r in v.stale_entries)
+
+
+def test_a_glob_path_is_live_if_it_matches_one_finding(tmp_path):
+    root = chart_root(tmp_path)
+    findings = [trivy_gate.Finding(target=NATS_TARGET, id="KSV-0014")]
+    glob = "chart/charts/platform/charts/nats/templates/*.yaml"
+    v = trivy_gate.evaluate(findings, [entry(paths=[glob])], TODAY, root)
+    assert v.stale_entries == []
+
+
+def test_a_wrong_id_finding_does_not_keep_a_path_live(tmp_path):
+    """The old `matches no finding` reason stays when EVERY path is dead."""
+    root = chart_root(tmp_path)
+    findings = [trivy_gate.Finding(target=NATS_TARGET, id="KSV-9999")]
+    v = trivy_gate.evaluate(findings, [entry(paths=[NATS_TARGET])], TODAY, root)
+    assert any("matches no finding" in reason for _, reason in v.stale_entries)
+
+
 # --------------------------------------------------------- trivy invocation
 
 
@@ -337,31 +389,103 @@ def fake_trivy(version="0.74.0", config_stdout='{"Results": []}', config_stderr=
     return fake_run
 
 
-def test_run_trivy_refuses_on_the_skipping_chart_warn(tmp_path, monkeypatch):
+def test_run_trivy_refuses_on_the_skipping_chart_warn_even_with_a_helm_result(tmp_path, monkeypatch):
+    """ADR-0645: the text match stays. Case A -- `chart/` is broken (WARN) while a
+    healthy chart elsewhere (`extra/ok`) still yields a helm result."""
     monkeypatch.chdir(tmp_path)
     (tmp_path / "chart").mkdir()
+    (tmp_path / "chart" / "Chart.yaml").write_text("name: x\n")
     monkeypatch.setattr(
         trivy_gate.subprocess,
         "run",
-        fake_trivy(config_stderr='WARN\t[helm scanner] Skipping chart file_path="chart" err="..."\n'),
+        fake_trivy(
+            config_stdout='{"Results": [{"Type": "helm", "Target": "extra/ok/templates/a.yaml"}]}',
+            config_stderr='WARN\t[helm scanner] Skipping chart file_path="chart" err="..."\n',
+        ),
     )
     with pytest.raises(trivy_gate.Refused, match="Skipping chart"):
         trivy_gate.run_trivy(tmp_path / "chart")
 
 
+def test_run_trivy_refuses_a_skipped_chart_elsewhere_with_no_root_chart(tmp_path, monkeypatch):
+    """Case B -- no root `chart/` at all (the actions repo), a broken fixture chart
+    elsewhere logs the WARN while another chart renders. Old gate refused."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        trivy_gate.subprocess,
+        "run",
+        fake_trivy(
+            config_stdout='{"Results": [{"Type": "helm", "Target": "other/ok/templates/a.yaml"}]}',
+            config_stderr='WARN\t[helm scanner] Skipping chart file_path="fixtures/config/chart"\n',
+        ),
+    )
+    with pytest.raises(trivy_gate.Refused, match="Skipping chart"):
+        trivy_gate.run_trivy(tmp_path / "chart")
+
+
+def test_run_trivy_refuses_when_only_a_chart_outside_chart_dir_rendered(tmp_path, monkeypatch):
+    """No WARN at all, `chart/Chart.yaml` exists, the only helm result is at
+    `extra/ok/`: a healthy chart elsewhere must not mask a dead `chart/`."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "chart").mkdir()
+    (tmp_path / "chart" / "Chart.yaml").write_text("name: x\n")
+    monkeypatch.setattr(
+        trivy_gate.subprocess,
+        "run",
+        fake_trivy(config_stdout='{"Results": [{"Type": "helm", "Target": "extra/ok/templates/a.yaml"}]}'),
+    )
+    with pytest.raises(trivy_gate.Refused, match="zero"):
+        trivy_gate.run_trivy(tmp_path / "chart")
+
+
+def test_run_trivy_refuses_zero_helm_results_when_chart_has_no_ci_values(tmp_path, monkeypatch):
+    """#372: `chart/Chart.yaml` exists, `chart/ci/` does not (yadgarhq/config's
+    shape), no `--helm-values` -- still refused on zero helm results."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "chart").mkdir()
+    (tmp_path / "chart" / "Chart.yaml").write_text("name: x\n")
+    monkeypatch.setattr(trivy_gate.subprocess, "run", fake_trivy())
+    with pytest.raises(trivy_gate.Refused, match="zero"):
+        trivy_gate.run_trivy(tmp_path / "chart")
+
+
+def test_run_trivy_accepts_a_chart_without_ci_values_that_rendered(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "chart").mkdir()
+    (tmp_path / "chart" / "Chart.yaml").write_text("name: x\n")
+    monkeypatch.setattr(
+        trivy_gate.subprocess,
+        "run",
+        fake_trivy(config_stdout='{"Results": [{"Type": "helm", "Target": "chart/templates/a.yaml"}]}'),
+    )
+    assert trivy_gate.run_trivy(tmp_path / "chart")["Results"]
+
+
+def test_run_trivy_with_no_chart_needs_no_helm_result(tmp_path, monkeypatch):
+    """Companion: a repo with no `chart/Chart.yaml` is not asked for helm results."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(trivy_gate.subprocess, "run", fake_trivy())
+    assert trivy_gate.run_trivy(tmp_path / "chart") == {"Results": []}
+
+
 def test_run_trivy_refuses_on_zero_helm_results_with_helm_values(tmp_path, monkeypatch):
-    """THE BELT-AND-SUSPENDERS CHECK: even with no WARN at all (a future
-    trivy that changes its wording, or any other silent-render path), a scan
-    that passed `--helm-values` and still reports zero `helm`-typed results
-    refuses -- a chart cannot render under override values AND render
-    nothing, any more than `scan_delta.py`'s base/image comparison can."""
+    """Even with no WARN at all, a scan that passed `--helm-values` and still
+    reports zero `helm`-typed results refuses (chart/Chart.yaml present)."""
     monkeypatch.chdir(tmp_path)
     chart_dir = tmp_path / "chart"
     (chart_dir / "ci").mkdir(parents=True)
+    (chart_dir / "Chart.yaml").write_text("name: x\n")
     (chart_dir / "ci" / "values.yaml").write_text("{}\n")
     monkeypatch.setattr(trivy_gate.subprocess, "run", fake_trivy())
     with pytest.raises(trivy_gate.Refused, match="zero"):
         trivy_gate.run_trivy(chart_dir)
+
+
+def test_the_embedded_checks_error_is_documented_next_to_the_flag():
+    """#155: the expected stderr ERROR is commented beside `--skip-check-update`."""
+    src = pathlib.Path(trivy_gate.__file__).read_text()
+    idx = src.index('"--skip-check-update"')
+    assert "Falling back to embedded checks" in src[max(0, idx - 700) : idx]
 
 
 def test_run_trivy_never_passes_quiet_and_always_blanks_trivys_own_files(tmp_path, monkeypatch):
@@ -449,3 +573,38 @@ def test_apply_legacy_ignore_never_drops_a_chart_finding():
 def test_apply_legacy_ignore_leaves_an_uncovered_finding_alone():
     findings = [trivy_gate.Finding(target="Containerfile", id="DS-0099")]
     assert trivy_gate.apply_legacy_ignore(findings, {"DS-0002"}) == findings
+
+
+def test_load_legacy_ids_refuses_an_exp_suffix_and_points_to_the_yaml_file(tmp_path):
+    """#155: trivy's plain `ID exp:DATE` would become the bogus ID
+    `"DS-0002 exp:..."` and silently stop working; refuse instead."""
+    path = tmp_path / ".trivyignore"
+    path.write_text("DS-0002 exp:2999-01-01\n")
+    with pytest.raises(trivy_gate.Refused, match=r"\.trivyignore\.yaml"):
+        trivy_gate.load_legacy_ids(path)
+
+
+def test_load_legacy_ids_refuses_an_expired_exp_suffix_too(tmp_path):
+    path = tmp_path / ".trivyignore"
+    path.write_text("KSV-1\nDS-0002 exp:2000-01-01\n")
+    with pytest.raises(trivy_gate.Refused, match="exp:"):
+        trivy_gate.load_legacy_ids(path)
+
+
+def test_load_legacy_ids_ignores_exp_inside_a_comment(tmp_path):
+    """Companion: bare-ID behaviour is unchanged; `exp:` in a comment is not an entry."""
+    path = tmp_path / ".trivyignore"
+    path.write_text("DS-0002  # was exp:2026-01-01, now permanent\n")
+    assert trivy_gate.load_legacy_ids(path) == {"DS-0002"}
+
+
+def test_run_trivy_refuses_zero_helm_results_with_helm_values_even_without_chart_yaml(tmp_path, monkeypatch):
+    """ADR-0645: the old `--helm-values` check is kept unchanged -- it did not
+    need `chart/Chart.yaml` to exist."""
+    monkeypatch.chdir(tmp_path)
+    chart_dir = tmp_path / "chart"
+    (chart_dir / "ci").mkdir(parents=True)
+    (chart_dir / "ci" / "values.yaml").write_text("{}\n")
+    monkeypatch.setattr(trivy_gate.subprocess, "run", fake_trivy())
+    with pytest.raises(trivy_gate.Refused, match="zero"):
+        trivy_gate.run_trivy(chart_dir)

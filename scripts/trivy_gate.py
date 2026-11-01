@@ -47,8 +47,8 @@ cover a same-numbered check anywhere in the repository, chart included, if it
 were honoured there too.
 
 `--quiet` IS FORBIDDEN, not merely unused. It suppresses the `WARN [helm
-scanner] Skipping chart` line this gate's own "did it actually render" check
-depends on (measured, trivy 0.74.0: the WARN is on stderr at the default log
+scanner] Skipping chart` line, the only human-readable trace of WHY a chart did
+not render (the gate itself refuses on a zero `helm` result count; measured, trivy 0.74.0: the WARN is on stderr at the default log
 level and is the only trace a chart failed to render at all).
 
 `--skip-check-update` AND `--skip-version-check` are set for the same reason
@@ -111,7 +111,8 @@ same check); an entry whose `paths` reach outside the upstream boundary above
 (the parent-repository mistake this gate's own tests construct: `paths:
 ["chart/charts/**"]` on the `yadgarhq/chart` side also covers
 `chart/charts/iam/...`, an estate module); an entry that matches NO finding in
-THIS scan (the review it records no longer describes anything real); and an
+THIS scan, or one of whose `paths` matches none (checked per path; the review
+it records no longer describes anything real); and an
 entry whose `expired_at` is today or in the past (the review lapsed). A finding
 is "unignored" when it sits inside the upstream boundary and no entry currently
 covers it. A finding OUTSIDE the upstream boundary is never ignorable at all --
@@ -434,13 +435,23 @@ def evaluate(
         if not _entry_within_upstream(entry, root):
             stale.append((entry, "names `paths` outside this repository's upstream boundary"))
             continue
-        matches_something = any(
-            entry.id == f.id and any(glob_match(f.target, p) for p in entry.paths)
-            for f in findings
-        )
-        if not matches_something:
+        # STALENESS IS PER PATH, not per entry: a path that matches no
+        # finding of this `id` is a dead line in the review record that would
+        # silently pre-approve a future finding there. A glob path is live
+        # if it matches at least one finding. When EVERY path is dead the
+        # one entry-level reason stays; otherwise each dead path is reported
+        # by name. A partially stale entry still reaches `valid_entries`
+        # below -- harmless, `Verdict.ok` is already false once anything is stale.
+        dead = [
+            p
+            for p in entry.paths
+            if not any(entry.id == f.id and glob_match(f.target, p) for f in findings)
+        ]
+        if len(dead) == len(entry.paths):
             stale.append((entry, "matches no finding in this scan"))
             continue
+        for p in dead:
+            stale.append((entry, f"path `{p}` matches no `{entry.id}` finding in this scan"))
         if entry.expired_at is None or entry.expired_at <= today:
             stale.append((entry, f"expired ({entry.expired_at})" if entry.expired_at else "has no `expired_at`"))
             continue
@@ -472,8 +483,13 @@ def findings_from_report(report: dict) -> list[Finding]:
     return out
 
 
-def helm_result_count(report: dict) -> int:
-    return sum(1 for r in report.get("Results") or [] if r.get("Type") == "helm")
+def helm_result_count(report: dict, under: str = "") -> int:
+    """`helm`-typed results, only those whose Target starts with `under`."""
+    return sum(
+        1
+        for r in report.get("Results") or []
+        if r.get("Type") == "helm" and (r.get("Target") or "").startswith(under)
+    )
 
 
 def finding_count(report: dict) -> int:
@@ -533,13 +549,22 @@ def load_legacy_ids(path: Path = LEGACY_TRIVYIGNORE) -> set[str]:
     trivy itself auto-loads from the working directory, which this gate now
     refuses with `--ignorefile /dev/null` (see the module docstring for why).
     `#` starts a comment anywhere on a line; a blank line is skipped. `set()`
-    if `path` is absent.
+    if `path` is absent. A line carrying trivy's `ID exp:DATE` suffix is
+    REFUSED: read whole it would become the bogus ID `"ID exp:DATE"`, match no
+    finding, and the entry would silently stop working with its expiry never
+    enforced. The reviewed format with expiry is `.trivyignore.yaml`.
     """
     if not path.is_file():
         return set()
     ids: set[str] = set()
     for line in path.read_text().splitlines():
         entry = line.split("#", 1)[0].strip()
+        if re.search(r"(^|\s)exp:", entry):
+            raise Refused(
+                f"{path}: `{entry}` carries an `exp:` expiry, which this gate does "
+                f"not read from the plain format. Move the entry to "
+                f"`.trivyignore.yaml` (paths + expired_at)."
+            )
         if entry:
             ids.add(entry)
     return ids
@@ -560,9 +585,9 @@ def run_trivy(chart_dir: Path = CHART) -> dict:
     """The one unfiltered scan this gate evaluates. Refuses before scanning
     anything if the installed trivy is not the pinned version. Fails loud,
     before any ignore-list logic runs, on either shape of "this did not
-    actually render": the WARN trivy itself writes, or -- belt and
-    suspenders, in case a future trivy changes that WARN's wording -- a
-    `--helm-values` scan that somehow produced not one `helm`-typed result.
+    actually render": the WARN trivy itself writes (any chart), a
+    `--helm-values` scan with no `helm`-typed result, or a `chart/Chart.yaml`
+    with no `helm`-typed result under `chart/`.
     """
     version = installed_trivy_version()
     require_trivy_version(version)
@@ -586,6 +611,11 @@ def run_trivy(chart_dir: Path = CHART) -> dict:
         "/dev/null",
         "--ignorefile",
         "/dev/null",
+        # EXPECTED STDERR: with `--skip-check-update` trivy logs an ERROR-level
+        # "Falling back to embedded checks" line (it uses the pinned binary's
+        # embedded rego checks). That ERROR is expected and is NOT a failure --
+        # this gate decides from the JSON report, and echoes stderr unfiltered
+        # on purpose (hiding tool output is worse than this comment).
         # The rego check bundle `trivy-checks` floats independently of the
         # `trivy` binary's own pin and is fetched over the network by
         # default; skip both the fetch and its own update notice so this
@@ -598,6 +628,9 @@ def run_trivy(chart_dir: Path = CHART) -> dict:
     print("+ " + " ".join(args))
     proc = subprocess.run(args, capture_output=True, text=True)
     print(proc.stderr, file=sys.stderr, end="")
+    # KEPT (ADR-0645): trivy skips a chart it cannot render with this WARN, for
+    # ANY chart in the tree -- not only `chart/`. The count checks below are
+    # added on top of this refusal, never in place of it.
     if SKIPPING_CHART in proc.stderr:
         raise Refused(
             f"trivy printed `{SKIPPING_CHART}` -- the chart did not render, so "
@@ -610,12 +643,24 @@ def run_trivy(chart_dir: Path = CHART) -> dict:
         report = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
         raise Refused(f"trivy's own output was not JSON: {exc}") from exc
+    # Belt and suspenders on top of the WARN match: a `--helm-values` scan
+    # with no helm result anywhere refuses (the old check, unchanged), and so
+    # does an existing `chart/Chart.yaml` with no helm result UNDER `chart/`
+    # (yadgarhq/config has no `chart/ci`, so the old check never ran there).
+    # A healthy chart elsewhere in the tree must not mask a dead `chart/`.
     used_helm_values = "--helm-values" in args
     if used_helm_values and helm_result_count(report) == 0:
         raise Refused(
             "a --helm-values scan reported zero `helm`-typed results. The "
             "chart did not render -- check `helm dependency update chart` ran, "
             "and that chart/ci/values.yaml still names a real key."
+        )
+    if (chart_dir / "Chart.yaml").is_file() and helm_result_count(report, f"{CHART.as_posix()}/") == 0:
+        raise Refused(
+            f"a scan of an existing {CHART}/Chart.yaml reported zero `helm`-typed "
+            f"results under `{CHART}/`. The chart did not render -- check "
+            f"`helm dependency update chart` ran, `Chart.lock` matches "
+            f"`chart/charts/`, and the values still name a real key."
         )
     print(
         f"trivy {version}: {helm_result_count(report)} helm-typed result(s), "
