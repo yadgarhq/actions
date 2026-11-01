@@ -234,8 +234,19 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ github.repository }}:${{ needs.detect.outputs.version }}
             ${{ env.REGISTRY }}/${{ github.repository }}:latest
+          # `revision` and `version` map a live digest back to its commit
+          # (yaadgaar 243). Labels live in the image config; annotations put the
+          # same keys on the manifest, where registries and `crane manifest`
+          # show them. `github.sha` is the tagged commit: this workflow runs on
+          # a tag push.
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.detect.outputs.version }}
+          annotations: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.detect.outputs.version }}
 
       # THE DIGEST IS ASSERTED ONCE, HERE, AND NOWHERE ELSE. Four things read
       # it for a build that depends on it being real: the trivy scan below,
@@ -596,7 +607,28 @@ jobs:
       # byproduct of resolving against that pin, and — like the digest rewrite
       # above — it lives only in this ephemeral workspace and is never
       # committed.
-      - name: package and push
+      # EACH NETWORK HOP IS RETRIED ON ITS OWN (yaadgaar 357). On 2026-10-08 one
+      # `helm push` hit a transient GHCR "Tag on destination: not found" and the
+      # parent chart v0.10.3 was tagged with no artefact. `helm package -u`
+      # re-pulls the OCI dependencies, so it flakes the same way. Three
+      # attempts, 10 s then 20 s apart for `package`, 15 s then 30 s for `push`;
+      # a push of the same tgz is idempotent (GHCR re-tags by name). The
+      # anonymous-pull step below stays the final arbiter.
+      - name: package
+        timeout-minutes: 10
+        env:
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: |
+          set -euo pipefail
+          for i in 1 2 3; do
+            helm package chart -u --version "$VERSION" --app-version "$VERSION" && break
+            [ "$i" = 3 ] && exit 1
+            echo "::warning::helm package failed (attempt $i of 3)"
+            sleep $((i * 10))
+          done
+
+      - name: push
+        timeout-minutes: 10
         env:
           VERSION: ${{ needs.detect.outputs.version }}
           REGISTRY: ${{ env.REGISTRY }}
@@ -605,9 +637,13 @@ jobs:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          helm package chart -u --version "$VERSION" --app-version "$VERSION"
           echo "$TOKEN" | helm registry login "$REGISTRY" -u "$ACTOR" --password-stdin
-          helm push ./*-"$VERSION".tgz "oci://${REGISTRY}/${OWNER}/charts"
+          for i in 1 2 3; do
+            helm push ./*-"$VERSION".tgz "oci://${REGISTRY}/${OWNER}/charts" && break
+            [ "$i" = 3 ] && exit 1
+            echo "::warning::helm push failed (attempt $i of 3)"
+            sleep $((i * 15))
+          done
 
       # PUBLISHING A CHART DID NOT MAKE IT PULLABLE on its own authority, and
       # until this step nothing here checked. Visibility is a GitHub-side
