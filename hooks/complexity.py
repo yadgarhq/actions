@@ -129,25 +129,48 @@ def _function_spans(lines: list[str]) -> list[tuple[str, int, int]]:
     return spans
 
 
-def check(path: Path) -> list[str]:
+# `--report` lists a function from this length up, well under the ceiling so a
+# refactor that brings a function down from 150 to 90 can still quote the 90.
+REPORT_FN_MIN = 60
+
+
+def measure(path: Path) -> tuple[str, int, list[tuple[str, int, int]]]:
+    """THE ONE COUNTER. (status, file lines, [(fn name, line, length)]).
+
+    `status` is "measured", "exempt" (a test file) or "unreadable". The function
+    list holds no test-attributed function. `check` turns it into the red
+    messages and `report` into the `--report` lines, so the two cannot disagree
+    about a number (yaadgaar 260).
+    """
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError):
-        return []
-
-    problems: list[str] = []
+        return "unreadable", 0, []
     if _is_test_file(path, lines):
+        return "exempt", len(lines), []
+    fns = [
+        (name, line_no, length)
+        for name, line_no, length in _function_spans(lines)
+        if not _is_test_fn(lines, line_no - 1)
+    ]
+    return "measured", len(lines), fns
+
+
+def check(path: Path) -> list[str]:
+    status, line_count, fns = measure(path)
+    problems: list[str] = []
+    if status != "measured":
         return problems
 
-    if len(lines) > MAX_FILE_LINES:
+    if line_count > MAX_FILE_LINES:
         problems.append(
-            f"{path}: {len(lines)} lines, over the {MAX_FILE_LINES} ceiling. "
+            f"{path}: {line_count} lines, over the {MAX_FILE_LINES} ceiling. "
             f"Split it along a seam that already exists rather than at the line "
             f"count — a file cut to satisfy a number is worse than a long one."
         )
 
-    for name, line_no, length in _function_spans(lines):
-        if length > MAX_FN_LINES and not _is_test_fn(lines, line_no - 1):
+    for name, line_no, length in fns:
+        if length > MAX_FN_LINES:
             problems.append(
                 f"{path}:{line_no}: fn {name} is {length} lines, over the "
                 f"{MAX_FN_LINES} ceiling."
@@ -155,10 +178,31 @@ def check(path: Path) -> list[str]:
     return problems
 
 
+def report(path: Path) -> list[str]:
+    """What the gate measured for `path`, in the words a PR body can quote."""
+    status, line_count, fns = measure(path)
+    if status == "unreadable":
+        return [f"{path}: unreadable, not measured"]
+    if status == "exempt":
+        return [f"{path}: exempt test file, not measured"]
+    out = [f"{path}: {line_count} lines (ceiling {MAX_FILE_LINES})"]
+    for name, line_no, length in fns:
+        if length >= REPORT_FN_MIN:
+            out.append(
+                f"{path}:{line_no}: fn {name} is {length} lines (ceiling {MAX_FN_LINES})"
+            )
+    return out
+
+
 def main(argv: list[str]) -> int:
+    want_report = "--report" in argv
+    paths = [Path(a) for a in argv if a != "--report"]
     problems: list[str] = []
-    for arg in argv:
-        problems.extend(check(Path(arg)))
+    for path in paths:
+        if want_report:
+            for line in report(path):
+                print(line)
+        problems.extend(check(path))
     for p in problems:
         print(p, file=sys.stderr)
     if problems:

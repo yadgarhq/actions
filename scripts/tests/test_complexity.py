@@ -251,3 +251,80 @@ def test_test_case_attribute_is_not_mistaken_for_test(tmp_path):
     result = run(f)
     assert result.returncode == 1
     assert "over the 120 ceiling" in result.stderr
+
+
+# --- yaadgaar 260: `--report` prints what the gate measured -----------------
+# A refactor PR quotes sizes. The gate printed nothing on success, so authors
+# hand-counted by another rule. `--report` prints the gate's OWN numbers: one
+# counter, two printers. Without the flag the gate stays silent on a pass.
+
+
+def test_no_flag_stays_silent_on_a_pass(tmp_path):
+    f = write(tmp_path, "src/service.rs", fn_block("a_short_fn", 5))
+    result = run(f)
+    assert result.returncode == 0
+    assert result.stdout == "" and result.stderr == ""
+
+
+def test_report_prints_the_file_line_count_and_exits_zero_under_ceilings(tmp_path):
+    f = write(tmp_path, "src/lib.rs", padding(400))
+    result = run("--report", f)
+    assert result.returncode == 0, result.stderr
+    assert f"{f}: 400 lines (ceiling 500)" in result.stdout
+
+
+def test_report_lists_functions_from_sixty_lines_and_omits_shorter_ones(tmp_path):
+    body = fn_block("long_enough", 58) + fn_block("too_short", 57)
+    f = write(tmp_path, "src/service.rs", body)
+    result = run("--report", f)
+    assert result.returncode == 0, result.stderr
+    # `fn_block(n)` is n + 2 lines: 60 is listed, 59 is not.
+    assert f"{f}:1: fn long_enough is 60 lines (ceiling 120)" in result.stdout
+    assert "too_short" not in result.stdout
+
+
+def test_report_numbers_equal_the_violation_numbers(tmp_path):
+    """One counter, two printers: the report and the red message agree."""
+    f = write(tmp_path, "src/service.rs", padding(10) + fn_block("a_long_helper", 150))
+    red = run(f)
+    assert red.returncode == 1
+    assert f"{f}:11: fn a_long_helper is 152 lines, over the 120 ceiling" in red.stderr
+    report = run("--report", f)
+    assert f"{f}:11: fn a_long_helper is 152 lines (ceiling 120)" in report.stdout
+    assert f"{f}: 162 lines (ceiling 500)" in report.stdout
+
+
+def test_report_does_not_hide_a_violation_in_the_exit_status(tmp_path):
+    f = write(tmp_path, "src/lib.rs", padding(600))
+    result = run("--report", f)
+    assert result.returncode == 1
+    assert "600 lines, over the 500 ceiling" in result.stderr
+    assert f"{f}: 600 lines (ceiling 500)" in result.stdout
+
+
+def test_report_skips_test_attributed_functions_as_the_gate_does(tmp_path):
+    body = fn_block("a_long_case", 150, attrs=("#[test]",)) + fn_block("kept", 70)
+    f = write(tmp_path, "src/service.rs", body)
+    result = run("--report", f)
+    assert "a_long_case" not in result.stdout
+    assert "fn kept is 72 lines" in result.stdout
+
+
+def test_report_names_an_exempt_test_file_instead_of_measuring_it(tmp_path):
+    f = write(tmp_path, "tests/big.rs", padding(600))
+    result = run("--report", f)
+    assert result.returncode == 0, result.stderr
+    assert f"{f}: exempt test file, not measured" in result.stdout
+    assert "600 lines" not in result.stdout
+
+
+def test_report_names_an_unreadable_file(tmp_path):
+    result = run("--report", tmp_path / "src" / "missing.rs")
+    assert result.returncode == 0, result.stderr
+    assert "unreadable, not measured" in result.stdout
+
+
+def test_report_flag_may_follow_the_files(tmp_path):
+    f = write(tmp_path, "src/lib.rs", padding(3))
+    result = run(f, "--report")
+    assert f"{f}: 3 lines (ceiling 500)" in result.stdout

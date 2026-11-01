@@ -381,6 +381,13 @@ def changelog_entries(lines, wrapped, absorb=False):
     """
     bad, matches = [], []
     if not wrapped:
+        # YAADGAAR 379, DECIDED AND SKIPPED: this branch does not accept a
+        # wrapped continuation line, and that is deliberate. It is the only
+        # reader that sees the body BEFORE GitHub wraps it, so it is the only
+        # one that can tell a continuation from prose typed directly under a
+        # bullet (see the module docstring). Accepting continuations here would
+        # remove the one check that can, and the version bump is parsed from
+        # what this branch lets through. The cost is one long line per bullet.
         for line in (l for l in lines if l.strip()):
             match = BULLET.match(line)
             (matches if match else bad).append(match or line.strip())

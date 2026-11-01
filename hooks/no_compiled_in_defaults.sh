@@ -128,7 +128,30 @@ forbid_joined() {
     raw=""
     for f in "${files[@]}"; do
         local joined
-        joined=$(nl -ba "$f" | perl -0pe 's/\n\s*\d+\t\s*\./\./g' | grep -E "$pattern" || true)
+        # YAADGAAR 338: a call whose OWN argument list rustfmt split across lines
+        # (`var(` / `"K",` / `)`) is rejoined before the chain is: a line ending
+        # in `(` takes the next line, a line opening with `)` joins the one
+        # above, THEN a line opening with `.` joins. The order matters, because
+        # the `)` join is what puts the chain's first `.` next to its call.
+        # Only those two bracket edges are joined, never a trailing `,`, so a
+        # long argument or field list does not fuse into one line and let an
+        # unrelated `env::var` and `unwrap_or` meet.
+        #
+        # THE RESULT IS THE UNION OF TWO VIEWS, each filtered for the marker on
+        # its own, and the union is what keeps the widening from weakening the
+        # gate (ADR-0645). The bracket joins fuse lines, so on their own they can
+        # (a) carry a marker from an argument line or from the closing line of an
+        # OUTER call onto a read it does not cover, and (b) let a comment ending
+        # in `(` swallow the next real read, which `drop_comment_lines` then
+        # drops. The chain-only view is the gate as it was before the widening,
+        # so everything it refused is still refused.
+        joined=$( {
+            nl -ba "$f" \
+                | perl -0pe 's/\(\n *\d+\t[ \t]*/(/g; s/\n *\d+\t[ \t]*\)/)/g; s/\n\s*\d+\t\s*\./\./g' \
+                | grep -E "$pattern" | grep -v 'ADR-0569-EXCEPTION'
+            nl -ba "$f" | perl -0pe 's/\n\s*\d+\t\s*\./\./g' \
+                | grep -E "$pattern" | grep -v 'ADR-0569-EXCEPTION'
+        } | sort -un || true)
         if [ -n "$joined" ]; then
             raw+="$(printf '%s\n' "$joined" | sed "s|^|$f:|")"$'\n'
         fi
@@ -144,7 +167,7 @@ forbid_joined() {
 }
 
 forbid_joined \
-    'env::var(_os)?\(.*unwrap_or(_else|_default)?\((.*)?$' \
+    '(env::var(_os)?|option_env!)\(.*unwrap_or(_else|_default)?\((.*)?$' \
     'a raw environment read falls back inline.' \
     'Use env_required(key), or mark the line ADR-0569-EXCEPTION with the argument.'
 
@@ -171,8 +194,41 @@ forbid_joined \
 # (not only the method chain) across lines, which `forbid_joined`'s single
 # chain-rejoin pass does not reassemble. Each is a textual shape outside
 # this pattern's reach, not a case the gate claims to exempt.
+# YAADGAAR 338 closes two of the limits above and leaves one open on purpose.
+# CLOSED: a key may be borrowed (`&KEY`) and, in the presence test P3 only,
+# path-qualified (`keys::TRUST_HEADERS`), its LAST segment still ALL_CAPS so
+# the uppercase anchor, and with it the measured false-positive guard above, is
+# unchanged; the call's own
+# argument list may be split by rustfmt (the join in `forbid_joined`); `var` and
+# `var_os` count as lookup names, as does any name a `use ...::var as NAME`
+# imports; `option_env!` counts beside `env::var`.
+# LEFT OPEN, MEASURED (1 of 2): a path-qualified key in P1. `yadgarhq/iam`
+# `src/key_identity/tests.rs:73` and `src/service/tests.rs:211` read
+# `metadata.get(yadgar_dial::GRPC_TIMEOUT).map(|v| v.to_str().unwrap_or_default()..)`,
+# a gRPC header constant, and a path-qualified P1 key newly reds both.
+# LEFT OPEN, MEASURED (2 of 2): a chain link with its own nested parentheses
+# (`.and_then(|v| v.parse().ok())`). Widening the link pattern to nest was
+# written and swept on 2026-11-01 against the consumers' origin/main; it found
+# no config fallback and one false positive, `yadgarhq/project`
+# `src/service/request_id.rs:52` (`req.metadata().get(REQUEST_ID_HEADER)
+# .and_then(..).map(|v| capped(v).into_owned()).unwrap_or_default()`), a gRPC
+# header constant that is not a knob. The widening would newly red that
+# consumer on its next rev bump, so it is not shipped; the sweep found no real
+# instance, so nothing is lost today. Telling the header constant from a knob
+# needs the receiver's type, not a regex.
+# ALSO OPEN: a fallback applied through an intermediate binding
+# (`let v = env::var("K"); v.unwrap_or(..)`); the sweep found none.
+KEY='&?"?[A-Z][A-Z0-9_]*"?'
+KEY_PATH='(&?"[A-Z][A-Z0-9_]*"|&?([A-Za-z_][A-Za-z0-9_]*::)*[A-Z][A-Z0-9_]*)'
+LINK='\.[a-z_]+\([^)]*\)'
+aliases=$(grep -hE '^[[:space:]]*(pub[[:space:]]+)?use[[:space:]].*env::' "${files[@]}" \
+    | grep -oE '\bvar(_os)?[[:space:]]+as[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' \
+    | sed -E 's/.*[[:space:]]//' | sort -u | paste -sd'|' - || true)
+names='lookup|env|get|var|var_os'
+[ -n "$aliases" ] && names="$names|$aliases"
+
 forbid_joined \
-    '(lookup|env|get)\(\s*"?[A-Z][A-Z0-9_]*"?\s*\)(\.[a-z_]+\([^)]*\))*\.unwrap_or(_else|_default)?\(' \
+    "($names)\\([[:space:]]*${KEY}[[:space:]]*,?[[:space:]]*\\)($LINK)*\\.unwrap_or(_else|_default)?\\(" \
     'a lookup/env/get call on a CONFIG KEY falls back inline.' \
     'Use env_required(key), or mark the line ADR-0569-EXCEPTION with the argument.'
 
@@ -188,7 +244,7 @@ forbid \
 # `lookup(TRUST_HEADERS) == Some("1")`), while an untyped field read like
 # `v.get("type").as_deref() == Some("stdio")` is not a config knob.
 forbid \
-    '(lookup|env|get)\(\s*"?[A-Z][A-Z0-9_]*"?\s*\)(\.as_deref\(\))?\s*(!=|==)\s*Some\("' \
+    "($names)\\([[:space:]]*${KEY_PATH}[[:space:]]*,?[[:space:]]*\\)(\\.as_deref\\(\\))?[[:space:]]*(!=|==)[[:space:]]*Some\\(\"" \
     'presence of a value is tested against Some("...") instead of reading it.' \
     'Read the value explicitly, or mark the line ADR-0569-EXCEPTION.'
 

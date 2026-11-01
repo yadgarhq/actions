@@ -1143,6 +1143,197 @@ def test_File_open_is_still_a_read(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# yaadgaar 263 (ledger 1383): a read reached through an alias or through
+# `fs_err` is still a read. Each shape is fed UNMARKED beside a pristine
+# companion with the marker, so the refusal is the only difference.
+# --------------------------------------------------------------------------
+
+
+def _unmarked(tmp_path, body):
+    return run(tree_with(tmp_path, body))
+
+
+def _marked_read_passes(tmp_path, body):
+    """The same body with a marker on the read line: judged, and passes."""
+    result = run(tree_with(tmp_path, body))
+    assert result.returncode == 0, result.stderr
+    assert "1 filesystem read(s) judged" in result.stdout
+
+
+def test_a_module_alias_read_is_a_read(tmp_path):
+    result = _unmarked(
+        tmp_path, "use std::fs as sfs;\nfn f(p: &Path) { let _ = sfs::read_to_string(p); }\n"
+    )
+    assert result.returncode == 1
+    assert "no ADR-0523 marker" in result.stderr
+
+
+def test_a_module_alias_read_with_a_marker_passes(tmp_path):
+    _marked_read_passes(
+        tmp_path,
+        "use std::fs as sfs;\nfn f(p: &Path) {\n"
+        "    // ADR-0523-WATCHED: ServerTls\n"
+        "    let _ = sfs::read_to_string(p);\n}\n",
+    )
+
+
+def test_a_file_alias_read_is_a_read(tmp_path):
+    result = _unmarked(
+        tmp_path, "use std::fs::File as F;\nfn f(p: &Path) { let _ = F::open(p); }\n"
+    )
+    assert result.returncode == 1
+    assert "no ADR-0523 marker" in result.stderr
+
+
+def test_a_file_alias_read_with_a_marker_passes(tmp_path):
+    _marked_read_passes(
+        tmp_path,
+        "use std::fs::File as F;\nfn f(p: &Path) {\n"
+        "    // ADR-0523-WATCHED: ServerTls\n"
+        "    let _ = F::open(p);\n}\n",
+    )
+
+
+def test_a_braced_self_alias_read_is_a_read(tmp_path):
+    result = _unmarked(
+        tmp_path, "use std::fs::{self as f};\nfn g(p: &Path) { let _ = f::read(p); }\n"
+    )
+    assert result.returncode == 1
+    assert "no ADR-0523 marker" in result.stderr
+
+
+def test_a_nested_group_alias_read_is_a_read(tmp_path):
+    result = _unmarked(
+        tmp_path,
+        "use std::{io, fs::{self as f, File as G}};\n"
+        "fn g(p: &Path) { let _ = f::read(p); let _ = G::open(p); }\n",
+    )
+    assert result.returncode == 1
+    assert "serve.rs:2" in result.stderr
+
+
+def test_a_multiline_use_alias_read_is_a_read(tmp_path):
+    result = _unmarked(
+        tmp_path,
+        "use std::{\n    fs as sfs,\n    io,\n};\n"
+        "fn g(p: &Path) { let _ = sfs::read(p); }\n",
+    )
+    assert result.returncode == 1
+    assert "no ADR-0523 marker" in result.stderr
+
+
+def test_a_tokio_alias_read_is_a_read(tmp_path):
+    result = _unmarked(
+        tmp_path,
+        "use tokio::fs as tfs;\nasync fn g(p: &Path) { let _ = tfs::read(p).await; }\n",
+    )
+    assert result.returncode == 1
+    assert "no ADR-0523 marker" in result.stderr
+
+
+def test_fs_err_reads_are_reads(tmp_path):
+    result = _unmarked(
+        tmp_path, "fn g(p: &Path) { let _ = fs_err::read_to_string(p); }\n"
+    )
+    assert result.returncode == 1
+    assert "no ADR-0523 marker" in result.stderr
+
+
+def test_fs_err_file_open_is_a_read(tmp_path):
+    result = _unmarked(
+        tmp_path, "fn g(p: &Path) { let _ = fs_err::File::open(p); }\n"
+    )
+    assert result.returncode == 1
+    assert "no ADR-0523 marker" in result.stderr
+
+
+def test_an_fs_err_file_alias_read_is_a_read(tmp_path):
+    result = _unmarked(
+        tmp_path, "use fs_err::File as F;\nfn g(p: &Path) { let _ = F::open(p); }\n"
+    )
+    assert result.returncode == 1
+    assert "no ADR-0523 marker" in result.stderr
+
+
+def test_fs_err_aliased_as_fs_is_still_a_read(tmp_path):
+    """Pins the case the plain `fs::` pattern already caught by accident."""
+    result = _unmarked(
+        tmp_path, "use fs_err as fs;\nfn g(p: &Path) { let _ = fs::read(p); }\n"
+    )
+    assert result.returncode == 1
+    assert "no ADR-0523 marker" in result.stderr
+
+
+def test_an_fs_err_function_import_is_refused(tmp_path):
+    result = _unmarked(
+        tmp_path, "use fs_err::read_to_string;\nfn g(p: &Path) { let _ = read_to_string(p); }\n"
+    )
+    assert result.returncode == 1
+    assert "import the module, not the function" in result.stderr
+
+
+def test_an_aliased_function_import_in_a_group_is_refused(tmp_path):
+    result = _unmarked(
+        tmp_path, "use std::fs::{read as r, write};\nfn g(p: &Path) { let _ = r(p); }\n"
+    )
+    assert result.returncode == 1
+    assert "import the module, not the function" in result.stderr
+
+
+def test_an_unknown_name_through_an_alias_is_unclassified(tmp_path):
+    result = _unmarked(
+        tmp_path, "use std::fs as sfs;\nfn g(p: &Path) { let _ = sfs::slurp(p); }\n"
+    )
+    assert result.returncode == 1
+    assert "sfs::slurp" in result.stderr
+
+
+def test_fully_qualified_read_is_still_a_read(tmp_path):
+    """Companion: already caught by `fs::`; pinned so alias handling keeps it."""
+    result = _unmarked(tmp_path, "fn g(p: &Path) { let _ = std::fs::read(p); }\n")
+    assert result.returncode == 1
+
+
+def test_an_alias_that_is_not_the_filesystem_is_not_a_read(tmp_path):
+    """Companion: `use a::b as sfs` must not make `sfs::read` a filesystem read."""
+    body = (
+        "use crate::store as sfs;\nuse crate::net::Socket as F;\n"
+        "fn g(p: &Path) {\n"
+        "    let _ = sfs::read(p);\n    let _ = F::open(p);\n"
+        "    // ADR-0523-WATCHED: ServerTls\n"
+        "    let _ = std::fs::read(p);\n}\n"
+    )
+    result = _unmarked(tmp_path, body)
+    assert result.returncode == 0, result.stderr
+    assert "1 filesystem read(s) judged" in result.stdout
+
+
+def test_a_file_alias_of_a_foreign_file_type_is_not_a_read(tmp_path):
+    """Companion: only `fs::File` / `fs_err::File` make an alias a filesystem File."""
+    body = (
+        "use yadgar_lifecycle::rotate::File as F;\n"
+        "fn g(p: &Path) -> File { F::open(p) }\n"
+        "// ADR-0523-WATCHED: ServerTls\n"
+        "fn h(p: &Path) { let _ = std::fs::read(p); }\n"
+    )
+    result = _unmarked(tmp_path, body)
+    assert result.returncode == 0, result.stderr
+    assert "1 filesystem read(s) judged" in result.stdout
+
+
+def test_a_fs_alias_in_a_comment_or_test_module_is_not_an_alias(tmp_path):
+    body = (
+        "// use std::fs as sfs;\n"
+        "fn g(p: &Path) { let _ = sfs::read(p); }\n"
+        "// ADR-0523-WATCHED: ServerTls\n"
+        "fn h(p: &Path) { let _ = std::fs::read(p); }\n"
+    )
+    result = _unmarked(tmp_path, body)
+    assert result.returncode == 0, result.stderr
+    assert "1 filesystem read(s) judged" in result.stdout
+
+
+# --------------------------------------------------------------------------
 # The blanking pass, exercised directly: its failures move a line rather than
 # raising, so a behavioural test alone would not localise them.
 # --------------------------------------------------------------------------
