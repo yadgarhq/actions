@@ -56,6 +56,8 @@ import urllib.error
 import urllib.request
 from collections import namedtuple
 
+import pr_body
+
 ORG = "yadgarhq"
 
 # THE ONE ORDERABLE SHAPE, and it is the same regex the `version` job in
@@ -341,7 +343,7 @@ def headings(text):
     — so a body that answered under a different level than the template asked
     would leave the required section collecting nothing.
     """
-    stripped = re.sub(r"<!--.*?-->", "", text or "", flags=re.S)
+    stripped = pr_body.strip_comments(text)
     return [(m.group(1), m.group(2).strip()) for m in HEADING.finditer(stripped)]
 
 
@@ -397,9 +399,9 @@ def body(template, bumps, repository):
             "Each round was a human opening seven pull requests by hand.",
             "",
             "This is that round, opened by the `repin` workflow in "
-            "`yadgarhq/actions`, which orders tags by parsed integers. A bot "
-            "proposes and a human merges: ADR-0531 rejects automation where it "
-            "MANUFACTURES A REVIEW, and this manufactures none.",
+            "`yadgarhq/actions`, which orders tags by parsed integers. The "
+            "`sweep` workflow merges it once `ci / passed` is green and every "
+            "commit on it is the App's own signed commit (ADR-1106).",
             "",
             "ADR-0526 requires an in-org crate to be pinned by a published tag, "
             "never a bare revision. ADR-0634 confirms the producer's own "

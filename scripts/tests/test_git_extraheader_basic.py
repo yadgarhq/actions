@@ -116,6 +116,16 @@ def test_repin_no_longer_pushes_with_git():
     assert "repin_publish.py\" publish" in repin_runs
 
 
+def test_repin_runs_one_at_a_time_per_repository():
+    """yaadgaar 524: an overlapping run on older tags could close the newer
+    run's PR as superseded, and the next run would then read "closed by the
+    bot" and suppress the newer bump. One run per repository, queued, never
+    cancelled mid-publish."""
+    job = yaml.safe_load(workflow_texts()["repin.yaml"])["jobs"]["repin"]
+    assert job["concurrency"] == {"group": "repin-${{ github.repository }}",
+                                  "cancel-in-progress": False}
+
+
 # ---------------------------------------------------------------------------
 # Constructed red cases
 # ---------------------------------------------------------------------------
