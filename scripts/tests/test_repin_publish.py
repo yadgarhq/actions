@@ -204,7 +204,9 @@ def test_the_commit_passes_the_sweepers_own_provenance_check():
     publish(fake)
     commit = fake.commits[fake.refs[BRANCH]]
     commit["commit"]["message"] = TITLE
-    assert sweep.check_bot_commits([commit], [], "repin", commit["sha"]) == TITLE
+    never = lambda sha: pytest.fail("a one-parent commit asks no ancestry")  # noqa: E731
+    assert sweep.check_bot_commits([commit], [], "repin", commit["sha"], "main", BRANCH,
+                                   never) == (TITLE, set())
 
 
 def test_an_unsigned_commit_moves_no_ref():
@@ -246,8 +248,8 @@ def test_a_checkout_not_on_the_default_branch_is_refused_before_any_write(relati
 def test_a_checkout_behind_the_default_tip_opens_a_pr_behind_main():
     """RULED 2026-11-01 (Max), "Open behind main". The default branch moved
     mid-run: commit on the checkout's own HEAD, never on the newer tip (that
-    would revert its Cargo changes), and open the PR behind main. ADR-1109
-    merges a clean behind bot PR on a non-strict base."""
+    would revert its Cargo changes), and open the PR behind main. The sweeper
+    brings a behind bot PR up to date and merges it after CI (ADR-1119)."""
     fake = Fake(relation="ahead")
     got = publish(fake, parent=OLD_BASE)
     assert fake.compared == [(OLD_BASE, BASE)]
