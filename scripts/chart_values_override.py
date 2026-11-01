@@ -34,6 +34,16 @@ already is -- so a malformed one fails the same way a malformed
 `chart/values.yaml` always has: a `yaml.YAMLError` out of whichever gate reads
 it, uncaught, the same as today.
 
+EXTRA SCAN PASSES, `chart/ci/*-values.yaml` (yaadgaar #179, ruled 2026-11-01,
+option (a), the chart-testing convention). Each such file is one MORE values
+set the chart is rendered under, ALONE -- never layered over `ci/values.yaml`,
+because a chart like `platform` cannot render both shapes in one release
+(ADR-0787's mixed-release guard). `ci/values.yaml` stays the primary file
+above. ONLY `trivy_gate.py` reads the extra files today: `helm-lint`,
+`d80_portability.py` and `service_immutable.py` keep the primary file alone.
+The glob lives here, beside `OVERRIDE`, so there is still one reader per
+declaration (ADR-0806, C-A2).
+
 STANDARD LIBRARY ONLY at import time -- the `helm-lint` hook imports this
 module and a `language: script` hook cannot install anything. `merged_values`
 imports PyYAML lazily, inside the function, because only `d80_portability.py`
@@ -46,12 +56,20 @@ from pathlib import Path
 
 # Relative to the chart directory, never to the repository root: see above.
 OVERRIDE = Path("ci") / "values.yaml"
+EXTRA_GLOB = "*-values.yaml"
 
 
 def values_override(chart_directory: Path) -> Path | None:
     """The `ci/values.yaml` override under `chart_directory`, or `None`."""
     path = Path(chart_directory) / OVERRIDE
     return path if path.is_file() else None
+
+
+def extra_values_files(chart_directory: Path) -> list[Path]:
+    """Every `ci/*-values.yaml` under `chart_directory`, sorted so the pass
+    order is the same on every run; `[]` when there are none."""
+    ci = Path(chart_directory) / OVERRIDE.parent
+    return sorted(p for p in ci.glob(EXTRA_GLOB) if p.is_file())
 
 
 def values_override_flags(chart_directory: Path) -> list[str]:

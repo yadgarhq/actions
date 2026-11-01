@@ -20,6 +20,22 @@ gate reads: `chart_values_override.values_override` for `chart/ci/values.yaml`
 and `api_versions.declared_api_versions` for `chart/ci/api-versions.txt`. One
 reader each, not a second copy of either parse (ADR-0806, C-A2).
 
+ONE PASS PER CI VALUES FILE (yaadgaar #179, ruled 2026-11-01, option (a)).
+`chart/ci/values.yaml` is the primary pass. Every `chart/ci/*-values.yaml` is
+one more pass, rendered ALONE with the same `--helm-api-versions`, never
+layered over the primary file: `platform`'s mixed-release guard (ADR-0787)
+refuses operators and estate objects in one render, so its estate templates
+can only be scanned under a second, estate-shaped values file. Every refusal
+below runs PER PASS and names the values file it came from -- a healthy
+primary pass must never mask an extra file that rendered nothing. Findings
+from every pass are merged before `evaluate()` sees them, so an ignore entry
+is judged against the union. Duplicates are removed ACROSS passes only, never
+inside one: for each (target, id, resource) key the merge keeps the largest
+count any single pass reported, so a one-pass run lists exactly what it
+listed before extra passes existed (`merge_pass_results`).
+Only this gate reads the extra files; `helm-lint`, `d80_portability.py` and
+`service_immutable.py` keep the primary file alone.
+
 WHY THE SCAN ITSELF STAYS UNFILTERED, AND WHY `--config` AND `--ignorefile`
 BOTH POINT AT `/dev/null`. `.trivyignore.yaml` is not auto-detected, but trivy
 auto-loads TWO OTHER FILES from the working directory whether asked to or
@@ -137,7 +153,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from api_versions import DeclarationError, declared_api_versions  # noqa: E402
-from chart_values_override import values_override  # noqa: E402
+from chart_values_override import extra_values_files, values_override  # noqa: E402
 
 SEVERITY = "HIGH,CRITICAL"
 TRIVYIGNORE = Path(".trivyignore.yaml")
@@ -355,6 +371,18 @@ def load_entries(path: Path) -> list[Entry]:
 class Finding:
     target: str
     id: str
+    # The key part that tells two findings of one check in one file apart,
+    # used only to merge passes (`merge_pass_results`): `CauseMetadata.Resource`
+    # when trivy sets it, else `Message`. Measured, trivy 0.74.0 sets NO
+    # `Resource` on a helm finding (platform, 2026-11-01), so `Message` is the
+    # best key trivy gives -- and it is NOT unique per object: the nats
+    # StatefulSet yields KSV-0118 "container nats in default namespace is
+    # using the default security context" twice, for two different blocks
+    # (likewise KSV-0106, KSV-0030). That is why the merge keeps the largest
+    # per-pass count instead of collapsing a key to one. `StartLine` is no
+    # key: the same object sits on different lines under different values.
+    # The verdict is unaffected either way -- `evaluate()` keys on (target, id).
+    resource: str = ""
 
 
 def _entry_within_upstream(entry: Entry, root: Path = CHART) -> bool:
@@ -472,6 +500,11 @@ def evaluate(
 # ------------------------------------------------------------- trivy itself
 
 
+def _resource_key(misconfiguration: dict) -> str:
+    cause = misconfiguration.get("CauseMetadata") or {}
+    return str(cause.get("Resource") or misconfiguration.get("Message") or "")
+
+
 def findings_from_report(report: dict) -> list[Finding]:
     out = []
     for result in report.get("Results") or []:
@@ -479,8 +512,44 @@ def findings_from_report(report: dict) -> list[Finding]:
         for m in result.get("Misconfigurations") or []:
             vid = m.get("ID")
             if vid:
-                out.append(Finding(target=target, id=str(vid)))
+                out.append(Finding(target=target, id=str(vid), resource=_resource_key(m)))
     return out
+
+
+def merge_pass_results(passes: list[list[dict]]) -> list[dict]:
+    """One `Results` list out of every pass's, duplicates removed ACROSS
+    passes only. The first pass is kept whole. A later pass contributes, per
+    (target, id, resource) key, only the occurrences beyond the largest count
+    already kept -- so the merged count of a key is the largest count any
+    single pass reported. Two same-key findings inside ONE pass both survive
+    (trivy's `Message` is not unique per object, see `Finding.resource`); a
+    template that renders the same object under two values files is one.
+    A later pass's extra occurrences ride in a copy of its result, which keeps
+    that result's `Target` and `Type`.
+    """
+    merged: list[dict] = []
+    kept: dict[tuple[str, str, str], int] = {}
+    for results in passes:
+        counts: dict[tuple[str, str, str], int] = {}
+        additions: list[dict] = []
+        for result in results:
+            target = result.get("Target") or ""
+            extra = []
+            for m in result.get("Misconfigurations") or []:
+                key = (target, str(m.get("ID")), _resource_key(m))
+                counts[key] = counts.get(key, 0) + 1
+                if counts[key] > kept.get(key, 0):
+                    extra.append(m)
+            if not merged:
+                additions.append(result)
+            elif extra:
+                additions.append({**result, "Misconfigurations": extra})
+            elif not result.get("Misconfigurations"):
+                additions.append(result)
+        for key, n in counts.items():
+            kept[key] = max(kept.get(key, 0), n)
+        merged += additions
+    return merged
 
 
 def helm_result_count(report: dict, under: str = "") -> int:
@@ -508,6 +577,22 @@ def scan_args(chart_dir: Path = CHART) -> list[str]:
     for version in declared_api_versions(chart_dir):
         args += ["--helm-api-versions", version]
     return args
+
+
+def scan_passes(chart_dir: Path = CHART) -> list[tuple[str, list[str]]]:
+    """`(label, flags)` per pass: the primary pass first (exactly
+    `scan_args`, unchanged), then one per `ci/*-values.yaml`, each with ONLY
+    its own `--helm-values` plus the same `--helm-api-versions`. `label` is
+    the values file, for log lines and refusals."""
+    override = values_override(chart_dir)
+    primary = str(override) if override is not None else f"chart defaults (no {chart_dir}/ci/values.yaml)"
+    passes = [(primary, scan_args(chart_dir))]
+    api: list[str] = []
+    for version in declared_api_versions(chart_dir):
+        api += ["--helm-api-versions", version]
+    for extra in extra_values_files(chart_dir):
+        passes.append((str(extra), ["--helm-values", str(extra), *api]))
+    return passes
 
 
 def installed_trivy_version() -> str:
@@ -582,15 +667,29 @@ def apply_legacy_ignore(findings: list[Finding], legacy_ids: set[str]) -> list[F
 
 
 def run_trivy(chart_dir: Path = CHART) -> dict:
-    """The one unfiltered scan this gate evaluates. Refuses before scanning
-    anything if the installed trivy is not the pinned version. Fails loud,
-    before any ignore-list logic runs, on either shape of "this did not
-    actually render": the WARN trivy itself writes (any chart), a
-    `--helm-values` scan with no `helm`-typed result, or a `chart/Chart.yaml`
-    with no `helm`-typed result under `chart/`.
+    """The unfiltered scans this gate evaluates, one per CI values file
+    (`scan_passes`), their `Results` concatenated into one report. Refuses
+    before scanning anything if the installed trivy is not the pinned version.
     """
     version = installed_trivy_version()
     require_trivy_version(version)
+    passes = [
+        _run_pass(version, label, flags, chart_dir, extra=i > 0).get("Results") or []
+        for i, (label, flags) in enumerate(scan_passes(chart_dir))
+    ]
+    return {"Results": merge_pass_results(passes)}
+
+
+def _run_pass(version: str, label: str, flags: list[str], chart_dir: Path, extra: bool = False) -> dict:
+    """One trivy scan under one values file. Fails loud, before any
+    ignore-list logic runs, on either shape of "this did not actually
+    render": the WARN trivy itself writes (any chart), a `--helm-values` scan
+    with no `helm`-typed result, or a `chart/Chart.yaml` with no `helm`-typed
+    result under `chart/`. Every refusal names `label`, the pass's values file.
+    `extra` marks a `ci/*-values.yaml` pass: the primary pass already rendered
+    with the same dependencies, so the WARN there most likely means the values
+    file itself does not render, and the refusal says so first.
+    """
     args = [
         "trivy",
         "config",
@@ -622,7 +721,7 @@ def run_trivy(chart_dir: Path = CHART) -> dict:
         # scan is reproducible from the binary alone.
         "--skip-check-update",
         "--skip-version-check",
-        *scan_args(chart_dir),
+        *flags,
         ".",
     ]
     print("+ " + " ".join(args))
@@ -632,17 +731,24 @@ def run_trivy(chart_dir: Path = CHART) -> dict:
     # ANY chart in the tree -- not only `chart/`. The count checks below are
     # added on top of this refusal, never in place of it.
     if SKIPPING_CHART in proc.stderr:
+        likely = (
+            f"The likely cause is {label} itself: check it with `helm template "
+            f"chart -f {label}` and the `chart/ci/api-versions.txt` flags. Else: "
+            if extra
+            else ""
+        )
         raise Refused(
             f"trivy printed `{SKIPPING_CHART}` -- the chart did not render, so "
-            f"this scan proves nothing. Run `helm dependency update chart` "
-            f"before this step, and check `Chart.lock` against `chart/charts/`."
+            f"this scan proves nothing. {likely}Run `helm dependency update chart` "
+            f"before this step, and check `Chart.lock` against `chart/charts/`. "
+            f"(pass: {label})"
         )
     if proc.returncode != 0:
-        raise Refused(f"trivy exited {proc.returncode}: {proc.stderr.strip()}")
+        raise Refused(f"trivy exited {proc.returncode} (pass: {label}): {proc.stderr.strip()}")
     try:
         report = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
-        raise Refused(f"trivy's own output was not JSON: {exc}") from exc
+        raise Refused(f"trivy's own output was not JSON (pass: {label}): {exc}") from exc
     # Belt and suspenders on top of the WARN match: a `--helm-values` scan
     # with no helm result anywhere refuses (the old check, unchanged), and so
     # does an existing `chart/Chart.yaml` with no helm result UNDER `chart/`
@@ -653,17 +759,18 @@ def run_trivy(chart_dir: Path = CHART) -> dict:
         raise Refused(
             "a --helm-values scan reported zero `helm`-typed results. The "
             "chart did not render -- check `helm dependency update chart` ran, "
-            "and that chart/ci/values.yaml still names a real key."
+            f"and that {label} still names a real key. (pass: {label})"
         )
     if (chart_dir / "Chart.yaml").is_file() and helm_result_count(report, f"{CHART.as_posix()}/") == 0:
         raise Refused(
             f"a scan of an existing {CHART}/Chart.yaml reported zero `helm`-typed "
             f"results under `{CHART}/`. The chart did not render -- check "
             f"`helm dependency update chart` ran, `Chart.lock` matches "
-            f"`chart/charts/`, and the values still name a real key."
+            f"`chart/charts/`, and the values still name a real key. "
+            f"(pass: {label})"
         )
     print(
-        f"trivy {version}: {helm_result_count(report)} helm-typed result(s), "
+        f"trivy {version}, {label}: {helm_result_count(report)} helm-typed result(s), "
         f"{finding_count(report)} HIGH/CRITICAL misconfiguration(s)."
     )
     return report
