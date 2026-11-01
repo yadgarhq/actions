@@ -65,6 +65,19 @@ a skip; any other failure (401, 403, 404, no usable auth, an error with no
 HTTP code) is the write token or the call, not the pull request, and reds the
 `act` job. So does a re-evaluation that could not read (yaadgaar 469).
 
+A LOST CHECK (V1r, yaadgaar 518 item 4). GitHub can drop a `ci / passed`
+check run from `commits/<head>/check-runs` although the job that posts it
+succeeded: ten adoption pull requests sat BLOCKED that way on 2026-11-01, and
+one rerun each fixed them. When V1 finds no `ci / passed` check run at all,
+`lost_check` looks for that case: the pull request's own ci run for the head
+(exactly one), completed and green, at attempt 1, whose attempt-1 jobs hold
+one green `ci / passed` job whose check run, read by id, is green on this
+head in that run's suite. Then the row is `rerun`: `act` reruns that run once
+and the row is due `RERUN_WAIT_MINUTES` later, for the follow-up. A run
+already rerun (attempt 2 or more), still running, red, or one of several is
+never rerun: V1 skips as before, and says why. A check run that exists but is
+red or pending is V1 as before, and never looked at for a rerun.
+
 THE FOLLOW-UP (ADR-1108: bot merges within minutes). GitHub fires the
 cron every 3-4 hours, and no event in another repository reaches this one
 without a new credential or a webhook. So a LIVE run that leaves a pull request
@@ -85,7 +98,8 @@ rewrite makes (the repository's node id, the parent commit, the new commit, and
 the branch after a failed swap), are the only calls made with the App token,
 minted per repository with `contents: write`. A bot leg's token (ADR-1106) is
 minted per repository with `contents` and `workflows: write`, for the merge and
-the branch delete.
+the branch delete. A rerun leg's token (V1r) is minted per repository with
+`actions: write` only, for the one rerun.
 
 Commands:
 
@@ -93,7 +107,7 @@ Commands:
     sweep.py wait --owner O             WAIT_MINUTES -> sleep until the soak should be done
     sweep.py check-name -- NAME         a matrix leg's repository, or exit 1
     sweep.py evaluate --owner O [--live]    HOP -> `plan`, and live `follow_up` and `next_hop`
-    sweep.py act --owner O --repo R --n N --head SHA --action merge|refresh [--kind dependabot|repin]
+    sweep.py act --owner O --repo R --n N --head SHA --action merge|refresh|rerun [--kind dependabot|repin]
 
 Tests: python3 -m pytest scripts/tests/ -q
 """
@@ -176,10 +190,26 @@ WAIT_INPUT = re.compile(r"0|[1-9][0-9]?")
 MAX_HOPS = 6
 HOP_INPUT = re.compile(r"[0-9]")
 HELD = ("M4:", "M5:")
+WRITES = ("merge", "refresh", "rerun")  # the actions a plan row can carry
+# V1r (yaadgaar 518 item 4). A rerun row is due this long after the run that
+# planned it: a rerun of a config-only adoption run took about 2.5 minutes
+# (yadgar run 41290991069, 2026-11-01), a cargo suite takes longer. GitHub's
+# run timestamps were skewed that day, so no duration is read from them.
+RERUN_WAIT_MINUTES = 15
 
 
 class Skip(Exception):
     """This pull request is not merged or refreshed. The message says why."""
+
+
+class Lost(Skip):
+    """V1r: `ci / passed` is missing from the head's check runs, but the job that
+    posts it succeeded in the pull request's own ci run, attempt 1. That run is
+    rerun once. Still a Skip anywhere else: it never admits a merge."""
+
+    def __init__(self, message, head, run):
+        super().__init__(message)
+        self.head, self.run, self.kind = head, run, ""
 
 
 class NotYet(Skip):
@@ -476,7 +506,13 @@ def check_ci(api, owner, name, head, branch=fan_out.BRANCH, workflow=CI_WORKFLOW
     need(isinstance(runs, list) and is_int(dig(got, "total_count"))
          and got["total_count"] == len(runs) and len(runs) < PAGE, "V1: check runs not read in full")
     passed = [r for r in runs if dig(r, "name") == PASSED]
-    need(len(passed) >= 1, f"V1: no `{PASSED}` check run")
+    if not passed:
+        try:
+            run = lost_check(api, owner, name, head, branch, workflow)
+        except Skip as why:
+            raise Skip(f"V1: no `{PASSED}` check run; not rerun: {why}") from None
+        raise Lost(f"V1r: the `{PASSED}` job of run {run} succeeded but its check run is missing "
+                   f"on the head; rerun run {run} once", head, run)
     need(all(dig(r, "status") == "completed" and dig(r, "conclusion") == "success" for r in passed),
          f"V1: a `{PASSED}` check run is not a completed success")
     wf = api.get(f"repos/{owner}/{name}/actions/runs?head_sha={head}&per_page={PAGE}")
@@ -510,6 +546,56 @@ def check_ci(api, owner, name, head, branch=fan_out.BRANCH, workflow=CI_WORKFLOW
         pre = [r for r in runs if dig(r, "name") == PRECOMMIT and dig(r, "check_suite", "id") == suite]
         need(len(pre) >= 1 and all(dig(r, "status") == "completed" and dig(r, "conclusion") == "success"
                                    for r in pre), f"V3: `{PRECOMMIT}` is not green in the same suite")
+
+
+def lost_check(api, owner, name, head, branch, workflow):
+    """V1r. The id of the run whose `ci / passed` check GitHub lost, or a Skip
+    saying why this is not that (yaadgaar 518 item 4: ten adoption pull requests
+    sat BLOCKED although the job had succeeded; one rerun each fixed it).
+
+    Exactly one run of `workflow` on `pull_request` for this head and branch,
+    completed and a success, at attempt 1: a run already rerun is never rerun
+    again, and one still running is not lost but pending (a second run while
+    one is in progress blocks the pull request, task-db#51). Its attempt-1 jobs,
+    read in full, hold exactly one `ci / passed` job, completed and a success,
+    whose own check run, read by id in this repository, is a completed success
+    by GitHub Actions for this head in that run's suite. So the check was made
+    and lost from the listing, not never made."""
+    wf = api.get(f"repos/{owner}/{name}/actions/runs?head_sha={head}&per_page={PAGE}")
+    wruns = dig(wf, "workflow_runs")
+    need(isinstance(wruns, list) and is_int(dig(wf, "total_count"))
+         and wf["total_count"] == len(wruns) and len(wruns) < PAGE, "workflow runs not read in full")
+    mine = [w for w in wruns if isinstance(w, dict) and w.get("path") == workflow
+            and w.get("event") == "pull_request" and w.get("head_sha") == head
+            and w.get("head_branch") == branch]
+    need(len(mine) == 1, f"{len(mine)} ci runs for this head, not one")
+    run = mine[0]
+    rid, suite = dig(run, "id"), dig(run, "check_suite_id")
+    need(is_int(rid) and is_int(suite), "the ci run has no id or suite")
+    need(dig(run, "status") == "completed" and dig(run, "conclusion") == "success",
+         f"run {rid} is not a completed success")
+    attempt = run.get("run_attempt")
+    need(is_int(attempt), f"run {rid} has no attempt number")
+    need(attempt == 1, f"run {rid} is at attempt {attempt}: it was rerun already")
+    got = api.get(f"repos/{owner}/{name}/actions/runs/{rid}/attempts/1/jobs?per_page={PAGE}")
+    jobs = dig(got, "jobs")
+    need(isinstance(jobs, list) and is_int(dig(got, "total_count"))
+         and got["total_count"] == len(jobs) and len(jobs) < PAGE, f"run {rid}'s jobs not read in full")
+    job = [j for j in jobs if isinstance(j, dict) and j.get("name") == PASSED]
+    need(len(job) == 1, f"run {rid} has {len(job)} `{PASSED}` jobs, not one")
+    need(dig(job[0], "status") == "completed" and dig(job[0], "conclusion") == "success",
+         f"run {rid}'s `{PASSED}` job is not a completed success")
+    url = dig(job[0], "check_run_url")
+    prefix = f"{API}repos/{owner}/{name}/check-runs/"
+    tail = url[len(prefix):] if isinstance(url, str) and url.startswith(prefix) else ""
+    need(tail.isascii() and tail.isdigit(), f"run {rid}'s `{PASSED}` job names no check run here")
+    check = api.get(url[len(API):])
+    need(dig(check, "name") == PASSED and dig(check, "head_sha") == head
+         and is_int(dig(check, "app", "id")) and check["app"]["id"] == CI_APP_ID
+         and dig(check, "check_suite", "id") == suite
+         and dig(check, "status") == "completed" and dig(check, "conclusion") == "success",
+         f"run {rid}'s `{PASSED}` check run is not its green check on this head")
+    return rid
 
 
 def fetcher(api):
@@ -760,7 +846,12 @@ def evaluate_bot(api, owner, name, n, classes, now):
     compare = fetcher(api)(ci_verdict.compare_url(f"{owner}/{name}", tip, head))
     status, behind = dig(compare, "status"), dig(compare, "behind_by")
     workflow, caller = ci_shape(name)
-    check_ci(api, owner, name, head, branch=branch, workflow=workflow, caller=caller, precommit=False)
+    try:
+        check_ci(api, owner, name, head, branch=branch, workflow=workflow, caller=caller,
+                 precommit=False)
+    except Lost as lost:
+        lost.kind = kind
+        raise
     need(dig(pr, "mergeable") is True, "U3: GitHub does not call it mergeable")
     verdict = {"repo": name, "n": n, "head": head, "title": subject, "body": BOT_MESSAGE,
                "kind": kind, "branch": branch, "reason": f"{kind} (ADR-1106)"}
@@ -808,6 +899,10 @@ def judge(api, owner, name, n, classes, now):
         return route(api, owner, name, n, classes, now)
     except NotYet as later:
         return {"repo": name, "n": n, "action": "skip", "reason": str(later), "due": later.at}
+    except Lost as lost:  # V1r: a write, so the row carries the head and the run
+        row = {"repo": name, "n": n, "head": lost.head, "action": "rerun", "run": lost.run,
+               "reason": str(lost), "due": now + datetime.timedelta(minutes=RERUN_WAIT_MINUTES)}
+        return dict(row, kind=lost.kind) if lost.kind else row
     except Skip as skip:
         return {"repo": name, "n": n, "action": "skip", "reason": str(skip)}
     except Exception as exc:  # fail closed: an error is never a merge
@@ -908,7 +1003,10 @@ def plan(rows, max_merges):
     checks off a sibling stays mergeable while BEHIND, but a merge makes GitHub
     recompute every sibling's `mergeable` (null for a while: U3) and two bumps
     of one lock file conflict, so the second write waits for the next run,
-    which judges it on the new base. `follow_up` asks for that run at once."""
+    which judges it on the new base. `follow_up` asks for that run at once.
+
+    A rerun (V1r) is a write but not a merge: it takes a repository under M5
+    and never counts toward M4."""
     out, merges = [], 0
     for row in rows:
         if row.get("kind"):
@@ -918,11 +1016,11 @@ def plan(rows, max_merges):
                 row.update(action="skip", reason=f"M4: the cap of {max_merges} merges per run is reached")
                 continue
             merges += 1
-        if row["action"] in ("merge", "refresh"):
+        if row["action"] in WRITES:
             out.append({"repo": row["repo"], "n": row["n"], "head": row["head"], "action": row["action"]})
     busy = {t["repo"] for t in out}
     for row in rows:
-        if not row.get("kind") or row["action"] not in ("merge", "refresh"):
+        if not row.get("kind") or row["action"] not in WRITES:
             continue
         if row["repo"] in busy:
             row.update(action="skip", reason="M5: one write per repository per run, and this one has it")
@@ -951,8 +1049,9 @@ def hop_input(text):
 def follow_up(rows, now, hop):
     """ADR-1108. Minutes until the next run should start, or None for no follow-up.
 
-    A row with `due` (B10) is due a minute after that time; a row the plan held
-    back (M4, M5) is due at once, one minute, after this run's `act`. Nothing
+    A row with `due` (B10, or a planned V1r rerun, due when its CI should be
+    done) is due a minute after that time; a row the plan held back (M4, M5)
+    is due at once, one minute, after this run's `act`. Nothing
     else is: a red, pending or conflicting pull request waits for the cron. A
     run at MAX_HOPS, or one whose soonest row is MAX_WAIT_MINUTES or more away,
     asks for nothing."""
@@ -960,10 +1059,12 @@ def follow_up(rows, now, hop):
         return None
     soonest = None
     for row in rows:
-        if isinstance(row.get("due"), datetime.datetime):
-            minutes = max(1, math.ceil((row["due"] - now).total_seconds() / 60) + 1)
-        elif row.get("action") == "skip" and str(row.get("reason", "")).startswith(HELD):
+        # Held first: a rerun row the plan held back carries a `due` for after
+        # its rerun, but nothing was rerun, so it is due at once.
+        if row.get("action") == "skip" and str(row.get("reason", "")).startswith(HELD):
             minutes = 1
+        elif isinstance(row.get("due"), datetime.datetime):
+            minutes = max(1, math.ceil((row["due"] - now).total_seconds() / 60) + 1)
         else:
             continue
         soonest = minutes if soonest is None else min(soonest, minutes)
@@ -987,6 +1088,8 @@ def act(reader, writer, owner, name, n, head, action, classes, now, kind=""):
     need(verdict.get("kind", "") == kind,
          f"M1: re-evaluated as kind {verdict.get('kind', '')!r}, the leg is {kind!r}")
     need(verdict["head"] == head, "M1: the head moved since evaluate")
+    if action == "rerun":
+        return act_rerun(reader, writer, owner, name, n, verdict["run"])
     if kind:
         return act_bot(reader, writer, owner, name, n, head, action, verdict)
     if action == "merge":
@@ -1016,6 +1119,26 @@ def act(reader, writer, owner, name, n, head, action, classes, now, kind=""):
     except fan_out.RefMoved as moved:
         raise Skip(f"the branch moved under the refresh: {moved}") from None
     return f"refreshed {owner}/{name}#{n} onto {verdict['tip']}"
+
+
+def act_rerun(reader, writer, owner, name, n, run):
+    """V1r's one write: rerun the run whose `ci / passed` check GitHub lost. The
+    run id is the re-evaluation's, never the plan's. `lost_check` just read it
+    at attempt 1, and the per-repository `act` group keeps two legs from both
+    reading that; after the call it must be past attempt 1. A rerun GitHub
+    refuses as it refuses a merge (405, 409, 422) is a skip; any other failure,
+    403 included (a token without `actions: write` answers that), is the token
+    or the call, and reds the leg."""
+    try:
+        writer.rerun_run(owner, name, run)
+    except Refusal as exc:
+        if REFUSED.search(str(exc)):
+            raise Skip(f"M2: the rerun was refused: {exc}") from None
+        raise Refusal(f"M2: the rerun call was denied: {exc}") from None
+    after = reader.get(f"repos/{owner}/{name}/actions/runs/{int(run)}", fresh=True)
+    attempt = dig(after, "run_attempt")
+    need(is_int(attempt) and attempt > 1, f"M3: run {run} is still at attempt {attempt} after the rerun")
+    return f"reran {owner}/{name} run {run} for #{n} once (V1r), now attempt {attempt}"
 
 
 def act_bot(reader, writer, owner, name, n, head, action, verdict):
@@ -1088,6 +1211,10 @@ class SweepGh(fan_out.Gh):
                   payload={"merge_method": "squash", "sha": head,
                            "commit_title": title, "commit_message": message})
 
+    def rerun_run(self, owner, name, run):
+        """V1r: rerun one workflow run, every job (a lost check can be any job's)."""
+        self._api("-X", "POST", f"repos/{fan_out.q(owner)}/{fan_out.q(name)}/actions/runs/{int(run)}/rerun")
+
     def delete_branch(self, owner, name, branch):
         """A merged bot pull request's branch, and no other. Gone already (404,
         or 422 `Reference does not exist`) is done."""
@@ -1150,7 +1277,7 @@ def main(argv):
     go.add_argument("--repo", required=True)
     go.add_argument("--n", required=True, type=int)
     go.add_argument("--head", required=True)
-    go.add_argument("--action", required=True, choices=("merge", "refresh"))
+    go.add_argument("--action", required=True, choices=("merge", "refresh", "rerun"))
     go.add_argument("--kind", default="", choices=("", *BOTS))
     go.add_argument("--classes", default="classes.json")
     args = parser.parse_args(argv)

@@ -1,0 +1,170 @@
+{
+  "__about__": {
+    "run": "yadgarhq/yadgar run 41290991069, the ci run of yadgarhq/yadgar#110 (head 1c82748)",
+    "recorded": "2026-11-01, read-only GETs as m-agahi, after the one manual rerun",
+    "why": "the lost-check glitch: the attempt-1 `ci / passed` job succeeded and its check run 124802838540 was readable by id, but commits/<head>/check-runs did not list it, so the PR sat BLOCKED; one rerun fixed it (yaadgaar 518 item 4)",
+    "trimmed": "to the fields sweep.py reads; nothing else edited"
+  },
+  "run_attempt_1": {
+    "id": 41290991069,
+    "name": "ci",
+    "path": ".github/workflows/ci.yaml",
+    "event": "pull_request",
+    "status": "completed",
+    "conclusion": "success",
+    "run_attempt": 1,
+    "head_branch": "actions-adopt",
+    "head_sha": "1c8274816b93d8d11495efe6dfca3bb0a66de5fd",
+    "check_suite_id": 111912852767
+  },
+  "run_now": {
+    "id": 41290991069,
+    "name": "ci",
+    "path": ".github/workflows/ci.yaml",
+    "event": "pull_request",
+    "status": "completed",
+    "conclusion": "success",
+    "run_attempt": 2,
+    "head_branch": "actions-adopt",
+    "head_sha": "1c8274816b93d8d11495efe6dfca3bb0a66de5fd",
+    "check_suite_id": 111912852767
+  },
+  "jobs_attempt_1": {
+    "total_count": 17,
+    "jobs": [
+      {
+        "name": "windows",
+        "status": "completed",
+        "conclusion": "success",
+        "run_attempt": 1,
+        "check_run_url": "https://api.github.com/repos/yadgarhq/yadgar/check-runs/124802032731"
+      },
+      {
+        "name": "stamp",
+        "status": "completed",
+        "conclusion": "success",
+        "run_attempt": 1,
+        "check_run_url": "https://api.github.com/repos/yadgarhq/yadgar/check-runs/124802032737"
+      },
+      {
+        "name": "ci / detect",
+        "status": "completed",
+        "conclusion": "success",
+        "run_attempt": 1,
+        "check_run_url": "https://api.github.com/repos/yadgarhq/yadgar/check-runs/124802032873"
+      },
+      {
+        "name": "ci / version",
+        "status": "completed",
+        "conclusion": "skipped",
+        "run_attempt": 1,
+        "check_run_url": "https://api.github.com/repos/yadgarhq/yadgar/check-runs/124802033377"
+      },
+      {
+        "name": "main",
+        "status": "completed",
+        "conclusion": "skipped",
+        "run_attempt": 1,
+        "check_run_url": "https://api.github.com/repos/yadgarhq/yadgar/check-runs/124802033429"
+      },
+      {
+        "name": "ci / template",
+        "status": "completed",
+        "conclusion": "skipped",
+        "run_attempt": 1,
+        "check_run_url": "https://api.github.com/repos/yadgarhq/yadgar/check-runs/124802033474"
+      },
+      {
+        "name": "ci / precommit",
+        "status": "completed",
+        "conclusion": "success",
+        "run_attempt": 1,
+        "check_run_url": "https://api.github.com/repos/yadgarhq/yadgar/check-runs/124802520037"
+      },
+      {
+        "name": "ci / service_immutable",
+        "status": "completed",
+        "conclusion": "skipped",
+        "run_attempt": 1,
+        "check_run_url": "https://api.github.com/repos/yadgarhq/yadgar/check-runs/124802520763"
+      },
+      {
+        "name": "ci / pre_pin_parent",
+        "status": "completed",
+        "conclusion": "skipped",
+        "run_attempt": 1,
+        "check_run_url": "https://api.github.com/repos/yadgarhq/yadgar/check-runs/124802520768"
+      },
+      {
+        "name": "ci / portability",
+        "status": "completed",
+        "conclusion": "skipped",
+        "run_attempt": 1,
+        "check_run_url": "https://api.github.com/repos/yadgarhq/yadgar/check-runs/124802520798"
+      },
+      {
+        "name": "ci / proto",
+        "status": "completed",
+        "conclusion": "skipped",
+        "run_attempt": 1,
+        "check_run_url": "https://api.github.com/repos/yadgarhq/yadgar/check-runs/124802520803"
+      },
+      {
+        "name": "ci / workflows",
+        "status": "completed",
+        "conclusion": "skipped",
+        "run_attempt": 1,
+        "check_run_url": "https://api.github.com/repos/yadgarhq/yadgar/check-runs/124802520827"
+      },
+      {
+        "name": "ci / vulnerabilities",
+        "status": "completed",
+        "conclusion": "skipped",
+        "run_attempt": 1,
+        "check_run_url": "https://api.github.com/repos/yadgarhq/yadgar/check-runs/124802520946"
+      },
+      {
+        "name": "ci / hook_tools_adopted",
+        "status": "completed",
+        "conclusion": "skipped",
+        "run_attempt": 1,
+        "check_run_url": "https://api.github.com/repos/yadgarhq/yadgar/check-runs/124802521009"
+      },
+      {
+        "name": "ci / release_ready",
+        "status": "completed",
+        "conclusion": "skipped",
+        "run_attempt": 1,
+        "check_run_url": "https://api.github.com/repos/yadgarhq/yadgar/check-runs/124802521238"
+      },
+      {
+        "name": "ci / test",
+        "status": "completed",
+        "conclusion": "skipped",
+        "run_attempt": 1,
+        "check_run_url": "https://api.github.com/repos/yadgarhq/yadgar/check-runs/124802521348"
+      },
+      {
+        "name": "ci / passed",
+        "status": "completed",
+        "conclusion": "success",
+        "run_attempt": 1,
+        "check_run_url": "https://api.github.com/repos/yadgarhq/yadgar/check-runs/124802838540"
+      }
+    ]
+  },
+  "check_run": {
+    "id": 124802838540,
+    "name": "ci / passed",
+    "status": "completed",
+    "conclusion": "success",
+    "head_sha": "1c8274816b93d8d11495efe6dfca3bb0a66de5fd",
+    "app": {
+      "id": 15368,
+      "slug": "github-actions"
+    },
+    "check_suite": {
+      "id": 111912852767
+    }
+  }
+}
