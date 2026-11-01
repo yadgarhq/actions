@@ -152,6 +152,22 @@ jobs:
           sudo tar -xzf "$file" -C /usr/local/bin gitleaks
       - run: python3 -m pytest scripts/tests/ -q
 
+  # YAADGAAR 473. `seed-declaration.yaml` had no run anywhere: no consumer calls it
+  # (it is optional, for adopting organisations) and nothing here exercised it, so
+  # its own-SHA checkout (ADR-0981) and both gates were unproven. This calls it BY
+  # LOCAL PATH, like `ci` below, over a fixture declaration that conforms. A green
+  # job means the `own_sha` step accepted a real 40-hex `job.workflow_sha` (it
+  # fails closed otherwise) and both gates ran. `test_ci_self_seed_declaration.py`
+  # holds this wiring and that the fixture passes the real gate. Not wired into
+  # `ci` via `needs:`, for the reason the `pytest` job above gives.
+  seed-declaration:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/seed-declaration.yaml
+    permissions:
+      contents: read
+    with:
+      content-root: scripts/tests/fixtures/seed_declaration
+
   ci:
     if: github.event_name == 'pull_request'
     uses: ./.github/workflows/ci-pr.yaml
