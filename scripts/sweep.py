@@ -72,11 +72,21 @@ one rerun each fixed them. When V1 finds no `ci / passed` check run at all,
 `lost_check` looks for that case: the pull request's own ci run for the head
 (exactly one), completed and green, at attempt 1, whose attempt-1 jobs hold
 one green `ci / passed` job whose check run, read by id, is green on this
-head in that run's suite. Then the row is `rerun`: `act` reruns that run once
-and the row is due `RERUN_WAIT_MINUTES` later, for the follow-up. A run
-already rerun (attempt 2 or more), still running, red, or one of several is
-never rerun: V1 skips as before, and says why. A check run that exists but is
-red or pending is V1 as before, and never looked at for a rerun.
+head in that run's suite, and the run was created less than `LOST_MAX_AGE`
+ago. The probe's verdict counts only once every gate that can still refuse
+the pull request has passed (yaadgaar 518 item 5 (c)): U2 and U3 for an
+adoption pull request; U3, U2 or U4 and U5, and B10 for a bot one, where U5
+also takes `blocked` for the rerun alone, as a missing required check is what
+makes GitHub say that (a merge still needs `clean`). Then the row is `rerun`:
+`act` reruns that run once, re-reading the attempt up to `RERUN_READS` times
+(item 5 (d)), and the row is handed to the follow-up as due
+`RERUN_WAIT_MINUTES` later. A run already rerun and completed, still running
+at attempt 1, red, too old, or one of several is never rerun: V1 skips as
+before, and says why. A check run that exists but is red or pending is V1 as
+before, and never looked at for a rerun. A V1 skip whose run is a rerun still
+running (attempt 2 or more, started within `RERUN_RUNNING_WINDOW`) carries a
+due `RERUN_WAIT_MINUTES` later (item 5 (b)), so a slow CI does not end the
+chain.
 
 THE FOLLOW-UP (ADR-1108: bot merges within minutes). GitHub fires the
 cron every 3-4 hours, and no event in another repository reaches this one
@@ -84,7 +94,11 @@ without a new credential or a webhook. So a LIVE run that leaves a pull request
 held back only by time (B10, whose row carries `due`) or by its own plan (M4,
 M5) dispatches the next run of this workflow for when that pull request is due:
 `follow_up` gives the minutes, the `follow-up` job sleeps them and dispatches
-with GITHUB_TOKEN (`actions: write`, this repository only). The dispatched run
+with GITHUB_TOKEN (`actions: write`, this repository only). A planned rerun's
+due is not in `follow_up`: `reruns_due` hands it on, and after `act` the
+`follow-up` command (`after_act`) keeps it only if the run is now past attempt
+1, so a rerun GitHub refused is not planned again every hop (yaadgaar 518 item
+5 (a)). The dispatched run
 carries `hop` + 1 and judges everything from scratch; nothing it was handed
 admits anything. A run at `MAX_HOPS`, or one whose soonest due row is an hour
 or more away, asks for nothing, and the cron picks that up.
@@ -108,6 +122,7 @@ Commands:
     sweep.py check-name -- NAME         a matrix leg's repository, or exit 1
     sweep.py evaluate --owner O [--live]    HOP -> `plan`, and live `follow_up` and `next_hop`
     sweep.py act --owner O --repo R --n N --head SHA --action merge|refresh|rerun [--kind dependabot|repin]
+    sweep.py follow-up --owner O        FOLLOW_UP, RERUNS, NEXT_HOP -> `minutes`, or nothing
 
 Tests: python3 -m pytest scripts/tests/ -q
 """
@@ -196,6 +211,18 @@ WRITES = ("merge", "refresh", "rerun")  # the actions a plan row can carry
 # (yadgar run 41290991069, 2026-11-01), a cargo suite takes longer. GitHub's
 # run timestamps were skewed that day, so no duration is read from them.
 RERUN_WAIT_MINUTES = 15
+# (b) yaadgaar 518 item 5. A V1-pending row whose own ci run is at attempt 2 or
+# more, not completed, and started (`run_started_at`, the latest attempt's
+# start) less than this long ago, either way, is due RERUN_WAIT_MINUTES later.
+RERUN_RUNNING_WINDOW = datetime.timedelta(minutes=MAX_WAIT_MINUTES)
+# A run created (`created_at`, the first attempt's) this long ago or more is
+# never rerun: a lost check is seen within hours, and GitHub reruns a run for
+# 30 days only, so an older run would answer every cron with a refusal.
+LOST_MAX_AGE = datetime.timedelta(hours=24)
+# (d) GitHub may show the new attempt a moment after the rerun POST answers.
+RERUN_READS = 3
+RERUN_READ_PAUSE = 5  # seconds
+FOLLOW_INPUT = re.compile(r"[1-9][0-9]?")
 
 
 class Skip(Exception):
@@ -496,11 +523,12 @@ def ci_shape(name):
     return CI_WORKFLOW, CI_PR
 
 
-def check_ci(api, owner, name, head, branch=fan_out.BRANCH, workflow=CI_WORKFLOW, caller=CI_PR,
+def check_ci(api, owner, name, head, *, now, branch=fan_out.BRANCH, workflow=CI_WORKFLOW, caller=CI_PR,
              precommit=True):
     """V1-V3. Statuses (V4) are never read. The defaults are the adoption pull
     request's; a bot pull request (ADR-1106) passes its own branch and
-    `ci_shape`, and does not ask for V3."""
+    `ci_shape`, and does not ask for V3. A `Lost` (V1r) or a `NotYet` (a rerun
+    still running) is still a skip: neither ever reaches V2."""
     got = api.get(f"repos/{owner}/{name}/commits/{head}/check-runs?per_page={PAGE}")
     runs = dig(got, "check_runs")
     need(isinstance(runs, list) and is_int(dig(got, "total_count"))
@@ -508,13 +536,23 @@ def check_ci(api, owner, name, head, branch=fan_out.BRANCH, workflow=CI_WORKFLOW
     passed = [r for r in runs if dig(r, "name") == PASSED]
     if not passed:
         try:
-            run = lost_check(api, owner, name, head, branch, workflow)
+            run = lost_check(api, owner, name, head, branch, workflow, now)
+        except NotYet as later:  # (b): keep its due
+            raise NotYet(f"V1: no `{PASSED}` check run; not rerun: {later}", later.at) from None
         except Skip as why:
             raise Skip(f"V1: no `{PASSED}` check run; not rerun: {why}") from None
         raise Lost(f"V1r: the `{PASSED}` job of run {run} succeeded but its check run is missing "
                    f"on the head; rerun run {run} once", head, run)
-    need(all(dig(r, "status") == "completed" and dig(r, "conclusion") == "success" for r in passed),
-         f"V1: a `{PASSED}` check run is not a completed success")
+    if not all(dig(r, "status") == "completed" and dig(r, "conclusion") == "success" for r in passed):
+        red = f"V1: a `{PASSED}` check run is not a completed success"
+        if any(r.get("status") != "completed" for r in passed):
+            try:
+                due = rerun_running(own_ci_run(api, owner, name, head, branch, workflow), now)
+            except Skip:
+                due = None
+            if due is not None:
+                raise NotYet(f"{red}; {due[1]}", due[0])
+        raise Skip(red)
     wf = api.get(f"repos/{owner}/{name}/actions/runs?head_sha={head}&per_page={PAGE}")
     wruns = dig(wf, "workflow_runs")
     need(isinstance(wruns, list) and is_int(dig(wf, "total_count"))
@@ -548,19 +586,9 @@ def check_ci(api, owner, name, head, branch=fan_out.BRANCH, workflow=CI_WORKFLOW
                                    for r in pre), f"V3: `{PRECOMMIT}` is not green in the same suite")
 
 
-def lost_check(api, owner, name, head, branch, workflow):
-    """V1r. The id of the run whose `ci / passed` check GitHub lost, or a Skip
-    saying why this is not that (yaadgaar 518 item 4: ten adoption pull requests
-    sat BLOCKED although the job had succeeded; one rerun each fixed it).
-
-    Exactly one run of `workflow` on `pull_request` for this head and branch,
-    completed and a success, at attempt 1: a run already rerun is never rerun
-    again, and one still running is not lost but pending (a second run while
-    one is in progress blocks the pull request, task-db#51). Its attempt-1 jobs,
-    read in full, hold exactly one `ci / passed` job, completed and a success,
-    whose own check run, read by id in this repository, is a completed success
-    by GitHub Actions for this head in that run's suite. So the check was made
-    and lost from the listing, not never made."""
+def own_ci_run(api, owner, name, head, branch, workflow):
+    """The pull request's own ci run for this head: exactly one run of
+    `workflow` on `pull_request` for this head and branch, read in full."""
     wf = api.get(f"repos/{owner}/{name}/actions/runs?head_sha={head}&per_page={PAGE}")
     wruns = dig(wf, "workflow_runs")
     need(isinstance(wruns, list) and is_int(dig(wf, "total_count"))
@@ -569,14 +597,59 @@ def lost_check(api, owner, name, head, branch, workflow):
             and w.get("event") == "pull_request" and w.get("head_sha") == head
             and w.get("head_branch") == branch]
     need(len(mine) == 1, f"{len(mine)} ci runs for this head, not one")
-    run = mine[0]
+    return mine[0]
+
+
+def rerun_running(run, now):
+    """(b) yaadgaar 518 item 5. `(due, why)` when `run` is a rerun still going:
+    an integer attempt of 2 or more, a status that is not `completed`, and a
+    readable `run_started_at` less than RERUN_RUNNING_WINDOW from `now`. Else
+    None. Only a due: the row stays a skip, and the next run judges it again."""
+    attempt, status = run.get("run_attempt"), run.get("status")
+    if not (is_int(attempt) and attempt >= 2 and isinstance(status, str) and status != "completed"):
+        return None
+    try:
+        started = parse_time(run.get("run_started_at"))
+    except Skip:
+        return None
+    if abs(now - started) >= RERUN_RUNNING_WINDOW:
+        return None
+    return (now + datetime.timedelta(minutes=RERUN_WAIT_MINUTES),
+            f"run {run.get('id')} is at attempt {attempt} and still {status}: due again in "
+            f"{RERUN_WAIT_MINUTES} min")
+
+
+def lost_check(api, owner, name, head, branch, workflow, now):
+    """V1r. The id of the run whose `ci / passed` check GitHub lost, or a Skip
+    saying why this is not that (yaadgaar 518 item 4: ten adoption pull requests
+    sat BLOCKED although the job had succeeded; one rerun each fixed it).
+
+    Exactly one run of `workflow` on `pull_request` for this head and branch
+    (`own_ci_run`), completed and a success, at attempt 1: a run already rerun
+    is never rerun again, and one still running is not lost but pending (a
+    second run while one is in progress blocks the pull request, task-db#51);
+    a rerun still running is a `NotYet` (`rerun_running`). Created less than
+    LOST_MAX_AGE ago. Its attempt-1 jobs,
+    read in full, hold exactly one `ci / passed` job, completed and a success,
+    whose own check run, read by id in this repository, is a completed success
+    by GitHub Actions for this head in that run's suite. So the check was made
+    and lost from the listing, not never made."""
+    run = own_ci_run(api, owner, name, head, branch, workflow)
     rid, suite = dig(run, "id"), dig(run, "check_suite_id")
     need(is_int(rid) and is_int(suite), "the ci run has no id or suite")
+    due = rerun_running(run, now)
+    if due is not None:
+        raise NotYet(due[1], due[0])
     need(dig(run, "status") == "completed" and dig(run, "conclusion") == "success",
          f"run {rid} is not a completed success")
     attempt = run.get("run_attempt")
     need(is_int(attempt), f"run {rid} has no attempt number")
     need(attempt == 1, f"run {rid} is at attempt {attempt}: it was rerun already")
+    try:
+        created = parse_time(run.get("created_at"))
+    except Skip:
+        raise Skip(f"run {rid} has no readable creation time") from None
+    need(now - created < LOST_MAX_AGE, f"run {rid} was created {LOST_MAX_AGE} or more ago")
     got = api.get(f"repos/{owner}/{name}/actions/runs/{rid}/attempts/1/jobs?per_page={PAGE}")
     jobs = dig(got, "jobs")
     need(isinstance(jobs, list) and is_int(dig(got, "total_count"))
@@ -644,9 +717,15 @@ def evaluate(api, owner, name, n, classes, now):
         need(merge_base == tip, "U1: the merge base is not the base tip")
         check_diff(ci_verdict_text(fetch, repo, tip), head_text, changed, frm, to)
         check_tag(api, owner, to, sweep["soak_hours"], now)
-        check_ci(api, owner, name, head)
+        lost = None
+        try:
+            check_ci(api, owner, name, head, now=now)
+        except Lost as found:  # (c): rerun only a pull request the gates below admit
+            lost = found
         need(dig(pr, "base", "sha") == tip, "U2: the pull request's base sha is not the base tip")
         need(dig(pr, "mergeable") is True, "U3: GitHub does not call it mergeable")
+        if lost is not None:
+            raise lost
         return dict(verdict, action="merge")
     need(status == "diverged" and is_int(behind) and behind > 0, f"U1: compare status {status!r}")
     # BEHIND: a refresh, never a merge. The base must not have touched the file.
@@ -846,12 +925,13 @@ def evaluate_bot(api, owner, name, n, classes, now):
     compare = fetcher(api)(ci_verdict.compare_url(f"{owner}/{name}", tip, head))
     status, behind = dig(compare, "status"), dig(compare, "behind_by")
     workflow, caller = ci_shape(name)
+    lost = None
     try:
-        check_ci(api, owner, name, head, branch=branch, workflow=workflow, caller=caller,
+        check_ci(api, owner, name, head, now=now, branch=branch, workflow=workflow, caller=caller,
                  precommit=False)
-    except Lost as lost:
-        lost.kind = kind
-        raise
+    except Lost as found:  # (c): rerun only after U3, U2 or U4/U5, and B10 admit it
+        found.kind = kind
+        lost = found
     need(dig(pr, "mergeable") is True, "U3: GitHub does not call it mergeable")
     verdict = {"repo": name, "n": n, "head": head, "title": subject, "body": BOT_MESSAGE,
                "kind": kind, "branch": branch, "reason": f"{kind} (ADR-1106)"}
@@ -868,14 +948,21 @@ def evaluate_bot(api, owner, name, n, classes, now):
         rules = api.get(f"repos/{owner}/{name}/rules/branches/"
                         f"{urllib.parse.quote(base, safe='/')}?per_page={PAGE}")
         need(not strict_base(rules), "U4: behind, and the base requires an up-to-date branch")
-        need(dig(pr, "mergeable_state") == "clean",  # U5 (ADR-1109)
-             f"U5: behind, and GitHub calls it {pr.get('mergeable_state')!r}, not 'clean'")
+        # U5 (ADR-1109). A missing required check is what makes GitHub say
+        # `blocked`, so for the RERUN of a lost check `blocked` passes too. A
+        # merge never does: `act` judges the pull request again after the rerun.
+        states = ("clean",) if lost is None else ("clean", "blocked")
+        state = pr.get("mergeable_state")
+        need(isinstance(state, str) and state in states,
+             f"U5: behind, and GitHub calls it {state!r}, not {' or '.join(map(repr, states))}")
     # B10, parity with T5: the head must have sat on the branch this long.
     # Every other gate passed, so the row says when it is due (the follow-up).
     soak = datetime.timedelta(hours=classes["sweep"]["bot_soak_hours"])
     if now - pushed < soak:
         raise NotYet(f"B10: the head is younger than the {classes['sweep']['bot_soak_hours']}h bot soak",
                      pushed + soak)
+    if lost is not None:
+        raise lost
     return dict(verdict, action="merge")
 
 
@@ -1006,7 +1093,8 @@ def plan(rows, max_merges):
     which judges it on the new base. `follow_up` asks for that run at once.
 
     A rerun (V1r) is a write but not a merge: it takes a repository under M5
-    and never counts toward M4."""
+    and never counts toward M4. A planned rerun keeps its `due` for
+    `reruns_due`; a held one is a skip with an M5 reason, due at once."""
     out, merges = [], 0
     for row in rows:
         if row.get("kind"):
@@ -1049,16 +1137,19 @@ def hop_input(text):
 def follow_up(rows, now, hop):
     """ADR-1108. Minutes until the next run should start, or None for no follow-up.
 
-    A row with `due` (B10, or a planned V1r rerun, due when its CI should be
-    done) is due a minute after that time; a row the plan held back (M4, M5)
-    is due at once, one minute, after this run's `act`. Nothing
-    else is: a red, pending or conflicting pull request waits for the cron. A
-    run at MAX_HOPS, or one whose soonest row is MAX_WAIT_MINUTES or more away,
-    asks for nothing."""
+    A row with `due` (B10, or a V1r rerun still running) is due a minute after
+    that time; a row the plan held back (M4, M5) is due at once, one minute,
+    after this run's `act`. A PLANNED rerun is not, here: whether it took is
+    known only after `act`, so its due goes to `reruns_due` and `after_act`
+    (yaadgaar 518 item 5 (a)). Nothing else is: a red, pending or conflicting
+    pull request waits for the cron. A run at MAX_HOPS, or one whose soonest
+    row is MAX_WAIT_MINUTES or more away, asks for nothing."""
     if hop >= MAX_HOPS:
         return None
     soonest = None
     for row in rows:
+        if row.get("action") == "rerun":
+            continue
         # Held first: a rerun row the plan held back carries a `due` for after
         # its rerun, but nothing was rerun, so it is due at once.
         if row.get("action") == "skip" and str(row.get("reason", "")).startswith(HELD):
@@ -1071,6 +1162,62 @@ def follow_up(rows, now, hop):
     if soonest is None or soonest >= MAX_WAIT_MINUTES:
         return None
     return soonest
+
+
+def reruns_due(rows, hop):
+    """(a) The planned reruns, for the follow-up job: `{repo, run, due}` each,
+    `due` as UTC text. None at MAX_HOPS, where no follow-up is asked."""
+    if hop >= MAX_HOPS:
+        return []
+    return [{"repo": row["repo"], "run": row["run"], "due": row["due"].strftime("%Y-%m-%dT%H:%M:%SZ")}
+            for row in rows if row.get("action") == "rerun" and isinstance(row.get("due"), datetime.datetime)]
+
+
+def after_act(minutes, reruns, attempt_of, now):
+    """(a) yaadgaar 518 item 5. The follow-up's minutes once `act` is done:
+    evaluate's own `minutes` (None: none), or a planned rerun's due, but only
+    for a rerun that took, its run now past attempt 1 (`attempt_of`). A rerun
+    GitHub refused, or whose leg failed, leaves the run at attempt 1 and asks
+    for nothing, so it is not planned again every hop. Never a gate: a wrong
+    answer costs time, and the next run judges everything from scratch."""
+    took = [{"action": "skip", "reason": "V1r: the rerun took", "due": r["due"]}
+            for r in reruns if (lambda a: is_int(a) and a >= 2)(attempt_of(r["repo"], r["run"]))]
+    found = [m for m in (minutes, follow_up(took, now, 0)) if m is not None]
+    return min(found) if found else None
+
+
+def follow_up_input(text):
+    """The `follow_up` evaluate handed on: empty, or 1 to MAX_WAIT_MINUTES - 1."""
+    if text == "":
+        return None
+    if not (isinstance(text, str) and FOLLOW_INPUT.fullmatch(text)) or int(text) >= MAX_WAIT_MINUTES:
+        raise Refusal(f"follow_up must be an integer from 1 to {MAX_WAIT_MINUTES - 1}")
+    return int(text)
+
+
+def reruns_input(text):
+    """The `reruns` evaluate handed on, checked strictly: a list of exactly
+    `{repo, run, due}`, a repository name, a positive integer, a UTC time."""
+    if text == "":
+        return []
+    try:
+        got = json.loads(text)
+    except ValueError:
+        raise Refusal("reruns is not JSON") from None
+    if not isinstance(got, list) or len(got) > fan_out.MAX_CONSUMERS * 2:
+        raise Refusal("reruns is not a short list")
+    out = []
+    for item in got:
+        if not (isinstance(item, dict) and set(item) == {"repo", "run", "due"}
+                and isinstance(item["repo"], str) and fan_out.NAME.fullmatch(item["repo"])
+                and item["repo"] not in (".", "..") and is_int(item["run"]) and item["run"] > 0):
+            raise Refusal(f"reruns holds a malformed entry: {str(item)[:100]}")
+        try:
+            due = parse_time(item["due"])
+        except Skip:
+            raise Refusal(f"reruns holds a malformed due: {str(item['due'])[:40]}") from None
+        out.append(dict(item, due=due))
+    return out
 
 
 def act(reader, writer, owner, name, n, head, action, classes, now, kind=""):
@@ -1128,17 +1275,28 @@ def act_rerun(reader, writer, owner, name, n, run):
     reading that; after the call it must be past attempt 1. A rerun GitHub
     refuses as it refuses a merge (405, 409, 422) is a skip; any other failure,
     403 included (a token without `actions: write` answers that), is the token
-    or the call, and reds the leg."""
+    or the call, and reds the leg. GitHub may show the new attempt a moment
+    after it answers (yaadgaar 518 item 5 (d)), so the attempt is read up to
+    RERUN_READS times, RERUN_READ_PAUSE seconds apart, before M3 says no."""
     try:
         writer.rerun_run(owner, name, run)
     except Refusal as exc:
         if REFUSED.search(str(exc)):
             raise Skip(f"M2: the rerun was refused: {exc}") from None
         raise Refusal(f"M2: the rerun call was denied: {exc}") from None
-    after = reader.get(f"repos/{owner}/{name}/actions/runs/{int(run)}", fresh=True)
-    attempt = dig(after, "run_attempt")
-    need(is_int(attempt) and attempt > 1, f"M3: run {run} is still at attempt {attempt} after the rerun")
-    return f"reran {owner}/{name} run {run} for #{n} once (V1r), now attempt {attempt}"
+    attempt = None
+    for read in range(RERUN_READS):
+        if read:
+            pause(RERUN_READ_PAUSE)
+        after = reader.get(f"repos/{owner}/{name}/actions/runs/{int(run)}", fresh=True)
+        attempt = dig(after, "run_attempt")
+        if is_int(attempt) and attempt > 1:
+            return f"reran {owner}/{name} run {run} for #{n} once (V1r), now attempt {attempt}"
+    raise Skip(f"M3: run {run} is still at attempt {attempt} after the rerun ({RERUN_READS} reads)")
+
+
+def pause(seconds):
+    time.sleep(seconds)
 
 
 def act_bot(reader, writer, owner, name, n, head, action, verdict):
@@ -1280,6 +1438,9 @@ def main(argv):
     go.add_argument("--action", required=True, choices=("merge", "refresh", "rerun"))
     go.add_argument("--kind", default="", choices=("", *BOTS))
     go.add_argument("--classes", default="classes.json")
+    fu = sub.add_parser("follow-up")
+    fu.add_argument("--owner", required=True)
+    fu.add_argument("--classes", default="classes.json")
     args = parser.parse_args(argv)
 
     try:
@@ -1316,10 +1477,15 @@ def main(argv):
             fan_out.summary(report(rows, args.live))
             fan_out.output("plan", json.dumps(todo if args.live else [], separators=(",", ":")))
             minutes = follow_up(rows, now, hop) if args.live else None
+            reruns = reruns_due(rows, hop) if args.live else []
             if minutes is not None:
                 fan_out.output("follow_up", str(minutes))
+            if reruns:
+                fan_out.output("reruns", json.dumps(reruns, separators=(",", ":")))
+            if minutes is not None or reruns:
                 fan_out.output("next_hop", str(hop + 1))
-                fan_out.summary(f"\nFollow-up: the next run in {minutes} min (hop {hop + 1} of {MAX_HOPS}).\n")
+                fan_out.summary(f"\nFollow-up: the next run in {minutes} min, and after each rerun that "
+                                f"takes ({len(reruns)} planned) (hop {hop + 1} of {MAX_HOPS}).\n")
             print(f"{len(rows)} rows to the step summary; {len(todo)} would act "
                   f"({'live' if args.live else 'dry'}).")
             # NO INFRA-GREEN. `judge` turns an API error into a skip row so one
@@ -1331,6 +1497,28 @@ def main(argv):
                 fan_out.summary(f"\n**{fan_out.clean(message, 1000)}**\n")
                 print(f"::error::{fan_out.annotation(message)}", file=sys.stderr)
                 return 1
+            return 0
+        if args.command == "follow-up":
+            # (a) After `act`. Reads only; the workflow dispatches on `minutes`.
+            minutes = follow_up_input(os.environ.get("FOLLOW_UP", ""))
+            reruns = reruns_input(os.environ.get("RERUNS", ""))
+            nxt = os.environ.get("NEXT_HOP", "")
+            if not (HOP_INPUT.fullmatch(nxt) and 1 <= int(nxt) <= MAX_HOPS):
+                raise Refusal(f"next_hop must be an integer from 1 to {MAX_HOPS}")
+            reader = SweepGh(os.environ.get("GH_TOKEN", ""))
+
+            def attempt_of(repo, run):
+                got = reader.get(f"repos/{args.owner}/{repo}/actions/runs/{run}", fresh=True)
+                need(dig(got, "id") == run, f"the runs API answered for another run than {run}")
+                return dig(got, "run_attempt")
+
+            done = after_act(minutes, reruns, attempt_of, now_utc())
+            if done is not None:
+                fan_out.output("minutes", str(done))
+            message = (f"follow-up: the next run in {done} min (hop {nxt})" if done is not None
+                       else "follow-up: nothing is due; no reruns took")
+            fan_out.summary(fan_out.clean(message, 500) + "\n")
+            print(message)
             return 0
         if not env_live(classes):
             raise Refusal("`act` runs only when the sweep is armed")
