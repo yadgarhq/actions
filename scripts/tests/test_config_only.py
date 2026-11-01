@@ -604,7 +604,7 @@ def test_the_compare_is_three_dot_against_the_base_branch():
 SKIPPED_BY_CONFIG_ONLY = [
     "workflows", "vulnerabilities", "test", "proto",
     "portability", "service_immutable", "pre_pin_parent", "release_ready",
-    "hook_tools_adopted",
+    "hook_tools_adopted", "rust_parity",
 ]
 
 
@@ -612,7 +612,7 @@ def conditions():
     return ci_verdict.load_conditions(CI_PR, "passed")
 
 
-def test_exactly_the_nine_jobs_carry_the_conjunct():
+def test_exactly_the_ten_jobs_carry_the_conjunct():
     carries = [j for j, c in conditions() if c is not None and ci_verdict.CONFIG_ONLY_REF in str(c)]
     assert sorted(carries) == sorted(SKIPPED_BY_CONFIG_ONLY)
     # `precommit` IS the check a hook bump gets, and it is also what tells a
@@ -716,7 +716,7 @@ def test_main_registers_the_resolver_and_reads_nothing_on_an_ordinary_run():
     """Through the subprocess, as CI runs it: no `config_only` output, no API read."""
     ctx = {job: {"result": "success", "outputs": {}} for job, _ in conditions()}
     # `hook_tools_adopted` runs in yadgarhq/actions only, and REPO is yadgarhq/store.
-    for job in ("test", "proto", "template", "hook_tools_adopted"):
+    for job in ("test", "proto", "template", "hook_tools_adopted", "rust_parity"):
         ctx[job]["result"] = "skipped"
     ctx["detect"]["outputs"] = {"rust": "false", "proto": "false", "text_edit": "false",
                                 "config_only": "false"}

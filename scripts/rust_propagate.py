@@ -32,8 +32,8 @@ would carry a pull request nobody merges. The write token is then minted for
 exactly those names; an empty list is a refusal, because an empty
 `repositories:` beside `owner:` mints for every repository.
 
-DRY UNTIL ARMED. `classes.json` `"rust_bump": {"live": true}` arms the schedule
-and the push trigger; it ships false. A `workflow_dispatch` from main with
+DRY UNLESS ARMED. `classes.json` `"rust_bump": {"live": true}` arms the schedule
+and the push trigger; it is true now (armed in actions#165). A `workflow_dispatch` from main with
 `dry_run` false is the explicit human path. A dry run reads with a read-only
 token and writes nothing.
 

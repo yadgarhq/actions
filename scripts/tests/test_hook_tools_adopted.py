@@ -448,7 +448,7 @@ def test_the_merge_gate_holds_the_job_to_its_condition(repo, result, ok):
 
     conditions = ci_verdict.load_conditions(WORKFLOW, "passed")
     ctx = {job: {"result": "success", "outputs": {}} for job, _ in conditions}
-    for job in ("test", "proto"):
+    for job in ("test", "proto", "rust_parity"):
         ctx[job]["result"] = "skipped"
     ctx["hook_tools_adopted"]["result"] = result
     ctx["detect"]["outputs"] = {"rust": "false", "proto": "false", "text_edit": "false",

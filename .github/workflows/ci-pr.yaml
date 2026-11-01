@@ -1060,17 +1060,15 @@ jobs:
   # the `rust-toolchain.toml` channel and every `Cargo.toml` `rust-version`.
   # A rust-bump pull request sets them to exactly that value, so it passes.
   #
-  # WARN-ONLY FOR NOW, and deliberately NOT in `passed.needs`. Every consumer
-  # carried `rust-version = "1.90"` on 2026-11-01, so a failing check would red
-  # every Rust pull request until the first propagation pull requests merge.
-  # The order: this lands warn-only; `rust-bump.yaml` is armed and its pull
-  # requests merge; then ONE pull request sets `--mode fail`, deletes
-  # `continue-on-error` and adds this job to `passed.needs`.
-  # `continue-on-error` is on the JOB, as on `sizes`: a failed job turns the
-  # workflow run red, and `sweep.py` V2 requires the run to succeed.
+  # BLOCKING (rollout step 5, yaadgaar 527): `--mode fail`, and the job is in
+  # `passed.needs`, so a Rust version field that differs from `versions.yaml`
+  # reds `ci / passed`. It started warn-only because every consumer carried
+  # `rust-version = "1.90"` on 2026-11-01; the rust-bump pull requests merged the
+  # same day and all fourteen Rust repositories now match. The job skips where
+  # there is no `Cargo.toml` (charts, config), on a text-only edit and on a
+  # config-only one. Rollback is `.github/revert-bodies/rust-parity-fail.md`.
   rust_parity:
     needs: detect
-    continue-on-error: true
     if: >-
       github.event_name != 'push' && needs.detect.outputs.rust == 'true'
       && needs.detect.outputs.text_edit != 'true'
@@ -1115,7 +1113,7 @@ jobs:
           fi
           cp "$src" "$RUNNER_TEMP/rust_version.py"
           rm -rf .ci-actions
-          python3 "$RUNNER_TEMP/rust_version.py" check --version "$RUST" --mode warn
+          python3 "$RUNNER_TEMP/rust_version.py" check --version "$RUST" --mode fail
 
   # A REAL ENGINE, not a mock. D69's capability probe establishes what an engine
   # can do by executing against it, so a test suite with no engine cannot
@@ -2755,6 +2753,7 @@ jobs:
         pre_pin_parent,
         release_ready,
         hook_tools_adopted,
+        rust_parity,
       ]
     runs-on: ubuntu-latest
     # ADR-1033: a text-only edit may wait here, bounded by
