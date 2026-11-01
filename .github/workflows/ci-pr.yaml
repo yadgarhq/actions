@@ -1053,6 +1053,70 @@ jobs:
             echo "Gate exit status on these files: ${rc} (report only; the \`complexity\` hook in \`precommit\` is the gate)."
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # ADR-1120: EVERY RUST VERSION FIELD EQUALS `versions.yaml` rust-toolchain,
+  # the value this workflow runs at (`needs.detect.outputs.rust_toolchain`,
+  # read at `job.workflow_sha`; consumers call `ci-pr.yaml@main`, so that is
+  # actions main). `scripts/rust_version.py check` reads the tree as merged:
+  # the `rust-toolchain.toml` channel and every `Cargo.toml` `rust-version`.
+  # A rust-bump pull request sets them to exactly that value, so it passes.
+  #
+  # WARN-ONLY FOR NOW, and deliberately NOT in `passed.needs`. Every consumer
+  # carried `rust-version = "1.90"` on 2026-11-01, so a failing check would red
+  # every Rust pull request until the first propagation pull requests merge.
+  # The order: this lands warn-only; `rust-bump.yaml` is armed and its pull
+  # requests merge; then ONE pull request sets `--mode fail`, deletes
+  # `continue-on-error` and adds this job to `passed.needs`.
+  # `continue-on-error` is on the JOB, as on `sizes`: a failed job turns the
+  # workflow run red, and `sweep.py` V2 requires the run to succeed.
+  rust_parity:
+    needs: detect
+    continue-on-error: true
+    if: >-
+      github.event_name != 'push' && needs.detect.outputs.rust == 'true'
+      && needs.detect.outputs.text_edit != 'true'
+      && needs.detect.outputs.config_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+      - id: own_sha
+        name: the actions commit this job runs (ADR-0981)
+        env:
+          OWN_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$OWN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::job.workflow_sha is not a 40-hex commit SHA: '${OWN_SHA}'. There is no fallback to main (ADR-0981)."
+            exit 1
+          fi
+          echo "sha=${OWN_SHA}" >> "$GITHUB_OUTPUT"
+      - if: github.repository != 'yadgarhq/actions'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: yadgarhq/actions
+          ref: ${{ steps.own_sha.outputs.sha }}
+          path: .ci-actions
+          sparse-checkout: |
+            scripts/rust_version.py
+          sparse-checkout-cone-mode: false
+      - name: every Rust version field equals versions.yaml (ADR-1120)
+        env:
+          UNDER_REVIEW: ${{ github.repository }}
+          RUST: ${{ needs.detect.outputs.rust_toolchain }}
+        run: |
+          set -euo pipefail
+          src=scripts/rust_version.py
+          if [ "$UNDER_REVIEW" != "yadgarhq/actions" ]; then
+            src=.ci-actions/scripts/rust_version.py
+          fi
+          cp "$src" "$RUNNER_TEMP/rust_version.py"
+          rm -rf .ci-actions
+          python3 "$RUNNER_TEMP/rust_version.py" check --version "$RUST" --mode warn
+
   # A REAL ENGINE, not a mock. D69's capability probe establishes what an engine
   # can do by executing against it, so a test suite with no engine cannot
   # exercise the one thing that can be wrong. A `-db` repo's tests without a

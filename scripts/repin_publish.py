@@ -59,6 +59,7 @@ Tests: python3 -m pytest scripts/tests/ -q
 """
 
 import base64
+import collections
 import json
 import os
 import re
@@ -75,13 +76,27 @@ FILES = ("Cargo.toml", "Cargo.lock")
 MAX_BRANCH_COMMITS = 50
 
 
+def _repin_files(files):
+    if "Cargo.toml" not in files or not set(files) <= set(FILES):
+        raise Refusal(f"a re-pin commits `Cargo.toml` and only {', '.join(FILES)}; got {sorted(files)}")
+
+
+# ADR-1120. One bot flow, two lanes: the branch a lane may write, the head
+# prefix whose other open pull requests it supersedes, the files it may commit,
+# and the workflow named in the superseded comment. `rust_propagate.py` passes
+# its own; every default here is the repin lane as it always was.
+Lane = collections.namedtuple("Lane", "branch prefix check_files workflow")
+REPIN = Lane(BRANCH, "repin/", _repin_files, "repin")
+
+
 def q(part, safe="/"):
     return urllib.parse.quote(str(part), safe=safe)
 
 
-def _check_branch(branch):
-    if not isinstance(branch, str) or not BRANCH.fullmatch(branch):
-        raise Refusal(f"refusing to write `{branch}`: only a `repin/<crate>-<tag>_...` branch is ours")
+def _check_branch(branch, lane=REPIN):
+    if not isinstance(branch, str) or not lane.branch.fullmatch(branch):
+        raise Refusal(f"refusing to write `{branch}`: only a `{lane.prefix}...` branch "
+                      f"({lane.branch.pattern}) is ours")
 
 
 def decide(client, branch):
@@ -110,14 +125,13 @@ def _current(client, head, tree, parent):
     return True
 
 
-def publish(client, branch, title, body, parent, files):
+def publish(client, branch, title, body, parent, files, lane=REPIN):
     """Open or refresh the pull request for `branch`; close superseded ones.
 
     Returns `{"status": opened|refreshed|unchanged, "url": ..., "closed": [n]}`.
     """
-    _check_branch(branch)
-    if "Cargo.toml" not in files or not set(files) <= set(FILES):
-        raise Refusal(f"a re-pin commits `Cargo.toml` and only {', '.join(FILES)}; got {sorted(files)}")
+    _check_branch(branch, lane)
+    lane.check_files(files)
     meta = client.repo()
     base = meta["default_branch"]
     tip = client.branch_sha(base)
@@ -163,11 +177,11 @@ def publish(client, branch, title, body, parent, files):
             client.swap_ref(meta["node_id"], branch, head, sha)
         fan_out.check_landed(client.commit(sha), sha)
     url = open_pr["url"] if open_pr else client.create_pr(base, branch, title, body)
-    closed, kept = supersede(client, others, branch, tip, url)
+    closed, kept = supersede(client, others, branch, tip, url, lane.prefix)
     return {"status": status, "url": url, "closed": closed, "kept": kept}
 
 
-def supersede(client, others, branch, tip, url):
+def supersede(client, others, branch, tip, url, prefix="repin/"):
     """Close every other open repin PR the App opened here, linking `url`.
 
     A PR whose branch carries a commit not made by the App (a `None` author
@@ -178,7 +192,7 @@ def supersede(client, others, branch, tip, url):
     closed, kept = [], []
     for other in others:
         if not (other["state"] == "open" and other["head"] != branch
-                and other["head"].startswith("repin/") and other["user_id"] == fan_out.BOT_ID
+                and other["head"].startswith(prefix) and other["user_id"] == fan_out.BOT_ID
                 and other["same_repo"]):
             continue
         try:
@@ -215,9 +229,9 @@ def read_files(root="."):
 class Gh(fan_out.Gh):
     """`fan_out.Gh`'s transport, bound to one repository."""
 
-    def __init__(self, owner, repo):
+    def __init__(self, owner, repo, lane=REPIN):
         super().__init__()
-        self.owner, self.name = owner, repo
+        self.owner, self.name, self.lane = owner, repo, lane
         self.at = f"repos/{q(owner)}/{q(repo)}"
 
     def _json(self, *args, payload=None):
@@ -288,12 +302,12 @@ class Gh(fan_out.Gh):
                           payload={"message": message, "tree": tree, "parents": [parent]})
 
     def create_ref(self, branch, sha):
-        _check_branch(branch)
+        _check_branch(branch, self.lane)
         self._api("-X", "POST", f"{self.at}/git/refs",
                   payload={"ref": f"refs/heads/{branch}", "sha": sha})
 
     def swap_ref(self, node, branch, expect, sha):
-        _check_branch(branch)
+        _check_branch(branch, self.lane)
         self._swap_ref(self.owner, self.name, node, branch, expect, sha)
 
     def create_pr(self, base, branch, title, body):
@@ -303,9 +317,10 @@ class Gh(fan_out.Gh):
         super().update_pr(self.owner, self.name, number, title, body)
 
     def close_superseded(self, number, by):
+        what = "re-pins to newer tags" if self.lane is REPIN else "moves to a newer version"
         self._api("-X", "POST", f"{self.at}/issues/{int(number)}/comments", payload={
-            "body": f"Superseded by {by}, which re-pins to newer tags. Closed by the "
-                    "`repin` workflow in yadgarhq/actions; the branch is kept."})
+            "body": f"Superseded by {by}, which {what}. Closed by the "
+                    f"`{self.lane.workflow}` workflow in yadgarhq/actions; the branch is kept."})
         self._api("-X", "PATCH", f"{self.at}/pulls/{int(number)}", payload={"state": "closed"})
 
 

@@ -10,6 +10,8 @@ judged by `evaluate_bot` when `bot_kind` names it:
                 `dependabot/<ecosystem>/...`
     repin       opener id 324366854, type Bot, login `yadgarhq-bot[bot]`, head
                 `repin/<crate>-<tag>_...` (`repin.branch`)
+    rust        opener id 324366854, type Bot, login `yadgarhq-bot[bot]`, head
+                `rust-bump/X.Y.Z` (`rust_propagate.branch`, ADR-1120)
 
 Any other pull request, the App's `actions-adopt` included, goes to `evaluate`
 exactly as before. A bot pull request needs: head and base in this repository,
@@ -19,7 +21,9 @@ commit authored by that bot, verified, committed by `web-flow`, and not a merge,
 save the sweeper's own update-branch commit in its exact shape (ADR-1119),
 and every force-push the bot's; every changed file MODIFIED and owned by the
 ecosystem (B8: `FILES` for dependabot's cargo, github_actions and docker,
-Cargo files for repin; any other ecosystem is left for a person); every ref
+Cargo files for repin; for rust, `RUST_FILES` and in them only the Rust
+version lines moving to the branch's version, `check_rust_lines`; any other
+ecosystem is left for a person); every ref
 update of the head branch pushed by the bot, or by the App for an
 update-branch commit B3 admitted, the newest one the head (B9, the
 repository activity API); `ci / passed` green on the head from the
@@ -144,6 +148,7 @@ Tests: python3 -m pytest scripts/tests/ -q
 """
 
 import argparse
+import base64
 import datetime
 import json
 import math
@@ -158,6 +163,8 @@ import ci_verdict
 import config_only
 import fan_out
 import pr_body
+import rust_version
+import tool_versions
 from repin import Refusal
 
 API = "https://api.github.com/"
@@ -183,8 +190,11 @@ BOTS = {
     # `repin.branch`: `repin/` and `<crate>-<tag>` parts joined by `_`. One
     # segment, no `..`: the name goes into a ref path on delete.
     "repin": (BOT_ID, "yadgarhq-bot[bot]", re.compile(r"repin/[A-Za-z0-9_+-]+(\.[A-Za-z0-9_+-]+)*")),
+    # ADR-1120: `rust_propagate.branch`, one Rust version per branch name.
+    "rust": (BOT_ID, "yadgarhq-bot[bot]", re.compile(r"rust-bump/[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}")),
 }
 CI_SELF = ".github/workflows/ci-self.yaml"
+VERSIONS_YAML = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "versions.yaml")
 # F1. A bot merge never carries the pull request's editable body: a `feat!`
 # bullet typed there would reach `next_version.derive`. Fixed text with no
 # bullet, so `derive` takes its synthetic `fix(deps)` path as for any bot merge.
@@ -201,6 +211,9 @@ FILES = {
     "docker": re.compile(rf"{_ANY}(?:Dockerfile|Containerfile)[^/]*"),
 }
 REPIN_FILES = FILES["cargo"]
+# ADR-1120. A rust-bump pull request changes these files, and in them only the
+# Rust version lines `rust_version.py` rewrites (`check_rust_lines`).
+RUST_FILES = re.compile(rf"rust-toolchain\.toml|{_ANY}Cargo\.toml|\.github/workflows/[^/]+\.ya?ml")
 # The only merge failures that are GitHub's verdict on the pull request. Any
 # other (401/403/404, 5xx, no usable auth, an error with no HTTP code) is not,
 # and reds the leg (yaadgaar 469).
@@ -888,21 +901,92 @@ def check_bot_commits(commits, timeline, kind, head, base, branch, on_base):
     return subject, refreshes
 
 
-def check_bot_files(files, pr, kind, branch):
+def check_bot_files(files, pr, kind, branch, read=None):
     """B8. Every file the pull request changes is MODIFIED (not added, removed,
     renamed or copied) and is one its ecosystem owns: `FILES` by the
     `dependabot/<ecosystem>/` segment, Cargo files for repin. A listing that
-    may be truncated, or disagrees with `changed_files`, is a skip."""
-    allowed = REPIN_FILES if kind == "repin" else FILES.get(branch.split("/")[1])
+    may be truncated, or disagrees with `changed_files`, is a skip. A rust-bump
+    also names exactly versions.yaml rust-toolchain at this checkout, so no
+    downgrade merges, and moves only its version lines (`check_rust_lines`,
+    which reads a workflow file at the head through `read`)."""
+    allowed = {"repin": REPIN_FILES, "rust": RUST_FILES}.get(kind) or FILES.get(branch.split("/")[1])
     need(allowed is not None, f"B8: no file allowlist for `{branch}`; left for a person")
     need(isinstance(files, list) and len(files) < PAGE, "B8: the files listing may be truncated")
     count = dig(pr, "changed_files")
     need(is_int(count) and count == len(files), "B8: the files listing disagrees with changed_files")
+    if kind == "rust":
+        org = org_rust()
+        need(branch.split("/", 1)[1] == org,
+             f"B8: `{branch}` is not versions.yaml rust-toolchain {org} (ADR-1120)")
     for f in files:
         need(dig(f, "status") == "modified", f"B8: {f.get('filename')!r} is {f.get('status')!r}")
         name = dig(f, "filename")
         need(isinstance(name, str) and bool(allowed.fullmatch(name)),
              f"B8: {name!r} is not a file this pull request's ecosystem changes")
+        if kind == "rust":
+            check_rust_lines(f, name, branch.split("/", 1)[1], read)
+
+
+def org_rust():
+    """versions.yaml rust-toolchain in this checkout of yadgarhq/actions."""
+    return tool_versions.read(VERSIONS_YAML)["rust_toolchain"]
+
+
+HUNK = re.compile(r"@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,[0-9]+)? @@.*")
+
+
+def rust_pairs(patch, name):
+    """`(old, new, line)` for each Rust version line the patch replaces IN
+    PLACE: a `-` line immediately followed by its `+` line, in one hunk, and
+    `line` the new line's number in the head file. Any other arrangement (an
+    added or removed line alone, lines grouped, a field moved to another hunk)
+    is a skip."""
+    lines, pairs, at, i = patch.split("\n"), [], None, 0
+    while i < len(lines):
+        line = lines[i]
+        hunk = HUNK.fullmatch(line)
+        if hunk:
+            at, i = int(hunk.group(1)), i + 1
+            continue
+        need(at is not None, f"B8: {name!r}: a patch line before any hunk header")
+        if line.startswith("-"):
+            nxt = lines[i + 1] if i + 1 < len(lines) else ""
+            need(nxt.startswith("+"), f"B8: {name!r}: a removed line not replaced in place")
+            pairs.append((line[1:], nxt[1:], at))
+            at, i = at + 1, i + 2
+            continue
+        need(not line.startswith("+"), f"B8: {name!r}: an added line that replaces no line in place")
+        if not line.startswith("\\"):  # `\ No newline at end of file` is not a line
+            at += 1
+        i += 1
+    need(bool(pairs), f"B8: {name!r} does not swap Rust version lines one for one")
+    return pairs
+
+
+def check_rust_lines(f, name, version, read=None):
+    """B8 for ADR-1120, by line and by place: every changed line is replaced in
+    place (`rust_pairs`), the old line is this file's Rust version field and
+    the new one is that same line at the branch's version. A workflow line must
+    also be, at the head, the `with:` input of a dtolnay/rust-toolchain step.
+    Anything else, or no patch, is left for a person."""
+    patch = f.get("patch")  # GitHub omits it for a large or binary diff
+    need(isinstance(patch, str) and bool(patch), f"B8: no patch for {name!r} to read line by line")
+    kind = rust_version.kind_of(name)
+    line = {"toolchain": rust_version.CHANNEL_LINE, "cargo": rust_version.MSRV_LINE,
+            "workflow": rust_version.WORKFLOW_LINE}[kind]
+    pairs = rust_pairs(patch, name)
+    for old, new, _ in pairs:
+        was, now = line.fullmatch(old), line.fullmatch(new)
+        need(bool(was) and bool(now) and now.group(2) == version
+             and (was.group(1), was.group(3)) == (now.group(1), now.group(3)),
+             f"B8: {name!r} changes a line that is not its Rust version field moving to {version}")
+    if kind == "workflow":
+        need(read is not None, f"B8: {name!r} cannot be read at the head")
+        head = read(name).split("\n")
+        inputs = rust_version.dtolnay_inputs(head)
+        for _, new, at in pairs:
+            need(1 <= at <= len(head) and head[at - 1] == new and at - 1 in inputs,
+                 f"B8: {name!r} line {at} is not the `with:` toolchain of a dtolnay/rust-toolchain step")
 
 
 PUSHES = ("branch_creation", "push", "force_push")
@@ -943,6 +1027,17 @@ def contains(api, owner, name, tip):
     return on_base
 
 
+def head_text(api, owner, name, path, head):
+    """One file at the head, through the contents API (B8 for a rust-bump)."""
+    got = api.get(f"repos/{owner}/{name}/contents/{urllib.parse.quote(path)}?ref={head}")
+    need(dig(got, "type") == "file" and dig(got, "encoding") == "base64",
+         f"B8: {path!r} at the head is not a base64 file")
+    try:
+        return base64.b64decode(got["content"]).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        raise Skip(f"B8: {path!r} at the head did not decode") from None
+
+
 def evaluate_bot(api, owner, name, n, classes, now):
     """ADR-1106: merge a bot pull request whose `ci / passed` is green on its
     head, which contains the base tip. ADR-1119 (supersedes ADR-1109): a
@@ -969,7 +1064,8 @@ def evaluate_bot(api, owner, name, n, classes, now):
     subject, refreshes = check_bot_commits(
         api.get(f"repos/{owner}/{name}/pulls/{n}/commits?per_page={PAGE}"), timeline, kind, head,
         base, branch, contains(api, owner, name, tip))
-    check_bot_files(api.get(f"repos/{owner}/{name}/pulls/{n}/files?per_page={PAGE}"), pr, kind, branch)
+    check_bot_files(api.get(f"repos/{owner}/{name}/pulls/{n}/files?per_page={PAGE}"), pr, kind, branch,
+                    read=lambda path: head_text(api, owner, name, path, head))
     ref = urllib.parse.quote(f"refs/heads/{branch}", safe="/")
     pushed = check_bot_pushes(api.get(f"repos/{owner}/{name}/activity?ref={ref}&per_page={PAGE}"),
                               kind, head, refreshes)
@@ -1438,7 +1534,7 @@ class SweepGh(fan_out.Gh):
         """A merged bot pull request's branch, and no other. Gone already (404,
         or 422 `Reference does not exist`) is done."""
         if not any(pattern.fullmatch(branch) for _, _, pattern in BOTS.values()) or ".." in branch:
-            raise Refusal(f"refusing to delete `{branch}`: not a dependabot or repin branch")
+            raise Refusal(f"refusing to delete `{branch}`: not a dependabot, repin or rust-bump branch")
         try:
             self._api("-X", "DELETE",
                       f"repos/{fan_out.q(owner)}/{fan_out.q(name)}/git/refs/heads/{branch}",
