@@ -67,10 +67,12 @@ def classes(**sweep_overrides):
 class Fake:
     """Answers `get` from a recorded dict; records every write; never reaches GitHub."""
 
-    def __init__(self, data, writes=None, refuse_merge=None):
+    def __init__(self, data, writes=None, refuse_merge=None, refuse_rerun=None, rerun_noop=False):
         self.data = data
         self.writes = [] if writes is None else writes
         self.refuse_merge = refuse_merge
+        self.refuse_rerun = refuse_rerun
+        self.rerun_noop = rerun_noop
 
     def get(self, path, fresh=False):
         if path not in self.data:
@@ -96,6 +98,13 @@ class Fake:
 
     def delete_branch(self, owner, name, branch):
         self.writes.append(("delete", owner, name, branch))
+
+    def rerun_run(self, owner, name, run):
+        self.writes.append(("rerun", owner, name, run))
+        if self.refuse_rerun:
+            raise Refusal(f"gh api rerun: {self.refuse_rerun}")
+        self.data[f"repos/{owner}/{name}/actions/runs/{run}"] = {
+            "id": run, "run_attempt": 1 if self.rerun_noop else 2, "status": "queued"}
 
 
 class Case:
@@ -1184,7 +1193,7 @@ def test_every_write_mint_names_one_repository_and_only_contents_write():
     """An adoption leg (no `kind`) mints exactly what it always did."""
     found = [m for m in mints("act") if m["id"] == "app"]
     assert len(found) == 1
-    assert found[0]["if"] == "${{ !matrix.kind }}"
+    assert found[0]["if"] == "${{ !matrix.kind && matrix.action != 'rerun' }}"
     with_ = found[0]["with"]
     assert with_["repositories"] == "${{ matrix.repo }}"
     assert {k: v for k, v in with_.items() if k.startswith("permission-")} == {
@@ -1196,17 +1205,18 @@ def test_a_bot_leg_mints_for_one_repository_what_a_merge_needs():
     an App may not merge that without `workflows: write`. The squash merge and
     the branch delete need `contents: write`. No `pull_requests: write`: the
     sweeper no longer comments. Only a leg whose kind is a known bot gets them."""
-    assert [m["id"] for m in mints("act")] == ["app", "app-bot"]
+    assert [m["id"] for m in mints("act")] == ["app", "app-bot", "app-rerun"]
     [bot] = [m for m in mints("act") if m["id"] == "app-bot"]
-    assert bot["if"] == "${{ matrix.kind == 'dependabot' || matrix.kind == 'repin' }}"
+    assert bot["if"] == ("${{ (matrix.kind == 'dependabot' || matrix.kind == 'repin')"
+                         " && matrix.action != 'rerun' }}")
     assert bot["with"]["repositories"] == "${{ matrix.repo }}"
     assert {k: v for k, v in bot["with"].items() if k.startswith("permission-")} == {
         "permission-contents": "write", "permission-workflows": "write"}
     names = [s.get("id") or s.get("name") for s in steps("act")]
     assert names.index("leg") < names.index("app-bot")
     [go] = [s for s in steps("act") if s.get("name") == "merge or refresh"]
-    assert go["env"]["SWEEP_WRITE_TOKEN"] == \
-        "${{ steps.app.outputs.token || steps.app-bot.outputs.token }}"
+    assert go["env"]["SWEEP_WRITE_TOKEN"] == (
+        "${{ steps.app.outputs.token || steps.app-bot.outputs.token || steps.app-rerun.outputs.token }}")
     assert go["env"]["KIND"] == "${{ matrix.kind }}"
     assert '--kind "$KIND"' in go["run"]
 
@@ -2338,3 +2348,281 @@ def test_a_bot_merge_the_plan_held_back_asks_for_the_next_run_at_once(tmp_path, 
     assert code == 0
     assert [t["repo"] for t in json.loads(out["plan"])] == ["store"]
     assert (out["follow_up"], out["next_hop"]) == ("1", "1")
+
+
+# --------------------------------------------------------------------------
+# V1r (yaadgaar 518 item 4): a `ci / passed` check run GitHub lost
+# --------------------------------------------------------------------------
+#
+# `fixtures/sweep/lost-check.json` is yadgarhq/yadgar run 41290991069, the ci
+# run of yadgar#110, recorded read-only on 2026-11-01 after its one manual
+# rerun. Its attempt-1 `ci / passed` job succeeded and that job's check run
+# was readable by id, yet `commits/<head>/check-runs` did not list it, so the
+# pull request sat BLOCKED. `lost` puts that shape on a green baseline: the
+# baseline's own `ci / passed` check leaves the listing but stays readable by
+# id, its ci run is attempt 1 (a field the 2026-10-28 recording trimmed), and
+# the recorded attempt-1 jobs listing is served for that run, its check run
+# urls pointed at this repository and the `ci / passed` one at that check.
+
+LOST = json.loads((FIXTURES / "lost-check.json").read_text())
+
+
+def lost(case):
+    check = case.check("ci / passed")
+    case.checks["check_runs"].remove(check)
+    case.checks["total_count"] -= 1
+    run = case.run
+    run["run_attempt"] = LOST["run_attempt_1"]["run_attempt"]
+    jobs = copy.deepcopy(LOST["jobs_attempt_1"])
+    for job in jobs["jobs"]:
+        job["check_run_url"] = job["check_run_url"].replace("repos/yadgarhq/yadgar/", f"{case.r}/")
+        if job["name"] == "ci / passed":
+            job["check_run_url"] = f"{sweep.API}{case.r}/check-runs/{check['id']}"
+    case.data[f"{case.r}/actions/runs/{run['id']}/attempts/1/jobs?per_page=100"] = jobs
+    case.data[f"{case.r}/check-runs/{check['id']}"] = check
+    return case
+
+
+def passed_job(case):
+    [jobs] = [v for k, v in case.data.items() if k.endswith("/attempts/1/jobs?per_page=100")]
+    [job] = [j for j in jobs["jobs"] if j["name"] == "ci / passed"]
+    return job
+
+
+def lost_check(case):
+    return case.data[f"{case.r}/check-runs/{passed_job(case)['check_run_url'].rsplit('/', 1)[1]}"]
+
+
+def test_the_recorded_glitch_is_what_it_says():
+    assert LOST["run_attempt_1"]["run_attempt"] == 1 and LOST["run_now"]["run_attempt"] == 2
+    assert LOST["run_attempt_1"]["status"] == "completed"
+    [job] = [j for j in LOST["jobs_attempt_1"]["jobs"] if j["name"] == "ci / passed"]
+    assert (job["status"], job["conclusion"], job["run_attempt"]) == ("completed", "success", 1)
+    assert job["check_run_url"].endswith(f"/check-runs/{LOST['check_run']['id']}")
+    assert LOST["check_run"]["check_suite"]["id"] == LOST["run_attempt_1"]["check_suite_id"]
+    assert LOST["jobs_attempt_1"]["total_count"] == len(LOST["jobs_attempt_1"]["jobs"])
+
+
+def test_a_lost_check_on_an_adoption_pull_request_is_rerun_once():
+    case = lost(merge_case())
+    got = case.judge()
+    assert got["action"] == "rerun", got
+    assert got["run"] == case.run["id"] and got["head"] == case.head
+    assert got["reason"].startswith("V1r:") and str(case.run["id"]) in got["reason"]
+    assert got["due"] == NOW + datetime.timedelta(minutes=sweep.RERUN_WAIT_MINUTES)
+    assert not got.get("kind")
+
+
+def one_run(case):
+    """task-106 as recorded has TWO green ci runs on its head (two suites, the
+    run ids trimmed). V1r reruns only when exactly one run exists, so this
+    keeps the newer one and its `ci / passed` check, and gives the run and
+    that check the ids the recording trimmed (any integers: nothing else
+    reads them)."""
+    older = min(r["check_suite_id"] for r in case.runs["workflow_runs"])
+    case.runs["workflow_runs"] = [r for r in case.runs["workflow_runs"] if r["check_suite_id"] != older]
+    case.runs["total_count"] = len(case.runs["workflow_runs"])
+    case.checks["check_runs"] = [c for c in case.checks["check_runs"] if c["check_suite"]["id"] != older]
+    case.checks["total_count"] = len(case.checks["check_runs"])
+    case.run["id"] = 41000000000
+    case.check("ci / passed")["id"] = 124000000000
+    assert case.judge()["action"] == "merge"
+    return case
+
+
+def test_a_bot_pull_request_with_two_ci_runs_on_its_head_is_never_rerun():
+    case = dependabot_merge()
+    case.checks["check_runs"] = [c for c in case.checks["check_runs"] if c["name"] != "ci / passed"]
+    case.checks["total_count"] = len(case.checks["check_runs"])
+    skipped(case, "V1: no `ci / passed` check run; not rerun: 2 ci runs for this head, not one")
+
+
+def test_a_lost_check_on_a_bot_pull_request_is_rerun_once():
+    case = lost(one_run(dependabot_merge()))
+    got = case.judge()
+    assert got["action"] == "rerun", got
+    assert got["kind"] == "dependabot" and got["run"] == case.run["id"]
+
+
+@pytest.mark.parametrize("change", [
+    pytest.param(lambda c: passed_job(c).update(conclusion="failure"), id="job-failed"),
+    pytest.param(lambda c: passed_job(c).update(conclusion="skipped"), id="job-skipped"),
+    pytest.param(lambda c: passed_job(c).update(status="in_progress", conclusion=None), id="job-running"),
+    pytest.param(lambda c: passed_job(c).update(name="ci / other"), id="job-missing"),
+    pytest.param(lambda c: [j for k, j in c.data.items() if k.endswith("/attempts/1/jobs?per_page=100")][0]
+                 ["jobs"].append(dict(passed_job(c))), id="two-passed-jobs"),
+    pytest.param(lambda c: [j for k, j in c.data.items() if k.endswith("/attempts/1/jobs?per_page=100")][0]
+                 .update(total_count=99), id="jobs-truncated"),
+    pytest.param(lambda c: c.run.update(status="in_progress", conclusion=None), id="run-running"),
+    pytest.param(lambda c: c.run.update(conclusion="failure"), id="run-failed"),
+    pytest.param(lambda c: c.run.update(run_attempt=LOST["run_now"]["run_attempt"]), id="already-rerun"),
+    pytest.param(lambda c: c.run.pop("run_attempt"), id="attempt-unknown"),
+    pytest.param(lambda c: c.run.update(run_attempt="1"), id="attempt-not-int"),
+    pytest.param(lambda c: c.run.update(event="push"), id="run-not-pull-request"),
+    pytest.param(lambda c: c.run.update(head_branch="main"), id="run-other-branch"),
+    pytest.param(lambda c: c.runs["workflow_runs"].append(dict(c.run, id=1, check_suite_id=2)),
+                 id="two-ci-runs"),
+    pytest.param(lambda c: c.runs.update(total_count=c.runs["total_count"] + 1), id="runs-truncated"),
+    pytest.param(lambda c: passed_job(c).update(
+        check_run_url=passed_job(c)["check_run_url"].replace(c.r, "repos/yadgarhq/other")), id="check-elsewhere"),
+    pytest.param(lambda c: lost_check(c).update(head_sha="a" * 40), id="check-other-head"),
+    pytest.param(lambda c: lost_check(c)["check_suite"].update(id=1), id="check-other-suite"),
+    pytest.param(lambda c: lost_check(c)["app"].update(id=99), id="check-other-app"),
+    pytest.param(lambda c: lost_check(c).update(conclusion="failure"), id="check-failed"),
+])
+def test_v1_still_skips_when_the_check_was_not_lost(change):
+    """ADR-0645, non-weakening: each of these was a V1 skip before V1r, and
+    still is. Nothing is rerun, and the row is no rerun."""
+    case = lost(merge_case())
+    change(case)
+    got = skipped(case, "V1: no `ci / passed` check run")
+    assert "run" not in got and "due" not in got
+
+
+def test_a_check_run_that_is_there_but_red_or_running_is_never_rerun():
+    for update in ({"conclusion": "failure"}, {"status": "in_progress", "conclusion": None}):
+        case = lost(merge_case())
+        check = lost_check(case)
+        case.checks["check_runs"].append(dict(check, **update))
+        case.checks["total_count"] += 1
+        got = skipped(case, "V1: a `ci / passed` check run is not a completed success")
+        assert "run" not in got
+
+
+def rerun_act(case, kind="", writes=None, rerun_fails=None):
+    writes = [] if writes is None else writes
+    writer = Fake(case.data, writes, refuse_rerun=rerun_fails)
+    now = BOT_NOW if isinstance(case, BotCase) else NOW
+    done = sweep.act(Fake(case.data, writes), writer, OWNER, case.repo, case.n, case.head, "rerun",
+                     classes(), now, kind)
+    return done, writes
+
+
+def test_the_rerun_leg_reruns_the_run_once_and_writes_nothing_else():
+    case = lost(merge_case())
+    done, writes = rerun_act(case)
+    assert writes == [("rerun", OWNER, "store", case.run["id"])]
+    assert done.startswith(f"reran {OWNER}/store run {case.run['id']}")
+
+
+def test_a_bot_rerun_leg_reruns_and_never_merges_or_deletes():
+    case = lost(one_run(dependabot_merge()))
+    done, writes = rerun_act(case, "dependabot")
+    assert writes == [("rerun", OWNER, "task", case.run["id"])]
+
+
+def test_a_rerun_leg_whose_re_evaluation_is_not_a_rerun_writes_nothing():
+    case = lost(merge_case())
+    case.run["run_attempt"] = 2  # another run reran it since evaluate
+    writes = []
+    with pytest.raises(sweep.Skip, match="M1"):
+        rerun_act(case, writes=writes)
+    assert writes == []
+
+
+def test_a_merge_leg_never_reruns_and_a_rerun_leg_never_merges():
+    case = lost(merge_case())
+    writes = []
+    with pytest.raises(sweep.Skip, match="M1: re-evaluated as rerun"):
+        sweep.act(Fake(case.data, writes), Fake(case.data, writes), OWNER, "store", 45, case.head,
+                  "merge", classes(), NOW)
+    with pytest.raises(sweep.Skip, match="M1: re-evaluated as merge"):
+        sweep.act(Fake(merge_case().data, writes), Fake(merge_case().data, writes), OWNER, "store", 45,
+                  case.head, "rerun", classes(), NOW)
+    assert writes == []
+
+
+@pytest.mark.parametrize("refusal", ["HTTP 405", "HTTP 409", "HTTP 422"])
+def test_a_rerun_github_refuses_is_a_skip(refusal):
+    case = lost(merge_case())
+    with pytest.raises(sweep.Skip, match="M2: the rerun was refused"):
+        rerun_act(case, rerun_fails=f"gh: Cannot rerun ({refusal})")
+
+
+@pytest.mark.parametrize("denial", ["gh: Bad credentials (HTTP 401)",
+                                    "gh: Resource not accessible by integration (HTTP 403)",
+                                    "gh: Not Found (HTTP 404)", "gh: something with no code"])
+def test_a_rerun_call_that_is_not_githubs_verdict_reds(denial):
+    case = lost(merge_case())
+    with pytest.raises(Refusal, match="M2: the rerun call was denied") as raised:
+        rerun_act(case, rerun_fails=denial)
+    assert not isinstance(raised.value, sweep.Skip)
+
+
+def test_a_rerun_that_did_not_start_a_second_attempt_is_not_done():
+    case = lost(merge_case())
+    writes = []
+    writer = Fake(case.data, writes, rerun_noop=True)
+    with pytest.raises(sweep.Skip, match="M3"):
+        sweep.act(Fake(case.data, writes), writer, OWNER, "store", 45, case.head, "rerun", classes(), NOW)
+
+
+def test_the_plan_takes_every_rerun_outside_the_merge_cap_one_write_per_repository():
+    rows = [{"repo": "a", "n": 1, "head": "1" * 40, "action": "rerun", "run": 7, "reason": "V1r: x",
+             "due": NOW},
+            {"repo": "b", "n": 2, "head": "2" * 40, "action": "merge"},
+            {"repo": "c", "n": 3, "head": "3" * 40, "action": "rerun", "run": 8, "reason": "V1r: x",
+             "kind": "dependabot", "due": NOW},
+            {"repo": "c", "n": 4, "head": "4" * 40, "action": "merge", "kind": "dependabot"}]
+    todo = sweep.plan(rows, 1)
+    assert todo == [{"repo": "a", "n": 1, "head": "1" * 40, "action": "rerun"},
+                    {"repo": "b", "n": 2, "head": "2" * 40, "action": "merge"},
+                    {"repo": "c", "n": 3, "head": "3" * 40, "action": "rerun", "kind": "dependabot"}]
+    assert rows[3]["reason"].startswith("M5")
+
+
+def test_a_planned_rerun_asks_for_the_next_run_once_ci_should_be_done():
+    rows = [{"repo": "a", "n": 1, "action": "rerun", "reason": "V1r: x",
+             "due": NOW + datetime.timedelta(minutes=sweep.RERUN_WAIT_MINUTES)}]
+    assert sweep.follow_up(rows, NOW, 0) == sweep.RERUN_WAIT_MINUTES + 1
+    assert sweep.RERUN_WAIT_MINUTES + 1 < sweep.MAX_WAIT_MINUTES
+
+
+def test_a_rerun_the_plan_held_back_is_due_at_once():
+    rows = [{"repo": "a", "n": 1, "action": "skip", "kind": "dependabot", "due": NOW + datetime.timedelta(minutes=15),
+             "reason": "M5: one write per repository per run, and this one has it"}]
+    assert sweep.follow_up(rows, NOW, 0) == 1
+
+
+def test_a_dry_report_says_would_rerun():
+    rows = [{"repo": "a", "n": 1, "action": "rerun", "reason": "V1r: x"}]
+    assert "| would rerun |" in sweep.report(rows, False)
+    assert "| rerun |" in sweep.report(rows, True)
+
+
+def test_a_live_evaluate_plans_the_rerun_and_the_follow_up(tmp_path, monkeypatch):
+    data = estate("store-45")
+    lost_case = lost(merge_case())
+    data.update(lost_case.data)
+    code, out = live_evaluate(tmp_path, monkeypatch, data, NOW)
+    assert code == 0
+    assert json.loads(out["plan"]) == [{"repo": "store", "n": 45, "head": lost_case.head, "action": "rerun"}]
+    assert out["follow_up"] == str(sweep.RERUN_WAIT_MINUTES + 1)
+
+
+def test_a_rerun_leg_mints_actions_write_only_and_no_other_mint_fires_for_it():
+    by = {m["id"]: m for m in mints("act")}
+    assert list(by) == ["app", "app-bot", "app-rerun"]
+    assert by["app"]["if"] == "${{ !matrix.kind && matrix.action != 'rerun' }}"
+    assert by["app-bot"]["if"] == ("${{ (matrix.kind == 'dependabot' || matrix.kind == 'repin')"
+                                   " && matrix.action != 'rerun' }}")
+    rerun = by["app-rerun"]
+    assert rerun["if"] == "${{ matrix.action == 'rerun' }}"
+    assert rerun["with"]["repositories"] == "${{ matrix.repo }}"
+    assert {k: v for k, v in rerun["with"].items() if k.startswith("permission-")} == {
+        "permission-actions": "write"}
+    names = [s.get("id") or s.get("name") for s in steps("act")]
+    assert names.index("leg") < names.index("app-rerun")
+    [go] = [s for s in steps("act") if s.get("name") == "merge or refresh"]
+    assert go["env"]["SWEEP_WRITE_TOKEN"] == (
+        "${{ steps.app.outputs.token || steps.app-bot.outputs.token || steps.app-rerun.outputs.token }}")
+
+
+def test_the_act_command_takes_a_rerun_action_and_nothing_unknown(tmp_path, monkeypatch, capsys):
+    unarmed_classes = unarmed(tmp_path)
+    argv = ["act", "--owner", OWNER, "--repo", "store", "--n", "45", "--head", "a" * 40,
+            "--classes", str(unarmed_classes)]
+    assert sweep.main(argv + ["--action", "rerun"]) == 1  # parsed; refused as unarmed
+    assert "only when the sweep is armed" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        sweep.main(argv + ["--action", "bogus"])
