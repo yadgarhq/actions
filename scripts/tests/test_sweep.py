@@ -67,17 +67,25 @@ def classes(**sweep_overrides):
 class Fake:
     """Answers `get` from a recorded dict; records every write; never reaches GitHub."""
 
-    def __init__(self, data, writes=None, refuse_merge=None, refuse_rerun=None, rerun_noop=False):
+    def __init__(self, data, writes=None, refuse_merge=None, refuse_rerun=None, rerun_noop=False,
+                 rerun_lag=0):
         self.data = data
         self.writes = [] if writes is None else writes
         self.refuse_merge = refuse_merge
         self.refuse_rerun = refuse_rerun
         self.rerun_noop = rerun_noop
+        self.rerun_lag = rerun_lag  # (d): reads that still show attempt 1 after the rerun
+        self.reads = []
 
     def get(self, path, fresh=False):
+        self.reads.append(path)
         if path not in self.data:
             raise Refusal(f"gh api {path}: HTTP 404")
-        return copy.deepcopy(self.data[path])
+        got = copy.deepcopy(self.data[path])
+        if isinstance(got, dict) and got.pop("__lag__", 0) > 0:
+            self.data[path]["__lag__"] -= 1
+            got["run_attempt"] = 1
+        return got
 
     def graphql_threads(self, owner, name, n):
         return copy.deepcopy(self.data["graphql"])
@@ -104,7 +112,8 @@ class Fake:
         if self.refuse_rerun:
             raise Refusal(f"gh api rerun: {self.refuse_rerun}")
         self.data[f"repos/{owner}/{name}/actions/runs/{run}"] = {
-            "id": run, "run_attempt": 1 if self.rerun_noop else 2, "status": "queued"}
+            "id": run, "run_attempt": 1 if self.rerun_noop else 2, "status": "queued",
+            "__lag__": self.rerun_lag}
 
 
 class Case:
@@ -1165,12 +1174,13 @@ def mints(job):
 
 def test_the_workflow_grants_no_write_at_the_top_or_on_a_job():
     """One exception: the follow-up job dispatches this workflow, and needs
-    `actions: write` for that and nothing else."""
+    `actions: write` for that and nothing else (`contents: read` is its
+    checkout of this repository, for `sweep.py follow-up`)."""
     wf = workflow()
     assert wf["permissions"] == {}
     for name, job in wf["jobs"].items():
         if name == "follow-up":
-            assert job["permissions"] == {"actions": "write"}
+            assert job["permissions"] == {"actions": "write", "contents": "read"}
             continue
         assert all(level in ("read", "none") for level in job["permissions"].values())
 
@@ -2317,23 +2327,36 @@ def test_the_workflow_takes_a_hop_input_and_hands_it_to_evaluate():
     assert step["env"]["HOP"] == "${{ inputs.hop }}"
     outs = wf["jobs"]["evaluate"]["outputs"]
     assert outs["follow_up"] == "${{ steps.evaluate.outputs.follow_up }}"
+    assert outs["reruns"] == "${{ steps.evaluate.outputs.reruns }}"
     assert outs["next_hop"] == "${{ steps.evaluate.outputs.next_hop }}"
 
 
 def test_the_follow_up_job_only_dispatches_this_workflow_live_after_act():
     job = workflow()["jobs"]["follow-up"]
     assert job["needs"] == ["evaluate", "act"]
+    # `next_hop` is set whenever `follow_up` or `reruns` is (yaadgaar 518 item 5 (a)).
     assert job["if"] == ("${{ !cancelled() && needs.evaluate.outputs.live == 'true'"
-                         " && needs.evaluate.outputs.follow_up != '' }}")
-    assert job["permissions"] == {"actions": "write"}
+                         " && needs.evaluate.outputs.next_hop != '' }}")
+    assert job["permissions"] == {"actions": "write", "contents": "read"}
     assert "concurrency" not in job
     assert job["timeout-minutes"] >= sweep.MAX_WAIT_MINUTES + 1
-    [step] = job["steps"]
+    *setup, decide, step = job["steps"]
+    assert [s.get("uses", "").split("@")[0] for s in setup] == [
+        "actions/checkout", "", "actions/setup-python", ""]
+    # (a) After `act`: which planned reruns took. A refused one asks for nothing.
+    assert decide["id"] == "decide" and "uses" not in decide
+    assert decide["env"] == {"GH_TOKEN": "${{ github.token }}", "OWNER": "${{ github.repository_owner }}",
+                             "FOLLOW_UP": "${{ needs.evaluate.outputs.follow_up }}",
+                             "RERUNS": "${{ needs.evaluate.outputs.reruns }}",
+                             "NEXT_HOP": "${{ needs.evaluate.outputs.next_hop }}"}
+    assert decide["run"] == 'python3 scripts/sweep.py follow-up --owner "$OWNER"'
     assert "uses" not in step
+    assert step["if"] == "steps.decide.outputs.minutes != ''"
     assert step["env"] == {"GH_TOKEN": "${{ github.token }}", "REPO": "${{ github.repository }}",
-                           "MINUTES": "${{ needs.evaluate.outputs.follow_up }}",
+                           "MINUTES": "${{ steps.decide.outputs.minutes }}",
                            "HOP": "${{ needs.evaluate.outputs.next_hop }}"}
-    assert "${{" not in step["run"]
+    for s in job["steps"]:
+        assert "${{" not in s.get("run", "")
     assert 'repos/${REPO}/actions/workflows/sweep.yaml/dispatches' in step["run"]
     assert '-f "inputs[dry_run]=false"' in step["run"] and '-f "inputs[hop]=${HOP}"' in step["run"]
     assert "-f ref=main" in step["run"]
@@ -2367,12 +2390,18 @@ def test_a_bot_merge_the_plan_held_back_asks_for_the_next_run_at_once(tmp_path, 
 LOST = json.loads((FIXTURES / "lost-check.json").read_text())
 
 
+def utc(when):
+    return when.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def lost(case):
     check = case.check("ci / passed")
     case.checks["check_runs"].remove(check)
     case.checks["total_count"] -= 1
     run = case.run
     run["run_attempt"] = LOST["run_attempt_1"]["run_attempt"]
+    # The recording trimmed `created_at`; V1r's age bound reads it. An hour old.
+    run["created_at"] = utc((BOT_NOW if isinstance(case, BotCase) else NOW) - datetime.timedelta(hours=1))
     jobs = copy.deepcopy(LOST["jobs_attempt_1"])
     for job in jobs["jobs"]:
         job["check_run_url"] = job["check_run_url"].replace("repos/yadgarhq/yadgar/", f"{case.r}/")
@@ -2549,12 +2578,17 @@ def test_a_rerun_call_that_is_not_githubs_verdict_reds(denial):
     assert not isinstance(raised.value, sweep.Skip)
 
 
-def test_a_rerun_that_did_not_start_a_second_attempt_is_not_done():
+def test_a_rerun_that_did_not_start_a_second_attempt_is_not_done(monkeypatch):
     case = lost(merge_case())
-    writes = []
-    writer = Fake(case.data, writes, rerun_noop=True)
+    writes, pauses = [], []
+    monkeypatch.setattr(sweep, "pause", pauses.append)
+    writer, reader = Fake(case.data, writes, rerun_noop=True), Fake(case.data, writes)
     with pytest.raises(sweep.Skip, match="M3"):
-        sweep.act(Fake(case.data, writes), writer, OWNER, "store", 45, case.head, "rerun", classes(), NOW)
+        sweep.act(reader, writer, OWNER, "store", 45, case.head, "rerun", classes(), NOW)
+    # (d) bounded: RERUN_READS reads of the run, a pause between each two.
+    run_path = f"{case.r}/actions/runs/{case.run['id']}"
+    assert reader.reads.count(run_path) == sweep.RERUN_READS == 3
+    assert pauses == [sweep.RERUN_READ_PAUSE] * (sweep.RERUN_READS - 1)
 
 
 def test_the_plan_takes_every_rerun_outside_the_merge_cap_one_write_per_repository():
@@ -2571,10 +2605,15 @@ def test_the_plan_takes_every_rerun_outside_the_merge_cap_one_write_per_reposito
     assert rows[3]["reason"].startswith("M5")
 
 
-def test_a_planned_rerun_asks_for_the_next_run_once_ci_should_be_done():
-    rows = [{"repo": "a", "n": 1, "action": "rerun", "reason": "V1r: x",
-             "due": NOW + datetime.timedelta(minutes=sweep.RERUN_WAIT_MINUTES)}]
-    assert sweep.follow_up(rows, NOW, 0) == sweep.RERUN_WAIT_MINUTES + 1
+def test_a_planned_rerun_alone_asks_evaluate_for_no_follow_up_but_hands_it_on():
+    """(a) Evaluate cannot know whether the rerun will take, so the rerun's
+    due leaves `follow_up` and goes to `reruns`, which the follow-up job
+    checks after `act` (`after_act`)."""
+    due = NOW + datetime.timedelta(minutes=sweep.RERUN_WAIT_MINUTES)
+    rows = [{"repo": "a", "n": 1, "action": "rerun", "run": 7, "reason": "V1r: x", "due": due}]
+    assert sweep.follow_up(rows, NOW, 0) is None
+    assert sweep.reruns_due(rows, 0) == [{"repo": "a", "run": 7, "due": utc(due)}]
+    assert sweep.reruns_due(rows, sweep.MAX_HOPS) == []
     assert sweep.RERUN_WAIT_MINUTES + 1 < sweep.MAX_WAIT_MINUTES
 
 
@@ -2597,7 +2636,10 @@ def test_a_live_evaluate_plans_the_rerun_and_the_follow_up(tmp_path, monkeypatch
     code, out = live_evaluate(tmp_path, monkeypatch, data, NOW)
     assert code == 0
     assert json.loads(out["plan"]) == [{"repo": "store", "n": 45, "head": lost_case.head, "action": "rerun"}]
-    assert out["follow_up"] == str(sweep.RERUN_WAIT_MINUTES + 1)
+    assert "follow_up" not in out  # (a): only `after_act` turns the rerun into a follow-up
+    assert json.loads(out["reruns"]) == [{"repo": "store", "run": lost_case.run["id"],
+                                          "due": utc(NOW + datetime.timedelta(minutes=sweep.RERUN_WAIT_MINUTES))}]
+    assert out["next_hop"] == "1"
 
 
 def test_a_rerun_leg_mints_actions_write_only_and_no_other_mint_fires_for_it():
@@ -2626,3 +2668,318 @@ def test_the_act_command_takes_a_rerun_action_and_nothing_unknown(tmp_path, monk
     assert "only when the sweep is armed" in capsys.readouterr().err
     with pytest.raises(SystemExit):
         sweep.main(argv + ["--action", "bogus"])
+
+
+# --------------------------------------------------------------------------
+# yaadgaar 518 item 5: V1r follow-ups from the actions#156 review
+# --------------------------------------------------------------------------
+#
+# (a) a refused rerun never drives the follow-up chain; (b) a rerun still
+# running keeps the chain alive; (c) the lost-check probe runs after every gate
+# that can still refuse the pull request; (d) the attempt is re-read, bounded.
+# Every refusal V1r had still refuses (ADR-0645): the parametrised non-weakening
+# test above is unchanged, and the new conjuncts each have a red test below.
+
+# yadgarhq/yadgar run 41290991069 read again on 2026-11-01 (read-only GETs):
+# `run_started_at` is the LATEST attempt's start (attempt 2: 10:46:37Z) while
+# `created_at` stays the first attempt's (09:57:25Z). (b) reads the former, the
+# age bound the latter.
+RECORDED_RUN = {"created_at": "2026-11-01T09:57:25Z", "run_attempt": 2,
+                "run_started_at": "2026-11-01T10:46:37Z"}
+
+
+def rerun_running(case, now, minutes_ago=5):
+    """A lost-check case after the rerun took: attempt 2 of the same run, running."""
+    case.run.update(run_attempt=2, status="in_progress", conclusion=None,
+                    run_started_at=utc(now - datetime.timedelta(minutes=minutes_ago)))
+    return case
+
+
+# (b) the chain survives a slow CI
+
+def test_the_recorded_run_names_the_reruns_start_in_run_started_at():
+    assert sweep.parse_time(RECORDED_RUN["run_started_at"]) > sweep.parse_time(RECORDED_RUN["created_at"])
+
+
+def test_a_rerun_still_running_with_no_check_run_is_due_again():
+    case = rerun_running(lost(merge_case()), NOW)
+    got = skipped(case, "V1: no `ci / passed` check run; not rerun:")
+    assert got["due"] == NOW + datetime.timedelta(minutes=sweep.RERUN_WAIT_MINUTES)
+    assert "run" not in got and "attempt 2" in got["reason"]
+
+
+def test_a_rerun_still_running_with_a_pending_check_run_is_due_again():
+    case = rerun_running(lost(merge_case()), NOW)
+    check = lost_check(case)
+    case.checks["check_runs"].append(dict(check, status="in_progress", conclusion=None))
+    case.checks["total_count"] += 1
+    got = skipped(case, "V1: a `ci / passed` check run is not a completed success")
+    assert got["due"] == NOW + datetime.timedelta(minutes=sweep.RERUN_WAIT_MINUTES)
+    assert "run" not in got
+
+
+def test_a_bot_rerun_still_running_is_due_again():
+    case = rerun_running(lost(one_run(dependabot_merge())), BOT_NOW)
+    got = case.judge()
+    assert got["action"] == "skip" and got["due"] == BOT_NOW + datetime.timedelta(
+        minutes=sweep.RERUN_WAIT_MINUTES), got
+
+
+@pytest.mark.parametrize("change", [
+    pytest.param(lambda c: c.run.update(run_attempt=1), id="attempt-1-running"),
+    pytest.param(lambda c: c.run.update(status="completed", conclusion="failure"), id="attempt-2-done-red"),
+    pytest.param(lambda c: c.run.update(status="completed", conclusion="success"), id="attempt-2-done-green"),
+    pytest.param(lambda c: c.run.update(run_started_at=utc(NOW - sweep.RERUN_RUNNING_WINDOW)), id="too-old"),
+    pytest.param(lambda c: c.run.update(run_started_at=utc(NOW + sweep.RERUN_RUNNING_WINDOW)), id="too-far-ahead"),
+    pytest.param(lambda c: c.run.pop("run_started_at"), id="no-start"),
+    pytest.param(lambda c: c.run.update(run_started_at="2026-10-30 11:55"), id="start-not-utc"),
+    pytest.param(lambda c: c.run.update(run_attempt="2"), id="attempt-not-int"),
+    pytest.param(lambda c: c.runs["workflow_runs"].append(dict(c.run, id=1, check_suite_id=2)), id="two-runs"),
+])
+def test_a_pending_run_that_is_not_a_recent_rerun_carries_no_due(change):
+    """(b) is bounded: attempt 2 or more, not completed, started inside the
+    window, one run. Anything else is the V1 skip it was, with no due."""
+    for pending_check in (False, True):
+        case = rerun_running(lost(merge_case()), NOW)
+        if pending_check:
+            case.checks["check_runs"].append(dict(lost_check(case), status="in_progress", conclusion=None))
+            case.checks["total_count"] += 1
+        change(case)
+        got = skipped(case, "V1:")
+        assert "due" not in got and "run" not in got, got
+
+
+def test_a_red_check_run_carries_no_due_even_while_a_rerun_runs():
+    """(b) is for a PENDING `ci / passed` only: a completed red one listed while
+    a rerun runs is the V1 skip it was, with no due."""
+    case = rerun_running(lost(merge_case()), NOW)
+    case.checks["check_runs"].append(dict(lost_check(case), conclusion="failure"))
+    case.checks["total_count"] += 1
+    got = skipped(case, "V1: a `ci / passed` check run is not a completed success")
+    assert "due" not in got
+
+
+def test_a_rerun_still_running_inside_the_window_is_due_at_its_edges():
+    case = rerun_running(lost(merge_case()), NOW, minutes_ago=sweep.RERUN_RUNNING_WINDOW.total_seconds() / 60 - 1)
+    assert "due" in case.judge()
+
+
+# the age bound: one POST per cron is still bounded in time
+
+def test_a_lost_check_on_a_run_older_than_the_bound_is_not_rerun():
+    case = lost(merge_case())
+    case.run["created_at"] = utc(NOW - sweep.LOST_MAX_AGE)
+    got = skipped(case, "V1: no `ci / passed` check run; not rerun:")
+    assert "due" not in got and "run" not in got
+    case.run["created_at"] = utc(NOW - sweep.LOST_MAX_AGE + datetime.timedelta(minutes=1))
+    assert case.judge()["action"] == "rerun"
+    assert sweep.LOST_MAX_AGE <= datetime.timedelta(days=30)  # GitHub reruns up to 30 days
+
+
+@pytest.mark.parametrize("created", [None, "", "yesterday", 7])
+def test_a_lost_check_on_a_run_with_no_readable_creation_time_is_not_rerun(created):
+    case = lost(merge_case())
+    case.run["created_at"] = created
+    skipped(case, "V1: no `ci / passed` check run; not rerun:")
+
+
+# (c) the probe runs after the gates that can still refuse the pull request
+
+def test_a_lost_check_on_an_adoption_pull_request_github_will_not_merge_is_not_rerun():
+    case = lost(merge_case())
+    case.pr["mergeable"] = None
+    skipped(case, "U3")
+    case = lost(merge_case())
+    case.pr["base"]["sha"] = "a" * 40
+    skipped(case, "U2")
+
+
+def test_a_lost_check_on_a_bot_pull_request_github_will_not_merge_is_not_rerun():
+    case = lost(one_run(dependabot_merge()))
+    case.pr["mergeable"] = None
+    skipped(case, "U3")
+    case = lost(one_run(dependabot_merge()))
+    case.pr["base"]["sha"] = "a" * 40
+    skipped(case, "U2")
+
+
+def lost_behind(state="blocked"):
+    case = lost(one_run(behind(BotCase("task-106"))))
+    case.pr["mergeable_state"] = state
+    return case
+
+
+def test_a_lost_check_on_a_behind_bot_pull_request_on_a_strict_base_is_not_rerun():
+    case = lost_behind()
+    for rule in rules(case):
+        if rule["type"] == "required_status_checks":
+            rule["parameters"]["strict_required_status_checks_policy"] = True
+    skipped(case, "U4")
+
+
+def test_a_lost_check_on_a_behind_bot_pull_request_github_calls_blocked_is_rerun():
+    """GitHub calls a pull request whose required check is missing `blocked`,
+    not `clean`. For the RERUN only, U5 also takes `blocked`; the merge that
+    may follow is judged again from scratch and still needs `clean`."""
+    got = lost_behind("blocked").judge()
+    assert got["action"] == "rerun" and got["kind"] == "dependabot", got
+
+
+@pytest.mark.parametrize("state", ["behind", "dirty", "unknown", "unstable", "has_hooks", "draft", None, "", 7])
+def test_a_lost_check_on_a_behind_bot_pull_request_neither_clean_nor_blocked_is_not_rerun(state):
+    skipped(lost_behind(state), "U5")
+
+
+def test_blocked_never_admits_a_behind_bot_merge():
+    """ADR-0645: with its `ci / passed` there and green, `blocked` is a U5 skip
+    exactly as before (the U5 parametrised test above holds it too)."""
+    case = dependabot_behind()
+    case.pr["mergeable_state"] = "blocked"
+    skipped(case, "U5")
+
+
+def test_a_lost_check_on_a_bot_pull_request_inside_the_soak_waits_for_the_soak():
+    case = lost(one_run(dependabot_merge()))
+    got = skipped(case, "B10", now=PUSHED + datetime.timedelta(minutes=10))
+    assert got["due"] == PUSHED + datetime.timedelta(minutes=30) and "run" not in got
+
+
+def test_a_v1_skip_that_is_not_a_lost_check_still_comes_before_the_later_gates():
+    """Only V1r is deferred: a red `ci / passed` still says V1, not U3."""
+    case = merge_case()
+    case.check("ci / passed")["conclusion"] = "failure"
+    case.pr["mergeable"] = None
+    skipped(case, "V1: a `ci / passed` check run is not a completed success")
+
+
+# (d) the attempt is re-read, bounded
+
+def test_a_rerun_whose_attempt_shows_late_is_done(monkeypatch):
+    case = lost(merge_case())
+    pauses = []
+    monkeypatch.setattr(sweep, "pause", pauses.append)
+    writes = []
+    writer = Fake(case.data, writes, rerun_lag=2)
+    done = sweep.act(Fake(case.data, writes), writer, OWNER, "store", 45, case.head, "rerun", classes(), NOW)
+    assert done.startswith(f"reran {OWNER}/store run {case.run['id']}") and "attempt 2" in done
+    assert pauses == [sweep.RERUN_READ_PAUSE] * 2
+    assert writes == [("rerun", OWNER, "store", case.run["id"])]
+
+
+def test_a_rerun_whose_attempt_shows_at_once_does_not_pause(monkeypatch):
+    case = lost(merge_case())
+    pauses = []
+    monkeypatch.setattr(sweep, "pause", pauses.append)
+    rerun_act(case)
+    assert pauses == []
+
+
+# (a) a refused rerun drives no follow-up
+
+DUE = NOW + datetime.timedelta(minutes=sweep.RERUN_WAIT_MINUTES)
+RERUN = {"repo": "store", "run": 41, "due": DUE}
+
+
+def test_a_rerun_that_took_is_due_after_act():
+    assert sweep.after_act(None, [RERUN], lambda repo, run: 2, NOW) == sweep.RERUN_WAIT_MINUTES + 1
+
+
+@pytest.mark.parametrize("attempt", [1, None, "2", 0])
+def test_a_rerun_that_did_not_take_asks_for_nothing(attempt):
+    assert sweep.after_act(None, [RERUN], lambda repo, run: attempt, NOW) is None
+
+
+def test_a_refused_rerun_does_not_hide_another_rows_due():
+    assert sweep.after_act(9, [RERUN], lambda repo, run: 1, NOW) == 9
+    assert sweep.after_act(30, [RERUN], lambda repo, run: 2, NOW) == sweep.RERUN_WAIT_MINUTES + 1
+    took = dict(RERUN, repo="chart", run=42)
+    attempts = {41: 1, 42: 3}
+    assert sweep.after_act(None, [RERUN, took], lambda repo, run: attempts[run], NOW) == (
+        sweep.RERUN_WAIT_MINUTES + 1)
+
+
+def test_the_follow_up_counts_from_when_it_runs_not_from_evaluate():
+    later = NOW + datetime.timedelta(minutes=10)
+    assert sweep.after_act(None, [RERUN], lambda repo, run: 2, later) == sweep.RERUN_WAIT_MINUTES - 10 + 1
+    assert sweep.after_act(None, [RERUN], lambda repo, run: 2, DUE + datetime.timedelta(minutes=5)) == 1
+
+
+def run_follow_up(tmp_path, monkeypatch, data, env, now=NOW):
+    out = tmp_path / "out"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary"))
+    for key in ("FOLLOW_UP", "RERUNS", "NEXT_HOP"):
+        monkeypatch.setenv(key, env.get(key, ""))
+    fake = Fake(data)
+    monkeypatch.setattr(sweep, "SweepGh", lambda token: fake)
+    monkeypatch.setattr(sweep, "now_utc", lambda: now)
+    code = sweep.main(["follow-up", "--owner", OWNER, "--classes", str(REPO / "classes.json")])
+    return code, (outputs(out) if out.exists() else {}), fake
+
+
+RERUNS_TEXT = json.dumps([{"repo": "store", "run": 41, "due": utc(DUE)}])
+RUN_PATH = f"repos/{OWNER}/store/actions/runs/41"
+
+
+def test_the_follow_up_command_dispatches_for_a_rerun_that_took(tmp_path, monkeypatch):
+    data = {RUN_PATH: {"id": 41, "run_attempt": 2, "status": "in_progress"}}
+    code, out, fake = run_follow_up(tmp_path, monkeypatch, data, {"RERUNS": RERUNS_TEXT, "NEXT_HOP": "1"})
+    assert code == 0 and out == {"minutes": str(sweep.RERUN_WAIT_MINUTES + 1)}
+    assert fake.reads == [RUN_PATH]
+
+
+def test_the_follow_up_command_asks_for_nothing_after_a_refused_rerun(tmp_path, monkeypatch):
+    data = {RUN_PATH: {"id": 41, "run_attempt": 1, "status": "completed"}}
+    code, out, _ = run_follow_up(tmp_path, monkeypatch, data, {"RERUNS": RERUNS_TEXT, "NEXT_HOP": "1"})
+    assert code == 0 and out == {}
+
+
+def test_the_follow_up_command_keeps_evaluates_own_minutes(tmp_path, monkeypatch):
+    data = {RUN_PATH: {"id": 41, "run_attempt": 1, "status": "completed"}}
+    code, out, _ = run_follow_up(tmp_path, monkeypatch, data,
+                                 {"FOLLOW_UP": "7", "RERUNS": RERUNS_TEXT, "NEXT_HOP": "2"})
+    assert code == 0 and out == {"minutes": "7"}
+    code, out, fake = run_follow_up(tmp_path, monkeypatch, {}, {"FOLLOW_UP": "1", "NEXT_HOP": "1"})
+    assert code == 0 and out == {"minutes": "1"} and fake.reads == []
+
+
+@pytest.mark.parametrize("env", [
+    {"FOLLOW_UP": "60", "NEXT_HOP": "1"},
+    {"FOLLOW_UP": "0", "NEXT_HOP": "1"},
+    {"FOLLOW_UP": "x", "NEXT_HOP": "1"},
+    {"FOLLOW_UP": "5", "NEXT_HOP": ""},
+    {"FOLLOW_UP": "5", "NEXT_HOP": "0"},
+    {"FOLLOW_UP": "5", "NEXT_HOP": "7"},
+    {"RERUNS": "not json", "NEXT_HOP": "1"},
+    {"RERUNS": "{}", "NEXT_HOP": "1"},
+    {"RERUNS": json.dumps([{"repo": "../x", "run": 41, "due": utc(DUE)}]), "NEXT_HOP": "1"},
+    {"RERUNS": json.dumps([{"repo": "store", "run": "41", "due": utc(DUE)}]), "NEXT_HOP": "1"},
+    {"RERUNS": json.dumps([{"repo": "store", "run": True, "due": utc(DUE)}]), "NEXT_HOP": "1"},
+    {"RERUNS": json.dumps([{"repo": "store", "run": 41, "due": "soon"}]), "NEXT_HOP": "1"},
+    {"RERUNS": json.dumps([{"repo": "store", "run": 41, "due": utc(DUE), "x": 1}]), "NEXT_HOP": "1"},
+])
+def test_a_malformed_follow_up_input_reds_and_dispatches_nothing(tmp_path, monkeypatch, env):
+    data = {RUN_PATH: {"id": 41, "run_attempt": 2}}
+    code, out, fake = run_follow_up(tmp_path, monkeypatch, data, env)
+    assert code == 1 and out == {} and fake.reads == []
+
+
+def test_a_run_read_that_fails_reds_the_follow_up_and_dispatches_nothing(tmp_path, monkeypatch):
+    for data in ({}, {RUN_PATH: {"id": 99, "run_attempt": 2}}):
+        code, out, _ = run_follow_up(tmp_path, monkeypatch, data, {"RERUNS": RERUNS_TEXT, "NEXT_HOP": "1"})
+        assert code == 1 and out == {}
+
+
+def test_a_live_evaluate_at_the_last_hop_hands_on_no_rerun(tmp_path, monkeypatch):
+    data = estate("store-45")
+    data.update(lost(merge_case()).data)
+    code, out = live_evaluate(tmp_path, monkeypatch, data, NOW, str(sweep.MAX_HOPS))
+    assert code == 0 and set(out) == {"plan"}
+
+
+def test_a_live_evaluate_hands_on_a_running_rerun_as_a_plain_follow_up(tmp_path, monkeypatch):
+    data = estate("store-45")
+    data.update(rerun_running(lost(merge_case()), NOW).data)
+    code, out = live_evaluate(tmp_path, monkeypatch, data, NOW, "1")
+    assert code == 0
+    assert out == {"plan": "[]", "follow_up": str(sweep.RERUN_WAIT_MINUTES + 1), "next_hop": "2"}

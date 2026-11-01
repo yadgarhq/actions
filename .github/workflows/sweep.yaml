@@ -61,13 +61,21 @@ name: sweep
 #
 # A LOST CHECK (V1r, yaadgaar 518 item 4). When `ci / passed` is missing from
 # the head's check runs but the job that posts it succeeded in the pull
-# request's own ci run, still at attempt 1, `act` reruns that run once; the
-# row is due again when CI should be done, so the follow-up picks it up.
+# request's own ci run, still at attempt 1 and under a day old, `act` reruns
+# that run once, and only once every gate that can still refuse the pull
+# request has passed (yaadgaar 518 item 5 (c)). Evaluate hands the planned
+# reruns on as `reruns`; after `act`, the follow-up job asks for the next run
+# only for a rerun that took (its run is past attempt 1), so a refused one is
+# not planned again every hop (item 5 (a)). A rerun still running when the
+# next run looks is due again then (item 5 (b)).
 #
 # THE FOLLOW-UP (ADR-1108: bot merges within minutes, not at the next
 # throttled cron). A live run whose evaluation left a pull request held back
-# only by the bot soak (B10) or by its own plan (M4, M5) outputs `follow_up`
-# minutes; the `follow-up` job sleeps them after `act` and dispatches this
+# only by the bot soak (B10), by a rerun still running, or by its own plan
+# (M4, M5) outputs `follow_up` minutes, and planned reruns as `reruns`; after
+# `act`, the `follow-up` job runs `sweep.py follow-up`, which reads each
+# rerun's run (GITHUB_TOKEN, public repositories) and gives the minutes left,
+# then sleeps them and dispatches this
 # workflow on main with `dry_run` false and `hop` + 1. GITHUB_TOKEN with
 # `actions: write` can do that in this repository and no other, and a
 # `workflow_dispatch` it sends does start a run. The dispatched run carries no
@@ -143,6 +151,7 @@ jobs:
       live: ${{ steps.mode.outputs.live }}
       plan: ${{ steps.evaluate.outputs.plan }}
       follow_up: ${{ steps.evaluate.outputs.follow_up }}
+      reruns: ${{ steps.evaluate.outputs.reruns }}
       next_hop: ${{ steps.evaluate.outputs.next_hop }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -289,21 +298,50 @@ jobs:
 
   # THE NEXT RUN, WHEN A PULL REQUEST IS DUE. `follow_up` is set only by a live
   # evaluate, and only to an integer from 1 to 59 that `sweep.py` checked;
-  # `next_hop` only to 1-6. Both reach the shell through env, never `${{ }}`.
-  # After `act`, whatever it did: a merge is what makes an M5 sibling due.
+  # `next_hop` only to 1-6, and whenever `follow_up` or `reruns` is set.
+  # `sweep.py follow-up` checks all three again and outputs `minutes` only
+  # when a pull request is still due after `act`: a planned rerun counts only
+  # if its run is now past attempt 1 (yaadgaar 518 item 5 (a)). Every value
+  # reaches the shell through env, never `${{ }}`. After `act`, whatever it
+  # did: a merge is what makes an M5 sibling due.
   follow-up:
     needs: [evaluate, act]
-    if: ${{ !cancelled() && needs.evaluate.outputs.live == 'true' && needs.evaluate.outputs.follow_up != '' }}
+    if: ${{ !cancelled() && needs.evaluate.outputs.live == 'true' && needs.evaluate.outputs.next_hop != '' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 65 # 59 for the longest sleep, the rest spare
+    timeout-minutes: 70 # 59 for the longest sleep, the setup and the reads, the rest spare
     permissions:
       actions: write # POST .../actions/workflows/sweep.yaml/dispatches in this repository, nothing else
+      contents: read # the checkout of this repository, for `sweep.py follow-up`
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: the tool versions this job installs (versions.yaml)
+        id: versions
+        run: python3 scripts/tool_versions.py versions.yaml >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ steps.versions.outputs.python }}
+      # `sweep.py` imports `ci_verdict`, which imports PyYAML.
+      - name: install PyYAML
+        env:
+          PYYAML_VERSION: ${{ steps.versions.outputs.pyyaml }}
+        run: pip install --disable-pip-version-check "pyyaml==${PYYAML_VERSION}"
+      - name: which pull requests are still due after act
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          FOLLOW_UP: ${{ needs.evaluate.outputs.follow_up }}
+          RERUNS: ${{ needs.evaluate.outputs.reruns }}
+          NEXT_HOP: ${{ needs.evaluate.outputs.next_hop }}
+        run: python3 scripts/sweep.py follow-up --owner "$OWNER"
       - name: sleep until the soonest pull request is due, then dispatch the next sweep
+        if: steps.decide.outputs.minutes != ''
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          MINUTES: ${{ needs.evaluate.outputs.follow_up }}
+          MINUTES: ${{ steps.decide.outputs.minutes }}
           HOP: ${{ needs.evaluate.outputs.next_hop }}
         run: |
           set -euo pipefail
