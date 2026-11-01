@@ -962,6 +962,97 @@ jobs:
           OWNER: ${{ github.repository_owner }}
         run: python3 scripts/hook_tools_adopted.py --owner "$OWNER"
 
+  # YAADGAAR 260. REPORT ONLY, and deliberately NOT in `passed.needs`: the
+  # `complexity` hook is the gate and already runs in `precommit`. This job
+  # prints, in the job summary, the sizes THAT gate measures for the `.rs`
+  # files the pull request changes, so a refactor PR quotes a printed number
+  # instead of a hand count made by a different rule (task#51, project#5 and
+  # task-db#59 each quoted a size the gate did not measure). It never fails the
+  # run: a summary that could red a pull request would be a second gate.
+  # `continue-on-error` is on the JOB, not only a step, because a failed job
+  # (checkout flake, own-SHA refusal, timeout) would otherwise turn the workflow
+  # RUN red, and `sweep.py` V2 requires the run conclusion to be success.
+  #
+  # THE TREE IS THE ONE `precommit` CHECKS OUT (`inputs.ref`, the merge commit
+  # on a pull request), and the summary says so. The script is this
+  # repository's own, or the second checkout's at the commit this workflow runs
+  # at (ADR-0981); either way no consumer rev bump is needed to reach it.
+  sizes:
+    needs: detect
+    continue-on-error: true
+    if: >-
+      github.event_name != 'push' && needs.detect.outputs.rust == 'true'
+      && needs.detect.outputs.text_edit != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+          # The three-dot diff below needs the merge base.
+          fetch-depth: 0
+      - id: own_sha
+        name: the actions commit this job runs (ADR-0981)
+        env:
+          OWN_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$OWN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::job.workflow_sha is not a 40-hex commit SHA: '${OWN_SHA}'. There is no fallback to main (ADR-0981)."
+            exit 1
+          fi
+          echo "sha=${OWN_SHA}" >> "$GITHUB_OUTPUT"
+      - if: github.repository != 'yadgarhq/actions'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: yadgarhq/actions
+          ref: ${{ steps.own_sha.outputs.sha }}
+          path: .ci-actions
+      - name: sizes the gate measured
+        env:
+          UNDER_REVIEW: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          src=hooks/complexity.py
+          if [ "$UNDER_REVIEW" != "yadgarhq/actions" ]; then
+            src=.ci-actions/hooks/complexity.py
+          fi
+          cp "$src" "$RUNNER_TEMP/complexity.py"
+          rm -rf .ci-actions
+          {
+            echo "## sizes the gate measured"
+            echo
+            echo "Tree: \`$(git rev-parse HEAD)\` (pull request head \`${HEAD_SHA:-none}\` as merged). Ceilings: 500 lines a file, 120 lines a function. A function is listed from 60 lines."
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "$BASE_SHA" ]; then
+            echo "No pull request base on this event, so no changed files to measure." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          files=()
+          while IFS= read -r -d '' f; do files+=("$f"); done \
+            < <(git diff --name-only -z --diff-filter=d "$BASE_SHA"...HEAD -- '*.rs')
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No Rust file changed." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # The exit status is the gate's own; it is printed, never acted on.
+          set +e
+          out=$(python3 "$RUNNER_TEMP/complexity.py" --report "${files[@]}")
+          rc=$?
+          set -e
+          {
+            echo '```'
+            printf '%s\n' "$out"
+            echo '```'
+            echo
+            echo "Gate exit status on these files: ${rc} (report only; the \`complexity\` hook in \`precommit\` is the gate)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # A REAL ENGINE, not a mock. D69's capability probe establishes what an engine
   # can do by executing against it, so a test suite with no engine cannot
   # exercise the one thing that can be wrong. A `-db` repo's tests without a

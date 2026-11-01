@@ -237,15 +237,106 @@ READ_FILE = {"open", "options"}
 # call site, and a bare `read(` is far too common a name to match on. Importing
 # the FUNCTION is refused so the call always names its module -- which is also
 # how every one of these repositories already writes it.
-FS_IMPORT = re.compile(r"\buse\s+(?:[A-Za-z_][A-Za-z0-9_]*::)*fs::(\{[^}]*\}|[A-Za-z_][A-Za-z0-9_]*)")
+FS_IMPORT = re.compile(
+    r"\buse\s+(?:[A-Za-z_][A-Za-z0-9_]*::)*(?:fs|fs_err)::(\{[^}]*\}|[A-Za-z_][A-Za-z0-9_]*)"
+)
 
 # `OpenOptions::new()` builds a handle that MAY read, and the mode is decided by
 # a builder call this scan does not follow. Counted as a read: the conservative
 # direction is the one that asks for a marker.
 OPEN_OPTIONS = re.compile(r"\bOpenOptions::new\s*\(")
 
-FS_CALL = re.compile(r"\bfs::([A-Za-z_][A-Za-z0-9_]*)")
-FILE_CALL = re.compile(r"\bFile::([A-Za-z_][A-Za-z0-9_]*)")
+# YAADGAAR 263. `fs_err` is `std::fs` with better errors and the same function
+# names, so it is a filesystem module exactly like `fs`. A module spelled any
+# other way -- `use std::fs as sfs;`, `use std::fs::{self as f};`, `use
+# tokio::fs as tfs;` -- is resolved per file by `use_aliases()` and joins the
+# alternation, so `sfs::read_to_string(..)` is judged like `fs::read_to_string`.
+FS_MODULES = ("fs", "fs_err")
+IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
+USE_STATEMENT = re.compile(r"\buse\s+([^;]*);")
+
+
+def _use_paths(tree: str) -> list[tuple[tuple[str, ...], str | None]]:
+    """Flatten one `use` tree to (full path, alias) pairs. `self` keeps the prefix."""
+    pos = 0
+
+    def skip() -> None:
+        nonlocal pos
+        while pos < len(tree) and tree[pos].isspace():
+            pos += 1
+
+    def ident() -> str | None:
+        nonlocal pos
+        skip()
+        m = re.compile(IDENT).match(tree, pos)
+        if not m:
+            return None
+        pos = m.end()
+        return m.group(0)
+
+    def parse(prefix: tuple[str, ...]) -> list[tuple[tuple[str, ...], str | None]]:
+        nonlocal pos
+        out: list[tuple[tuple[str, ...], str | None]] = []
+        path = prefix
+        while True:
+            skip()
+            if pos < len(tree) and tree[pos] == "{":
+                pos += 1
+                while True:
+                    out.extend(parse(path))
+                    skip()
+                    if pos < len(tree) and tree[pos] == ",":
+                        pos += 1
+                        skip()
+                        if pos < len(tree) and tree[pos] == "}":
+                            pos += 1
+                            return out
+                        continue
+                    if pos < len(tree) and tree[pos] == "}":
+                        pos += 1
+                    return out
+            if pos < len(tree) and tree[pos] == "*":
+                pos += 1
+                return out
+            name = ident()
+            if name is None:
+                return out
+            if name != "self":
+                path = path + (name,)
+            skip()
+            if tree.startswith("::", pos):
+                pos += 2
+                continue
+            alias = None
+            if re.compile(r"as\b").match(tree, pos):
+                pos += 2
+                alias = ident()
+            out.append((path, alias))
+            return out
+
+    return parse(())
+
+
+def use_aliases(code: str) -> tuple[set[str], set[str]]:
+    """(filesystem module aliases, `File` type aliases) declared by `use` in this file.
+
+    Run on the BLANKED text, so a `use` in a comment or string is not an alias,
+    and over statements joined to their `;`, so a rustfmt-wrapped group is seen.
+    A path counts only when it ends in the filesystem module (`std::fs`,
+    `tokio::fs`, `fs_err`) or its `File` -- `use crate::net::Socket as F` does not
+    make `F::open` a read.
+    """
+    modules: set[str] = set()
+    files: set[str] = set()
+    for statement in USE_STATEMENT.finditer(code):
+        for path, alias in _use_paths(statement.group(1)):
+            if not alias or alias == "_":
+                continue
+            if path[-1] in FS_MODULES:
+                modules.add(alias)
+            elif len(path) >= 2 and path[-1] == "File" and path[-2] in FS_MODULES:
+                files.add(alias)
+    return modules, files
 
 WATCHED = re.compile(r"ADR-0523-WATCHED:\s*([A-Za-z_][A-Za-z0-9_]*)")
 UNWATCHED = re.compile(r"ADR-0523-UNWATCHED:\s*(\S.*)")
@@ -304,12 +395,13 @@ WATCH_SET_FN = re.compile(r"\bfn\s+watch_set\b")
 #     `DB_SSL_CA_FILE` in the `-db` repositories -- are outside this scan with or
 #     without a declaration.
 #   * In a DECLARING repository the zero-read floor no longer catches a blind
-#     classifier. Shapes this scan does not see -- `use std::fs as sfs;
-#     sfs::read_to_string(..)`, `use std::fs::File as F; F::open(..)`,
-#     `fs_err::read_to_string(..)`, a read through any helper crate -- pass with
-#     the marker and are refused without it. They already pass silently on main
-#     in any repository with at least one visible read, so the declaration
-#     widens no hole that a repository with reads does not already have.
+#     classifier. A shape this scan does not see -- a read through a helper
+#     crate other than `fs_err` -- passes with the marker and is refused
+#     without it. It already passes silently on main in any repository with at
+#     least one visible read, so the declaration widens no hole that a
+#     repository with reads does not already have. (`use std::fs as sfs`,
+#     `use std::fs::File as F` and `fs_err::` are resolved by `use_aliases()`
+#     since yaadgaar 263 and are no longer part of this hole.)
 LIBRARY_WATCHED = re.compile(
     r"ADR-0523-LIBRARY-WATCHED:\s*([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+)"
 )
@@ -672,24 +764,31 @@ def source_files() -> tuple[list[Path], list[str]]:
 def classify(code: str, spans: list[tuple[int, int]]) -> tuple[list[int], list[tuple[int, str]]]:
     """Read-site line numbers, and every token the tables above do not cover."""
     reads, unknown = [], []
+    modules, files = use_aliases(code)
+    fs_call = re.compile(
+        r"\b(" + "|".join(sorted({*FS_MODULES, *modules})) + r")::(" + IDENT + ")"
+    )
+    file_call = re.compile(
+        r"\b(?:" + "|".join(sorted({"File", *files})) + r")::(" + IDENT + ")"
+    )
     for lineno, line in enumerate(code.splitlines(), start=1):
         if in_span(lineno, spans):
             continue
-        for match in FS_CALL.finditer(line):
-            name = match.group(1)
+        for match in fs_call.finditer(line):
+            name = match.group(2)
             if name in READ_FS:
                 reads.append(lineno)
             elif name in WRITE_FS or name in META_FS or name in TYPE_FS:
                 continue
             else:
-                unknown.append((lineno, f"fs::{name}"))
-        for match in FILE_CALL.finditer(line):
+                unknown.append((lineno, f"{match.group(1)}::{name}"))
+        for match in file_call.finditer(line):
             if match.group(1) in READ_FILE:
                 reads.append(lineno)
         if OPEN_OPTIONS.search(line):
             reads.append(lineno)
         if imported := FS_IMPORT.search(line):
-            names = {n.strip() for n in imported.group(1).strip("{}").split(",")}
+            names = {n.split()[0] for n in imported.group(1).strip("{}").split(",") if n.strip()}
             for name in sorted(names & READ_FS):
                 unknown.append(
                     (lineno, f"use ...fs::{name} (import the module, not the function)")

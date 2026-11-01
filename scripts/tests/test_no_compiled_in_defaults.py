@@ -18,6 +18,7 @@ because it is shell and its subject is the working directory it is invoked in â€
 which is also how pre-commit invokes it in a consumer.
 """
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -369,3 +370,214 @@ def test_default_const_with_trailing_comment_marker_is_still_honoured(tmp_path):
     )
     result = run(tmp_path)
     assert result.returncode == 0, result.stderr
+
+
+# YAADGAAR 338 (ledger 1345). The grep-blind shapes of the P0/P1/P3 patterns,
+# swept against the consumers' origin/main (no real instance found, so the
+# widening is preventive) and then closed. Each refusal has a pristine
+# companion that must stay clean: a wider pattern is worth only what it does
+# not newly refuse.
+
+
+def _refused(tmp_path, body, title="ADR-0569 VIOLATION"):
+    write(tmp_path, "src/main.rs", body)
+    result = run(tmp_path)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert title in result.stderr
+    assert "src/main.rs:" in result.stderr
+    return result
+
+
+def _clean(tmp_path, body):
+    write(tmp_path, "src/main.rs", body)
+    result = run(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "searching 1 Rust file(s)" in result.stdout
+
+
+def test_grpc_header_constant_with_nested_chain_stays_clean(tmp_path):
+    """WHY NESTED CHAIN LINKS ARE NOT WIDENED. `yadgarhq/project`
+    src/service/request_id.rs:52 at origin/main reads a gRPC header constant
+    through a nested-paren chain; a nested-link pattern newly reds it and finds
+    no real knob anywhere in the consumers (swept 2026-11-01). If this test
+    ever needs to flip, re-sweep the consumers first."""
+    _clean(
+        tmp_path,
+        "fn id(req: &Request<()>) -> String {\n"
+        "    req.metadata()\n        .get(REQUEST_ID_HEADER)\n"
+        "        .and_then(|v| v.to_str().ok())\n"
+        "        .map(|v| capped(v).into_owned())\n"
+        "        .unwrap_or_default()\n}\n",
+    )
+
+
+def test_borrowed_key_is_refused(tmp_path):
+    _refused(
+        tmp_path, "fn f() { let n = lookup(&POLL).unwrap_or_default(); }\n"
+    )
+
+
+def test_grpc_header_path_constant_stays_clean(tmp_path):
+    """WHY A PATH-QUALIFIED KEY IS NOT WIDENED IN P1. `yadgarhq/iam`
+    src/key_identity/tests.rs:73 and src/service/tests.rs:211 at origin/main read
+    `metadata.get(yadgar_dial::GRPC_TIMEOUT)` through a chain ending in
+    `.unwrap_or_default()`; a path-qualified P1 key newly reds both (swept
+    2026-11-01). Re-sweep the consumers before flipping this."""
+    _clean(
+        tmp_path,
+        "fn t(m: &MetadataMap) {\n"
+        "    let told = m.get(yadgar_dial::GRPC_TIMEOUT)"
+        ".map(|v| v.to_str().unwrap_or_default().to_string());\n}\n",
+    )
+
+
+def test_path_qualified_key_in_a_presence_test_is_refused(tmp_path):
+    _refused(
+        tmp_path, 'fn f() { let on = get(keys::TRUST_HEADERS) == Some("1"); }\n'
+    )
+
+
+def test_path_qualified_key_in_a_presence_test_needs_an_uppercase_last_segment(tmp_path):
+    _clean(
+        tmp_path, 'fn f(m: &Map) { let on = m.get(keys::index) == Some("1"); }\n'
+    )
+
+
+def test_rustfmt_split_env_var_arguments_are_refused(tmp_path):
+    _refused(
+        tmp_path,
+        "fn f() {\n    let v = std::env::var(\n        \"YADGAR_ADDR\",\n    )\n"
+        '    .unwrap_or_else(|_| "d".into());\n}\n',
+    )
+
+
+def test_rustfmt_split_lookup_arguments_are_refused(tmp_path):
+    result = _refused(
+        tmp_path,
+        "fn f() {\n    let v = lookup(\n        URL,\n    )\n    .unwrap_or_default();\n}\n",
+    )
+    # The line reported is the one the call starts on, not the join's tail.
+    assert re.search(r"src/main\.rs:\s+2\t", result.stderr), result.stderr
+
+
+def test_split_arguments_with_a_marker_are_not_refused(tmp_path):
+    """The marker rides on the chain's last line, which the join keeps."""
+    _clean(
+        tmp_path,
+        "fn f() {\n    let v = lookup(\n        URL,\n    )\n"
+        "    .unwrap_or_default(); // ADR-0569-EXCEPTION(ABS): off when empty\n}\n",
+    )
+
+
+def test_aliased_var_import_is_refused(tmp_path):
+    _refused(
+        tmp_path,
+        "use std::env::var as fetch;\n"
+        'fn f() { let v = fetch("YADGAR_ADDR").unwrap_or_default(); }\n',
+    )
+
+
+def test_braced_aliased_var_import_is_refused(tmp_path):
+    _refused(
+        tmp_path,
+        "use std::env::{self, var_os as fetch};\n"
+        'fn f() { let v = fetch("YADGAR_ADDR").unwrap_or_default(); }\n',
+    )
+
+
+def test_bare_imported_var_is_refused(tmp_path):
+    _refused(
+        tmp_path,
+        "use std::env::var;\n"
+        'fn f() { let v = var("YADGAR_ADDR").unwrap_or_default(); }\n',
+    )
+
+
+def test_option_env_macro_fallback_is_refused(tmp_path):
+    _refused(
+        tmp_path, 'fn f() -> &\'static str { option_env!("BUILD_ID").unwrap_or("dev") }\n'
+    )
+
+
+# Companions: shapes the widened patterns must keep clean.
+
+
+def test_unimported_lookalike_alias_is_not_refused(tmp_path):
+    """`fetch` is an env alias only because an `env::var` import says so."""
+    _clean(
+        tmp_path,
+        'fn f() { let v = fetch("YADGAR_ADDR").unwrap_or_default(); }\n',
+    )
+
+
+def test_lowercase_key_with_nested_chain_is_not_refused(tmp_path):
+    _clean(
+        tmp_path,
+        'fn f(v: &Value) { let n = v.get("retries").map(|x| x.parse().ok()).unwrap_or(5); }\n',
+    )
+
+
+def test_lowercase_path_value_is_not_a_config_key(tmp_path):
+    _clean(
+        tmp_path, "fn f(m: &Map) { let n = m.get(keys::index).copied().unwrap_or(0); }\n"
+    )
+
+
+def test_split_arguments_of_an_unrelated_call_are_not_refused(tmp_path):
+    _clean(
+        tmp_path,
+        "fn f() {\n    let n = compute(\n        first,\n        second,\n    )\n"
+        "    .unwrap_or(0);\n}\n",
+    )
+
+
+def test_env_read_and_fallback_in_separate_split_calls_are_not_refused(tmp_path):
+    """The join is per call: it must not fuse neighbouring statements."""
+    _clean(
+        tmp_path,
+        "fn f() {\n    let a = require(\n        \"YADGAR_ADDR\",\n    );\n"
+        "    let b = other.unwrap_or(1);\n}\n",
+    )
+
+
+def test_unaliased_var_from_another_module_is_not_refused(tmp_path):
+    _clean(
+        tmp_path,
+        "use crate::cfg::var;\n"
+        'fn f() { let v = var("x").unwrap_or_default(); }\n',
+    )
+
+
+# ADR-0645: the bracket joins must not WEAKEN the gate. Each shape below was
+# refused by the chain-only gate before yaadgaar 338 and must stay refused.
+
+
+def test_marker_on_an_argument_line_does_not_cover_the_read(tmp_path):
+    _refused(
+        tmp_path,
+        'fn f() {\n    let v = env::var("K").unwrap_or(\n'
+        '        "d".into(), // ADR-0569-EXCEPTION(ABS): about the argument\n    );\n}\n',
+    )
+
+
+def test_marker_on_the_closing_line_does_not_cover_the_inner_read(tmp_path):
+    _refused(
+        tmp_path,
+        'fn f() {\n    let v = env::var("K").unwrap_or(\n        "d".into(),\n'
+        "    ); // ADR-0569-EXCEPTION(ABS): about the closing line\n}\n",
+    )
+
+
+def test_marker_on_an_outer_calls_closing_line_does_not_cover_the_read(tmp_path):
+    _refused(
+        tmp_path,
+        'fn f() {\n    foo(\n        env::var("K").unwrap_or_default(),\n'
+        "    ); // ADR-0569-EXCEPTION(ABS): about foo\n}\n",
+    )
+
+
+def test_a_comment_ending_in_an_open_paren_does_not_hide_the_next_read(tmp_path):
+    _refused(
+        tmp_path,
+        'fn f() {\n    // see foo(\n    let v = env::var("K").unwrap_or_default();\n}\n',
+    )
