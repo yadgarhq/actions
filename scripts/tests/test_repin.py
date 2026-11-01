@@ -949,3 +949,33 @@ def test_org_template_fails_closed_naming_both_places(monkeypatch, failure):
     text = str(refused.value)
     assert ".github/pull_request_template.md" in text
     assert "yadgarhq/.github" in text
+
+
+# ---------------------------------------------------------------------------
+# yaadgaar 524: the `## Why` text, and one comment stripper for both readers
+# ---------------------------------------------------------------------------
+
+
+def test_the_why_says_the_sweeper_merges_it_when_green():
+    """ADR-1106: the sweeper merges a green repin pull request. The text used
+    to say a person merges it (ADR-0531), which stopped being true."""
+    why = "\n".join(pr_body.sections(generated_body())["Why"])
+    assert "ADR-1106" in why
+    assert "human merges" not in why
+    assert "ADR-0531" not in why
+
+
+def test_headings_agree_with_sections_on_comments():
+    """Ledger 687: two readers of one text must not disagree. A commented-out
+    heading, an unterminated `<!--` before a real heading, and a heading
+    inside a code span."""
+    text = ("<!--\n## Hidden\n-->\n## What\n\nx\n<!-- open\n## Why\n\ny\n"
+            "`## Not a heading`\n## Risk\n\nz\n")
+    assert [t for _, t in repin.headings(text)] == list(pr_body.sections(text))
+
+
+def test_headings_strips_comments_through_pr_body(monkeypatch):
+    """The guard: `headings` uses `pr_body.strip_comments`, not its own regex,
+    so the next change to the stripper reaches both readers."""
+    monkeypatch.setattr(pr_body, "strip_comments", lambda text: "## Sentinel\n")
+    assert repin.headings("## What\n") == [("##", "Sentinel")]

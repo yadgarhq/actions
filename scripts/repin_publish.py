@@ -21,8 +21,8 @@ closes the pull request, yaadgaar 466).
 THREE OUTCOMES FOR THE HEAD BRANCH, which `repin.branch` derives from the bump:
 
     no pull request     one new commit, the branch, one pull request
-    OPEN                REFRESH: the commit is rebuilt on the checkout's base,
-                        so a BEHIND pull request comes current. Nothing moves
+    OPEN                REFRESH: the commit is rebuilt on the checkout, which
+                        may itself be behind main. Nothing moves
                         when the head is already one signed bot commit on that
                         base with the same tree: a push re-runs CI and restarts
                         the sweeper's soak (B10).
@@ -36,11 +36,19 @@ pull request the App opened on a `repin/` head in this repository, with a
 comment linking the new one. Their branches are KEPT: a `branch_deletion` on a
 ref fails the sweeper's B9 if that name is ever proposed again.
 
-THE PARENT IS THE CHECKOUT, AND IT MUST BE THE DEFAULT BRANCH'S TIP. The tree is
-the parent's tree with this checkout's `Cargo.toml` and `Cargo.lock` laid over
-it; on any other parent those two files would revert whatever the default
-branch changed in them since. A moved default branch is a refusal; the next run
-starts from the new tip.
+THE PARENT IS THE CHECKOUT, EVEN WHEN THE DEFAULT BRANCH HAS MOVED PAST IT. The
+tree is the parent's tree with this checkout's `Cargo.toml` and `Cargo.lock`
+laid over it; on any other parent those two files would revert whatever the
+default branch changed in them since. So a default branch that moved mid-run
+gives a pull request BEHIND it, never a commit on the newer tip (RULED
+2026-11-01, "Open behind main", yaadgaar 524). ADR-1109's sweeper merges a
+clean behind bot pull request on a non-strict base, and the next run rebuilds
+it on the new tip. BEHIND, NOT ELSEWHERE: the default tip must contain the
+parent, so a dispatch from a feature branch is a refusal. A tree equal to the parent's tree is a refusal: the commit
+would change nothing.
+
+A SUPERSEDED PULL REQUEST THAT A PERSON PUSHED TO IS KEPT OPEN, with a warning
+on the run, the same rule the reset path applies to this run's own branch.
 
 Commands (GH_TOKEN is the App's installation token, GITHUB_REPOSITORY o/r):
 
@@ -113,23 +121,30 @@ def publish(client, branch, title, body, parent, files):
     meta = client.repo()
     base = meta["default_branch"]
     tip = client.branch_sha(base)
-    if parent != tip:
+    relation = client.compare_status(parent, tip)
+    if relation not in ("ahead", "identical"):
         raise Refusal(
-            f"this run checked out {parent}, and the default branch `{base}` is at {tip}. "
-            "Its Cargo files laid over another base would revert that base's changes, so "
-            "nothing was written. The next run starts from the new tip.")
+            f"this run checked out {parent}, which is not on the default branch `{base}` "
+            f"(the tip {tip} is `{relation}` of it). A dispatch from another branch would "
+            "carry that branch's commits into the repin pull request, so nothing was written.")
     state = decide(client, branch)
     if state != "proceed":
         raise Refusal(f"`{branch}` now carries a {'merged' if state == 'merged' else 'closed'} "
                       "pull request; nothing was written")
     open_pr = next((p for p in client.pulls(branch) if p["state"] == "open"), None)
+    # Read before any write: its 100-cap refusal must not follow a push.
+    others = client.pulls()
     head = client.branch_sha(branch)
     if head is not None:
         foreign = [a for a in client.branch_authors(tip, head) if a != fan_out.BOT_ID]
         if foreign:
             raise Refusal(f"`{branch}` carries {len(foreign)} commit(s) not made by the App; "
                           "refusing to reset them away")
-    tree = client.make_tree(parent, files)
+    parent_tree = client.tree_of(parent)
+    tree = client.make_tree(parent_tree, files)
+    if tree == parent_tree:
+        raise Refusal(f"the re-pin changes nothing on {parent}: its tree equals the parent's, "
+                      "so there is nothing to commit and nothing was written")
     push = head is None or not _current(client, head, tree, parent)
     if open_pr is None:
         status = "opened"
@@ -148,14 +163,37 @@ def publish(client, branch, title, body, parent, files):
             client.swap_ref(meta["node_id"], branch, head, sha)
         fan_out.check_landed(client.commit(sha), sha)
     url = open_pr["url"] if open_pr else client.create_pr(base, branch, title, body)
-    closed = []
-    for other in client.pulls():
-        if (other["state"] == "open" and other["head"] != branch
+    closed, kept = supersede(client, others, branch, tip, url)
+    return {"status": status, "url": url, "closed": closed, "kept": kept}
+
+
+def supersede(client, others, branch, tip, url):
+    """Close every other open repin PR the App opened here, linking `url`.
+
+    A PR whose branch carries a commit not made by the App (a `None` author
+    too), or that is too long to read, is KEPT and returned as `(number,
+    why)`: closing it would bury a person's fix. Never a refusal here, since
+    the new pull request is already open.
+    """
+    closed, kept = [], []
+    for other in others:
+        if not (other["state"] == "open" and other["head"] != branch
                 and other["head"].startswith("repin/") and other["user_id"] == fan_out.BOT_ID
                 and other["same_repo"]):
-            client.close_superseded(other["number"], url)
-            closed.append(other["number"])
-    return {"status": status, "url": url, "closed": closed}
+            continue
+        try:
+            authors = client.branch_authors(tip, other["sha"])
+        except Refusal as refusal:
+            kept.append((other["number"], str(refusal)))
+            continue
+        foreign = [a for a in authors if a != fan_out.BOT_ID]
+        if foreign:
+            kept.append((other["number"], f"its branch carries {len(foreign)} commit(s) "
+                                          "not made by the App"))
+            continue
+        client.close_superseded(other["number"], url)
+        closed.append(other["number"])
+    return closed, kept
 
 
 def read_files(root="."):
@@ -189,8 +227,14 @@ class Gh(fan_out.Gh):
         got = self._json(self.at)
         return {"default_branch": got["default_branch"], "node_id": got["node_id"]}
 
-    def branch_sha(self, branch):
-        return super().branch_sha(self.owner, self.name, branch)
+    def branch_sha(self, *where):
+        """`branch_sha(branch)` in this repository. The parent's own
+        `(owner, repo, branch)` form is kept too: `fan_out.Gh._swap_ref` reads
+        the ref back that way after a failed swap, and a one-argument override
+        turned that read into a TypeError."""
+        if len(where) == 1:
+            where = (self.owner, self.name, *where)
+        return super().branch_sha(*where)
 
     def pulls(self, head=None):
         """Pull requests on `head` (any state), or every OPEN one when None."""
@@ -204,7 +248,7 @@ class Gh(fan_out.Gh):
         full = f"{self.owner}/{self.name}"
         return [{"number": p["number"], "state": p["state"], "merged": bool(p.get("merged_at")),
                  "url": p["html_url"], "title": p["title"], "body": p.get("body") or "",
-                 "head": p["head"]["ref"], "user_id": (p.get("user") or {}).get("id"),
+                 "head": p["head"]["ref"], "sha": p["head"]["sha"], "user_id": (p.get("user") or {}).get("id"),
                  "same_repo": ((p["head"].get("repo") or {}).get("full_name") == full)}
                 for p in got]
 
@@ -217,8 +261,19 @@ class Gh(fan_out.Gh):
     def commit(self, sha):
         return self._json(f"{self.at}/commits/{q(sha, '')}")
 
-    def make_tree(self, parent, files):
-        tree = self._json(f"{self.at}/git/commits/{q(parent, '')}")["tree"]["sha"]
+    def compare_status(self, base, head):
+        """`ahead` when `head` contains `base`; `identical`, `behind`, `diverged`."""
+        return self._json(f"{self.at}/compare/{q(base, '')}...{q(head, '')}")["status"]
+
+    def closed_by(self, number):
+        """The id of whoever closed issue or pull request `number`, else None."""
+        got = self._json(f"{self.at}/issues/{int(number)}")
+        return (got.get("closed_by") or {}).get("id")
+
+    def tree_of(self, sha):
+        return self._json(f"{self.at}/git/commits/{q(sha, '')}")["tree"]["sha"]
+
+    def make_tree(self, tree, files):
         entries = []
         for path in sorted(files):
             blob = self._json("-X", "POST", f"{self.at}/git/blobs", payload={
@@ -275,6 +330,16 @@ def output(**values):
                 handle.write(f"{key}={value}\n")
 
 
+def _closed_by_bot(client, branch):
+    """True when the App closed the latest closed pull request on `branch`,
+    which `supersede` does; anyone else closing it declined the bump."""
+    closed = [p for p in client.pulls(branch) if p["state"] == "closed" and not p["merged"]]
+    latest = max(closed, key=lambda p: p["number"], default=None)
+    if latest is None:  # reopened or merged since `decide` read it
+        return False
+    return client.closed_by(latest["number"]) == fan_out.BOT_ID
+
+
 def do_state(client, branch, title):
     """THE CLOSED ARM IS A WARNING, not a summary line: nothing here proposes a
     declined bump again while it stays the greatest tag, and a re-run or a
@@ -283,7 +348,15 @@ def do_state(client, branch, title):
     _check_branch(branch)
     state = decide(client, branch)
     output(proceed="true" if state == "proceed" else "false")
-    if state == "suppressed":
+    if state == "suppressed" and _closed_by_bot(client, branch):
+        print(f"::warning::{title} is SUPPRESSED. The `repin` workflow itself closed the pull "
+              f"request on `{branch}` as superseded by a newer bump; no person closed it. "
+              "Nothing here proposes it again while these stay the greatest tags. To take it: "
+              "reopen that pull request, or re-pin the crate by hand.")
+        summary(f"### Re-pin suppressed\n\n`{branch}` carries a pull request the `repin` "
+                "workflow closed as superseded, so this bump is NOT re-proposed. See the "
+                "warning on this run.")
+    elif state == "suppressed":
         print(f"::warning::{title} is SUPPRESSED. A closed pull request on `{branch}` already "
               "declined this exact bump, and nothing here proposes it again while these stay "
               "the greatest tags. To take it: reopen that pull request, restoring its head "
@@ -303,6 +376,9 @@ def do_publish(client, branch, title, body_path, parent):
     closed = ", ".join(f"#{n}" for n in got["closed"]) or "none"
     summary(f"{got['status'].capitalize()} {got['url']} from `{branch}`. "
             f"Superseded repin pull requests closed: {closed}.")
+    for number, why in got["kept"]:
+        print(f"::warning::superseded repin pull request #{number} was KEPT OPEN: {why}. "
+              "A person may have pushed to it; close it by hand once it is no longer needed.")
     return 0
 
 

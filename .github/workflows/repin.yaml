@@ -81,6 +81,13 @@ permissions:
 jobs:
   repin:
     runs-on: ubuntu-latest
+    # ONE RUN PER REPOSITORY, QUEUED (yaadgaar 524). An overlapping run on older
+    # tags could close the newer run's pull request as superseded, and the next
+    # run would read "closed by the bot" and suppress the newer bump. Never
+    # cancelled: a run cut off mid-publish leaves a branch with no PR.
+    concurrency:
+      group: repin-${{ github.repository }}
+      cancel-in-progress: false
     steps:
       # A shallow checkout is enough: nothing here pushes with git. The commit is
       # made through the API on this checkout's HEAD (yaadgaar 517).
@@ -331,15 +338,21 @@ jobs:
       # a tree on THIS checkout's commit, makes the commit with no author and no
       # committer (GitHub then signs it as the App), checks it is verified before
       # any ref moves, and moves the branch with the App token: created when
-      # absent, else compare-and-swap from the head it read. It refuses when
-      # the default branch has moved past this checkout, because these Cargo
-      # files laid over another base would revert that base's changes.
+      # absent, else compare-and-swap from the head it read. When the default
+      # branch has moved past this checkout, the commit still goes on THIS
+      # checkout and the pull request opens behind main, because these Cargo
+      # files laid over the newer base would revert its changes; the sweeper
+      # merges a clean behind bot pull request (ADR-1109). It refuses a
+      # checkout the default branch does not contain (a dispatch from another
+      # branch), and a commit that would change nothing.
       #
       # THEN ONE REPIN PULL REQUEST PER REPOSITORY. A newer tag gives a new head
       # branch, and the older bump's pull request used to stay open beside it
       # (task-db #122 beside #125). Every other open `repin/` pull request the
       # App opened here is closed with a comment linking this one; its branch is
-      # kept, since a `branch_deletion` would fail B9 if the name came back.
+      # kept, since a `branch_deletion` would fail B9 if the name came back. One
+      # whose branch carries a commit the App did not make is kept open, with a
+      # warning.
       #
       # THE PULL REQUEST BODY IS THE SQUASH COMMIT MESSAGE in every repository
       # here, and the `version` job derives the release from its `## Changelog`
