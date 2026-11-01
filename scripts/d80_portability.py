@@ -397,7 +397,10 @@ if have_chart:
     )
     if isinstance(rel.get("image"), dict):
         rel["image"]["digest"] = "sha256:" + "0" * 64
-        rel["image"].pop("tag", None)
+        # `null`, not `pop`: the file goes to helm with `-f`, which MERGES over
+        # `chart/values.yaml`, so a missing key leaves the chart's own tag.
+        # Only a null deletes it (yaadgaar 291).
+        rel["image"]["tag"] = None
     with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as fh:
         yaml.safe_dump(rel, fh)
         rel_path = fh.name

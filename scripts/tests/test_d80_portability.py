@@ -64,6 +64,9 @@ REPO = Path(__file__).resolve().parents[2]
 #                   its image reference: `repository@digest` WHEN A DIGEST IS
 #                   SET, and `repository:tag` otherwise. That precedence is not
 #                   cosmetic — see the note under `substitute` below.
+#   `_tag_wins`     the reference prefers `.image.tag` over `.image.digest` when
+#                   a tag survives the merge, the way a chart preferring the
+#                   tag would. Only a tag deleted by a null override gets past it.
 #   `_fail`         render fails outright.
 #   `_fail_unless`  render fails while the named path is falsy, which is the
 #                   chart that cannot be turned off without breaking.
@@ -88,7 +91,10 @@ import yaml
 
 def merge(base, over):
     for key, value in (over or {}).items():
-        if isinstance(value, dict) and isinstance(base.get(key), dict):
+        if value is None:
+            # helm: a null in a later values file DELETES the key.
+            base.pop(key, None)
+        elif isinstance(value, dict) and isinstance(base.get(key), dict):
             merge(base[key], value)
         else:
             base[key] = value
@@ -159,7 +165,11 @@ if guard and not get(values, guard):
 # stub preferring the tag would report the gate broken; a chart preferring the
 # tag would BE broken, and no check here would see it.
 image = values.get("image") or {}
-if image.get("digest"):
+if values.get("_tag_wins") and image.get("tag"):
+    # a chart whose template prefers the TAG (`_tag_wins`): only a tag that is
+    # truly deleted from the merged values reaches the digest.
+    reference = "%s:%s" % (image.get("repository", ""), image["tag"])
+elif image.get("digest"):
     reference = "%s@%s" % (image.get("repository", ""), image["digest"])
 else:
     reference = "%s:%s" % (image.get("repository", ""), image.get("tag", ""))
@@ -987,6 +997,26 @@ def test_a_latest_tag_sitting_in_git_is_not_a_finding(tmp_path):
     result = run(root)
     assert result.returncode == 0, result.stdout
     assert "No `imagePullPolicy: Never`, no `hostPort`, no `:latest`" in result.stdout
+
+
+def test_the_release_render_deletes_the_tag_rather_than_leaving_the_chart_default(tmp_path):
+    """Yaadgaar 291. `-f` MERGES over `chart/values.yaml`, so popping the key
+    from the override file leaves the chart's own `image.tag`. Only `tag: null`
+    deletes it. A chart preferring the tag would otherwise ship `:latest` and
+    the gate would blame the wrong thing, or nothing."""
+    root = tree(
+        tmp_path,
+        {
+            "chart/values.yaml": "image:\n"
+            "  repository: ghcr.io/yadgarhq/app\n"
+            "  tag: latest\n"
+            "_tag_wins: true\n"
+            "_render:\n" + DEPLOYMENT + container()
+        },
+    )
+    result = run(root)
+    assert result.returncode == 0, result.stdout
+    assert "a moving tag in the PUBLISHED shape" not in result.stdout
 
 
 # --------------------------------------------------- source-tree tripwires

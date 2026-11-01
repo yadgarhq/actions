@@ -109,6 +109,9 @@ jobs:
   detect:
     if: github.event_name != 'push'
     runs-on: ubuntu-latest
+    # Bounded (yaadgaar 320): the GitHub default is 360 minutes, which a
+    # stalled step burns whole. A ceiling, not a target.
+    timeout-minutes: 30
     outputs:
       rust: ${{ steps.d.outputs.rust }}
       # THE FACT `precommit`, `portability` and `service_immutable` key their
@@ -309,6 +312,9 @@ jobs:
     needs: detect
     if: github.event_name != 'push' && needs.detect.outputs.text_edit != 'true'
     runs-on: ubuntu-latest
+    # Bounded (yaadgaar 320): the GitHub default is 360 minutes, which a
+    # stalled step burns whole. A ceiling, not a target.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -499,9 +505,9 @@ jobs:
       # missing tool.
       - name: install protoc
         if: needs.detect.outputs.proto == 'true'
+        timeout-minutes: 5
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
           # BOTH packages. protobuf-compiler ships only /usr/bin/protoc;
           # libprotobuf-dev ships google/protobuf/*.proto under /usr/include —
           # the well-known types `buf export` deliberately omits because protoc
@@ -511,7 +517,16 @@ jobs:
           # Without the second package the build fails with
           # "google/protobuf/timestamp.proto: File not found", which reads as a
           # broken contract rather than a missing package.
-          sudo apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev
+          # Bounded: a stalled mirror burned 26+ min twice on 2026-10-07
+          # (yaadgaar 320). apt retries and times out itself, and the pair is
+          # tried three times.
+          for i in 1 2 3; do
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update -qq \
+              && sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends protobuf-compiler libprotobuf-dev \
+              && break
+            [ "$i" = 3 ] && exit 1
+            sleep 10
+          done
 
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         if: needs.detect.outputs.rust == 'true'
@@ -549,6 +564,9 @@ jobs:
       github.event_name != 'push' && needs.detect.outputs.text_edit != 'true' &&
       needs.detect.outputs.config_only != 'true'
     runs-on: ubuntu-latest
+    # Bounded (yaadgaar 320): the GitHub default is 360 minutes, which a
+    # stalled step burns whole. A ceiling, not a target.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -582,6 +600,9 @@ jobs:
       github.event_name != 'push' && needs.detect.outputs.text_edit != 'true' &&
       needs.detect.outputs.config_only != 'true'
     runs-on: ubuntu-latest
+    # Bounded (yaadgaar 320): the GitHub default is 360 minutes, which a
+    # stalled step burns whole. A ceiling, not a target.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -723,6 +744,9 @@ jobs:
       github.event_name == 'pull_request' &&
       github.event.pull_request.user.type != 'Bot'
     runs-on: ubuntu-latest
+    # Bounded (yaadgaar 320): the GitHub default is 360 minutes, which a
+    # stalled step burns whole. A ceiling, not a target.
+    timeout-minutes: 30
     steps:
       # THE GATE IS THE CHECKED-IN SCRIPT NOW, and this job was the third
       # inline copy of the contract it defines. `pr_body.py`'s own docstring is
@@ -846,6 +870,9 @@ jobs:
       github.event_name != 'push' && needs.detect.outputs.text_edit != 'true'
       && needs.detect.outputs.config_only != 'true'
     runs-on: ubuntu-latest
+    # Bounded (yaadgaar 320): the GitHub default is 360 minutes, which a
+    # stalled step burns whole. A ceiling, not a target.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -919,6 +946,9 @@ jobs:
       && needs.detect.outputs.config_only != 'true'
       && github.repository == 'yadgarhq/actions'
     runs-on: ubuntu-latest
+    # Bounded (yaadgaar 320): the GitHub default is 360 minutes, which a
+    # stalled step burns whole. A ceiling, not a target.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -955,6 +985,9 @@ jobs:
       needs.detect.outputs.text_edit != 'true' &&
       needs.detect.outputs.config_only != 'true'
     runs-on: ubuntu-latest
+    # Bounded (yaadgaar 320): the GitHub default is 360 minutes, which a
+    # stalled step burns whole. A ceiling, not a target.
+    timeout-minutes: 45
     services:
       mariadb:
         image: mariadb@sha256:2439dcd7d14010ecd1ff7a4e1c5abe8e208c34fe35290744deeeaac3569043c3 # 11.8
@@ -1003,9 +1036,9 @@ jobs:
       # missing tool.
       - name: install protoc
         if: needs.detect.outputs.proto == 'true'
+        timeout-minutes: 5
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
           # BOTH packages. protobuf-compiler ships only /usr/bin/protoc;
           # libprotobuf-dev ships google/protobuf/*.proto under /usr/include —
           # the well-known types `buf export` deliberately omits because protoc
@@ -1015,7 +1048,16 @@ jobs:
           # Without the second package the build fails with
           # "google/protobuf/timestamp.proto: File not found", which reads as a
           # broken contract rather than a missing package.
-          sudo apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev
+          # Bounded: a stalled mirror burned 26+ min twice on 2026-10-07
+          # (yaadgaar 320). apt retries and times out itself, and the pair is
+          # tried three times.
+          for i in 1 2 3; do
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update -qq \
+              && sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends protobuf-compiler libprotobuf-dev \
+              && break
+            [ "$i" = 3 ] && exit 1
+            sleep 10
+          done
 
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
@@ -1481,6 +1523,9 @@ jobs:
       needs.detect.outputs.text_edit != 'true' &&
       needs.detect.outputs.config_only != 'true'
     runs-on: ubuntu-latest
+    # Bounded (yaadgaar 320): the GitHub default is 360 minutes, which a
+    # stalled step burns whole. A ceiling, not a target.
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -1643,6 +1688,9 @@ jobs:
       github.event_name != 'push' && needs.detect.outputs.text_edit != 'true' &&
       needs.detect.outputs.config_only != 'true'
     runs-on: ubuntu-latest
+    # Bounded (yaadgaar 320): the GitHub default is 360 minutes, which a
+    # stalled step burns whole. A ceiling, not a target.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1807,6 +1855,9 @@ jobs:
       github.event_name != 'push' && needs.detect.outputs.text_edit != 'true' &&
       needs.detect.outputs.config_only != 'true'
     runs-on: ubuntu-latest
+    # Bounded (yaadgaar 320): the GitHub default is 360 minutes, which a
+    # stalled step burns whole. A ceiling, not a target.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1965,6 +2016,9 @@ jobs:
       && needs.detect.outputs.config_only != 'true'
       && github.repository != 'yadgarhq/chart'
     runs-on: ubuntu-latest
+    # Bounded (yaadgaar 320): the GitHub default is 360 minutes, which a
+    # stalled step burns whole. A ceiling, not a target.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2146,6 +2200,9 @@ jobs:
   version:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # Bounded (yaadgaar 320): the GitHub default is 360 minutes, which a
+    # stalled step burns whole. A ceiling, not a target.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
