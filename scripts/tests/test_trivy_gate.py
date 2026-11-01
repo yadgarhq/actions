@@ -608,3 +608,359 @@ def test_run_trivy_refuses_zero_helm_results_with_helm_values_even_without_chart
     monkeypatch.setattr(trivy_gate.subprocess, "run", fake_trivy())
     with pytest.raises(trivy_gate.Refused, match="zero"):
         trivy_gate.run_trivy(chart_dir)
+
+
+# ------------------------------- one pass per CI values file (yaadgaar #179)
+
+
+def _helm_result(target, *ids, message="m"):
+    return {
+        "Type": "helm",
+        "Target": target,
+        "Misconfigurations": [{"ID": i, "Message": message, "CauseMetadata": {}} for i in ids],
+    }
+
+
+def fake_trivy_passes(by_values, version="0.74.0", calls=None):
+    """A `subprocess.run` stand-in for a multi-pass scan. `by_values` maps the
+    BASENAME of the `--helm-values` file in the argv (or `None` for a pass with
+    no `--helm-values` at all) to `(results, stderr)`. `calls`, if given,
+    collects every `config` argv in order."""
+    import json as _json
+
+    def fake_run(args, capture_output, text):
+        if args[1] == "version":
+            return subprocess.CompletedProcess(args, 0, stdout=f'{{"Version": "{version}"}}', stderr="")
+        if calls is not None:
+            calls.append(list(args))
+        key = pathlib.Path(args[args.index("--helm-values") + 1]).name if "--helm-values" in args else None
+        results, stderr = by_values[key]
+        return subprocess.CompletedProcess(args, 0, stdout=_json.dumps({"Results": results}), stderr=stderr)
+
+    return fake_run
+
+
+def estate_chart(tmp_path, primary=True):
+    chart_dir = tmp_path / "chart"
+    (chart_dir / "ci").mkdir(parents=True)
+    (chart_dir / "Chart.yaml").write_text("name: x\n")
+    if primary:
+        (chart_dir / "ci" / "values.yaml").write_text("operators:\n  create: true\n")
+    (chart_dir / "ci" / "estate-values.yaml").write_text("operators:\n  create: false\n")
+    return chart_dir
+
+
+def test_every_ci_values_file_gets_its_own_pass(tmp_path, monkeypatch):
+    """THE RED CASE #179 NAMED: `ci/values.yaml` and `ci/estate-values.yaml`
+    render disjoint objects; findings from BOTH renders reach the verdict."""
+    monkeypatch.chdir(tmp_path)
+    chart_dir = estate_chart(tmp_path)
+    write_lock(chart_dir / "Chart.lock", [("nats", "https://nats-io.github.io/k8s/helm/charts", "1.2.3")])
+    calls = []
+    monkeypatch.setattr(
+        trivy_gate.subprocess,
+        "run",
+        fake_trivy_passes(
+            {
+                "values.yaml": ([_helm_result("chart/charts/nats/templates/s.yaml", "KSV-0014")], ""),
+                "estate-values.yaml": ([_helm_result("chart/templates/valkey.yaml", "KSV-0118")], ""),
+            },
+            calls=calls,
+        ),
+    )
+    report = trivy_gate.run_trivy(chart_dir)
+    assert len(calls) == 2
+    found = {(f.target, f.id) for f in trivy_gate.findings_from_report(report)}
+    assert found == {
+        ("chart/charts/nats/templates/s.yaml", "KSV-0014"),
+        ("chart/templates/valkey.yaml", "KSV-0118"),
+    }
+    verdict = trivy_gate.evaluate(trivy_gate.findings_from_report(report), [], TODAY, chart_dir)
+    assert [f.target for f in verdict.estate_findings] == ["chart/templates/valkey.yaml"]
+
+
+def test_each_pass_names_only_its_own_values_file(tmp_path, monkeypatch):
+    """The ct convention: an extra file renders ALONE, never layered over
+    `ci/values.yaml` -- platform's mixed-release guard (ADR-0787) refuses
+    operators plus estate in one render. Every pass carries the api versions."""
+    monkeypatch.chdir(tmp_path)
+    chart_dir = estate_chart(tmp_path)
+    (chart_dir / "ci" / "api-versions.txt").write_text("cert-manager.io/v1\n")
+    calls = []
+    ok = ([_helm_result("chart/templates/a.yaml")], "")
+    monkeypatch.setattr(
+        trivy_gate.subprocess,
+        "run",
+        fake_trivy_passes({"values.yaml": ok, "estate-values.yaml": ok}, calls=calls),
+    )
+    trivy_gate.run_trivy(chart_dir)
+    values = [[a[i + 1] for i, x in enumerate(a) if x == "--helm-values"] for a in calls]
+    assert values == [[str(chart_dir / "ci" / "values.yaml")], [str(chart_dir / "ci" / "estate-values.yaml")]]
+    for a in calls:
+        assert a[a.index("--helm-api-versions") + 1] == "cert-manager.io/v1"
+        assert a[a.index("--config") + 1] == "/dev/null"
+        assert a[a.index("--ignorefile") + 1] == "/dev/null"
+        assert "--quiet" not in a
+
+
+def test_an_extra_pass_runs_even_with_no_primary_values_file(tmp_path, monkeypatch):
+    """No `ci/values.yaml`: the primary pass runs bare, as today, and the
+    extra file still gets its own pass."""
+    monkeypatch.chdir(tmp_path)
+    chart_dir = estate_chart(tmp_path, primary=False)
+    calls = []
+    ok = ([_helm_result("chart/templates/a.yaml")], "")
+    monkeypatch.setattr(
+        trivy_gate.subprocess, "run", fake_trivy_passes({None: ok, "estate-values.yaml": ok}, calls=calls)
+    )
+    trivy_gate.run_trivy(chart_dir)
+    assert ["--helm-values" in a for a in calls] == [False, True]
+
+
+def test_a_skipping_chart_warn_on_only_the_extra_pass_refuses_naming_it(tmp_path, monkeypatch):
+    """ADR-0645: the WARN refusal runs PER PASS. A healthy primary pass must
+    not mask an extra file that did not render."""
+    monkeypatch.chdir(tmp_path)
+    chart_dir = estate_chart(tmp_path)
+    monkeypatch.setattr(
+        trivy_gate.subprocess,
+        "run",
+        fake_trivy_passes(
+            {
+                "values.yaml": ([_helm_result("chart/templates/a.yaml")], ""),
+                "estate-values.yaml": (
+                    [_helm_result("chart/templates/a.yaml")],
+                    'WARN\t[helm scanner] Skipping chart file_path="chart"\n',
+                ),
+            }
+        ),
+    )
+    with pytest.raises(trivy_gate.Refused, match=r"(?s)Skipping chart.*estate-values\.yaml"):
+        trivy_gate.run_trivy(chart_dir)
+
+
+def test_an_extra_pass_with_zero_helm_results_refuses_naming_it(tmp_path, monkeypatch):
+    """The `--helm-values` zero check runs PER PASS: a pass that renders
+    nothing is a broken file, not a clean one."""
+    monkeypatch.chdir(tmp_path)
+    chart_dir = estate_chart(tmp_path)
+    monkeypatch.setattr(
+        trivy_gate.subprocess,
+        "run",
+        fake_trivy_passes(
+            {
+                "values.yaml": ([_helm_result("chart/templates/a.yaml")], ""),
+                "estate-values.yaml": ([], ""),
+            }
+        ),
+    )
+    with pytest.raises(trivy_gate.Refused, match=r"(?s)zero.*estate-values\.yaml"):
+        trivy_gate.run_trivy(chart_dir)
+
+
+def test_an_extra_pass_with_helm_results_only_outside_chart_refuses(tmp_path, monkeypatch):
+    """The `chart/`-scoped count runs PER PASS too: a helm result elsewhere in
+    the tree does not stand in for the extra file's own render."""
+    monkeypatch.chdir(tmp_path)
+    chart_dir = estate_chart(tmp_path)
+    monkeypatch.setattr(
+        trivy_gate.subprocess,
+        "run",
+        fake_trivy_passes(
+            {
+                "values.yaml": ([_helm_result("chart/templates/a.yaml")], ""),
+                "estate-values.yaml": ([_helm_result("extra/ok/templates/a.yaml")], ""),
+            }
+        ),
+    )
+    with pytest.raises(trivy_gate.Refused, match=r"(?s)zero.*under `chart/`.*estate-values\.yaml"):
+        trivy_gate.run_trivy(chart_dir)
+
+
+def test_each_pass_prints_its_own_values_file_and_helm_count(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    chart_dir = estate_chart(tmp_path)
+    monkeypatch.setattr(
+        trivy_gate.subprocess,
+        "run",
+        fake_trivy_passes(
+            {
+                "values.yaml": ([_helm_result("chart/templates/a.yaml")], ""),
+                "estate-values.yaml": (
+                    [_helm_result("chart/templates/b.yaml"), _helm_result("chart/templates/c.yaml")],
+                    "",
+                ),
+            }
+        ),
+    )
+    trivy_gate.run_trivy(chart_dir)
+    out = capsys.readouterr().out
+    assert "values.yaml: 1 helm-typed result(s)" in out
+    assert "estate-values.yaml: 2 helm-typed result(s)" in out
+
+
+# Real trivy 0.74.0 messages, measured on the nats StatefulSet (platform and
+# the parent chart, 2026-11-01). KSV-0118's container message is NOT unique per
+# object: trivy reports it twice for two different blocks of one StatefulSet.
+NATS_RORF = "Container 'nats' of StatefulSet 'nats' should set 'securityContext.readOnlyRootFilesystem' to true"
+RELOADER_RORF = "Container 'reloader' of StatefulSet 'nats' should set 'securityContext.readOnlyRootFilesystem' to true"
+NATS_DEFAULT_SC = "container nats in default namespace is using the default security context"
+STS = "chart/charts/nats/templates/stateful-set.yaml"
+
+
+def _merged(tmp_path, monkeypatch, primary, estate):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(tmp_path)
+    chart_dir = estate_chart(tmp_path)
+    monkeypatch.setattr(
+        trivy_gate.subprocess,
+        "run",
+        fake_trivy_passes({"values.yaml": ([primary], ""), "estate-values.yaml": ([estate], "")}),
+    )
+    return chart_dir, trivy_gate.findings_from_report(trivy_gate.run_trivy(chart_dir))
+
+
+def test_a_finding_both_passes_report_counts_once(tmp_path, monkeypatch):
+    """Duplicates are removed ACROSS passes: a template that renders the same
+    object under both values files is one finding."""
+    shared = _helm_result("chart/templates/shared.yaml", "KSV-0014", message=NATS_RORF)
+    chart_dir, findings = _merged(tmp_path, monkeypatch, shared, shared)
+    assert len(findings) == 1
+    verdict = trivy_gate.evaluate(findings, [], TODAY, chart_dir)
+    assert "1 finding(s) in this repository's OWN templates" in trivy_gate.render_report(verdict)
+
+
+def test_two_same_message_findings_in_one_pass_both_survive(tmp_path, monkeypatch):
+    """NEVER inside one pass: trivy's `Message` is not unique per object, so a
+    one-pass run lists exactly what it listed before extra passes existed."""
+    monkeypatch.chdir(tmp_path)
+    chart_dir = tmp_path / "chart"
+    (chart_dir / "ci").mkdir(parents=True)
+    (chart_dir / "Chart.yaml").write_text("name: x\n")
+    (chart_dir / "ci" / "values.yaml").write_text("{}\n")
+    twice = _helm_result(STS, "KSV-0118", "KSV-0118", message=NATS_DEFAULT_SC)
+    monkeypatch.setattr(trivy_gate.subprocess, "run", fake_trivy_passes({"values.yaml": ([twice], "")}))
+    findings = trivy_gate.findings_from_report(trivy_gate.run_trivy(chart_dir))
+    assert [(f.target, f.id) for f in findings] == [(STS, "KSV-0118"), (STS, "KSV-0118")]
+
+
+def test_the_merge_keeps_the_largest_per_pass_count_from_either_pass(tmp_path, monkeypatch):
+    """Per key, the merged count is the largest count any single pass
+    reported -- whichever pass that is."""
+    two = _helm_result(STS, "KSV-0118", "KSV-0118", message=NATS_DEFAULT_SC)
+    one = _helm_result(STS, "KSV-0118", message=NATS_DEFAULT_SC)
+    three = _helm_result(STS, "KSV-0118", "KSV-0118", "KSV-0118", message=NATS_DEFAULT_SC)
+    _, findings = _merged(tmp_path / "a", monkeypatch, two, one)
+    assert len(findings) == 2
+    _, findings = _merged(tmp_path / "b", monkeypatch, one, three)
+    assert len(findings) == 3
+
+
+def test_the_merge_keeps_the_largest_count_over_three_passes():
+    """1, then 3, then 2: the merged count is 3, never 1 + 3 or 3 + 2."""
+    def run(n):
+        return [_helm_result(STS, *["KSV-0118"] * n, message=NATS_DEFAULT_SC)]
+
+    merged = trivy_gate.merge_pass_results([run(1), run(3), run(2)])
+    assert len(trivy_gate.findings_from_report({"Results": merged})) == 3
+
+
+def test_findings_from_report_keeps_two_objects_with_the_same_check_in_one_file():
+    report = {
+        "Results": [
+            {
+                "Target": STS,
+                "Misconfigurations": [
+                    {"ID": "KSV-0014", "Message": NATS_RORF},
+                    {"ID": "KSV-0014", "Message": RELOADER_RORF},
+                ],
+            }
+        ]
+    }
+    assert [f.resource for f in trivy_gate.findings_from_report(report)] == [NATS_RORF, RELOADER_RORF]
+
+
+def test_the_merge_prefers_cause_metadata_resource_when_trivy_sets_it(tmp_path, monkeypatch):
+    """`CauseMetadata.Resource`, when trivy sets it, is the key -- two passes
+    whose messages differ for the same resource still merge to one."""
+    a = {"Type": "dockerfile", "Target": "Containerfile",
+         "Misconfigurations": [{"ID": "DS-0002", "Message": "one", "CauseMetadata": {"Resource": "r"}}]}
+    b = {"Type": "dockerfile", "Target": "Containerfile",
+         "Misconfigurations": [{"ID": "DS-0002", "Message": "two", "CauseMetadata": {"Resource": "r"}}]}
+    merged = trivy_gate.merge_pass_results([[a, _helm_result("chart/templates/x.yaml")], [b]])
+    assert [f.resource for f in trivy_gate.findings_from_report({"Results": merged})] == ["r"]
+
+
+def test_an_extra_pass_skipping_chart_refusal_points_at_the_values_file(tmp_path, monkeypatch):
+    """On an extra pass the primary pass already rendered with the same
+    dependencies, so the refusal names the values file as the likely cause."""
+    monkeypatch.chdir(tmp_path)
+    chart_dir = estate_chart(tmp_path)
+    monkeypatch.setattr(
+        trivy_gate.subprocess,
+        "run",
+        fake_trivy_passes(
+            {
+                "values.yaml": ([_helm_result("chart/templates/a.yaml")], ""),
+                "estate-values.yaml": ([], 'WARN\t[helm scanner] Skipping chart file_path="chart"\n'),
+            }
+        ),
+    )
+    with pytest.raises(trivy_gate.Refused, match=r"likely cause is \S*estate-values\.yaml itself"):
+        trivy_gate.run_trivy(chart_dir)
+
+
+def test_a_primary_pass_skipping_chart_refusal_does_not_blame_a_values_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    chart_dir = estate_chart(tmp_path)
+    monkeypatch.setattr(
+        trivy_gate.subprocess,
+        "run",
+        fake_trivy_passes({"values.yaml": ([], 'WARN\t[helm scanner] Skipping chart file_path="chart"\n')}),
+    )
+    with pytest.raises(trivy_gate.Refused) as exc:
+        trivy_gate.run_trivy(chart_dir)
+    assert "likely cause" not in str(exc.value)
+
+
+def test_an_ignore_entry_live_only_in_the_extra_pass_is_not_stale(tmp_path, monkeypatch):
+    """Staleness is judged over the MERGED findings: an entry whose only
+    match comes from the estate pass is live, not stale."""
+    monkeypatch.chdir(tmp_path)
+    chart_dir = estate_chart(tmp_path)
+    write_lock(chart_dir / "Chart.lock", [("nats", "https://nats-io.github.io/k8s/helm/charts", "1.2.3")])
+    target = "chart/charts/nats/templates/stateful-set.yaml"
+    monkeypatch.setattr(
+        trivy_gate.subprocess,
+        "run",
+        fake_trivy_passes(
+            {
+                "values.yaml": ([_helm_result("chart/templates/a.yaml")], ""),
+                "estate-values.yaml": ([_helm_result(target, "KSV-0014")], ""),
+            }
+        ),
+    )
+    findings = trivy_gate.findings_from_report(trivy_gate.run_trivy(chart_dir))
+    verdict = trivy_gate.evaluate(findings, [entry(paths=[target])], TODAY, chart_dir)
+    assert verdict.ok, trivy_gate.render_report(verdict)
+
+
+def test_an_extra_pass_with_zero_helm_results_refuses_even_without_chart_yaml(tmp_path, monkeypatch):
+    """The `--helm-values` zero check on its own, per pass: with no
+    `chart/Chart.yaml` the `chart/`-scoped count does not run, so only this
+    check can catch an extra file that rendered nothing."""
+    monkeypatch.chdir(tmp_path)
+    chart_dir = estate_chart(tmp_path)
+    (chart_dir / "Chart.yaml").unlink()
+    monkeypatch.setattr(
+        trivy_gate.subprocess,
+        "run",
+        fake_trivy_passes(
+            {
+                "values.yaml": ([_helm_result("chart/templates/a.yaml")], ""),
+                "estate-values.yaml": ([], ""),
+            }
+        ),
+    )
+    with pytest.raises(trivy_gate.Refused, match=r"(?s)--helm-values scan reported zero.*estate-values\.yaml"):
+        trivy_gate.run_trivy(chart_dir)

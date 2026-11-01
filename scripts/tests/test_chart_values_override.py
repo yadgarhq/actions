@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from chart_values_override import (  # noqa: E402
     OVERRIDE,
+    extra_values_files,
     merged_values,
     values_override,
     values_override_flags,
@@ -77,3 +78,31 @@ def test_merged_values_with_an_empty_override_file_changes_nothing(tmp_path):
     base = {"image": {"tag": "latest"}}
     merged_values(directory, base)
     assert base == {"image": {"tag": "latest"}}
+
+
+# ----------------------------------------- extra scan passes (yaadgaar #179)
+
+
+def test_extra_values_files_are_every_dash_values_file_sorted(tmp_path):
+    """RULED 2026-11-01, option (a): every `ci/*-values.yaml` is an extra
+    trivy pass. Sorted, so the pass order is the same on every run."""
+    directory = chart(tmp_path, "{}\n")
+    for name in ("zeta-values.yaml", "estate-values.yaml"):
+        (directory / "ci" / name).write_text("{}\n")
+    assert extra_values_files(directory) == [
+        directory / "ci" / "estate-values.yaml",
+        directory / "ci" / "zeta-values.yaml",
+    ]
+
+
+def test_extra_values_files_never_include_the_primary_or_other_files(tmp_path):
+    """`ci/values.yaml` stays the primary file, not an extra pass; a name that
+    is not `<something>-values.yaml` is not a pass either."""
+    directory = chart(tmp_path, "{}\n")
+    for name in ("api-versions.txt", "estatevalues.yaml", "estate-values.yml", "-values.yaml.bak"):
+        (directory / "ci" / name).write_text("{}\n")
+    assert extra_values_files(directory) == []
+
+
+def test_extra_values_files_is_empty_with_no_ci_directory(tmp_path):
+    assert extra_values_files(chart(tmp_path)) == []
