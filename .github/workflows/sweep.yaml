@@ -22,9 +22,9 @@ name: sweep
 # merge and the branch rewrite (git data API blob, tree and commit, the ref
 # moved by a GraphQL `updateRefs` compare-and-swap, a repository read for its
 # node id, two commit reads, and a ref read after a failed swap) are the only
-# calls made with it. A BOT leg (`app-bot`, ADR-1106) gets `contents`,
-# `pull_requests` and `workflows: write`: the squash merge, the branch delete
-# and the one `@dependabot rebase` comment are the only calls made with it.
+# calls made with it. A BOT leg (`app-bot`, ADR-1106) gets `contents` and
+# `workflows: write`: the squash merge and the branch delete are the only calls
+# made with it.
 #
 # NOT THE FAN-OUT'S CONCURRENCY GROUP. A queued sweep must never cancel or delay
 # a tag-push fan-out; `sweep.py` instead stops when a fan-out run is in progress
@@ -48,12 +48,26 @@ name: sweep
 #
 # BOT PULL REQUESTS (ADR-1106). The same run also merges a dependabot or repin
 # pull request in any public repository once `ci / passed` is green on its
-# head, and asks dependabot to rebase a BEHIND one so a later run can merge it. Such a
-# leg carries `kind`, and its token is minted by `app-bot` with `contents`,
-# `pull_requests` and `workflows: write`; an adoption leg's mint is unchanged.
+# head; a BEHIND one merges too when its base does not require an up-to-date
+# branch and GitHub calls it `clean` (ADR-1109). Nothing asks
+# dependabot to rebase: it ignores `@dependabot rebase` from the App. Such a
+# leg carries `kind`, and its token is minted by `app-bot` with `contents` and
+# `workflows: write`; an adoption leg's mint is unchanged.
 # Merges made with the App token are pushes by the App, not by GITHUB_TOKEN,
 # so the consumer's push workflows (version, tag, release) run as they do for
 # a merge by hand. The squash commit's author is the pull request's author.
+#
+# THE FOLLOW-UP (ADR-1108: bot merges within minutes, not at the next
+# throttled cron). A live run whose evaluation left a pull request held back
+# only by the bot soak (B10) or by its own plan (M4, M5) outputs `follow_up`
+# minutes; the `follow-up` job sleeps them after `act` and dispatches this
+# workflow on main with `dry_run` false and `hop` + 1. GITHUB_TOKEN with
+# `actions: write` can do that in this repository and no other, and a
+# `workflow_dispatch` it sends does start a run. The dispatched run carries no
+# pull request, repository or sha: it judges everything from scratch. `hop`
+# stops the chain at `MAX_HOPS`, and a due time an hour or more away is left to
+# the cron. ADR-1108 rules this bounded self-dispatch in, superseding ADR-1073
+# on that one point; there is no cross-repository event trigger.
 #
 # ROLLBACK: set `sweep.live` false in classes.json, or disable this workflow.
 on:
@@ -67,6 +81,10 @@ on:
         default: true
       wait_minutes:
         description: "sleep until the newest tag's soak and CI should be done, at most this many minutes (0-60)"
+        type: string
+        default: "0"
+      hop:
+        description: "the follow-up chain's count, set by the follow-up job (0-6); a run at 6 dispatches nothing"
         type: string
         default: "0"
 
@@ -117,6 +135,8 @@ jobs:
     outputs:
       live: ${{ steps.mode.outputs.live }}
       plan: ${{ steps.evaluate.outputs.plan }}
+      follow_up: ${{ steps.evaluate.outputs.follow_up }}
+      next_hop: ${{ steps.evaluate.outputs.next_hop }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -149,6 +169,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           DRY_RUN: ${{ inputs.dry_run }}
           REF: ${{ github.ref }}
+          HOP: ${{ inputs.hop }}
         run: |
           set -euo pipefail
           args=(evaluate --owner "$OWNER")
@@ -211,11 +232,12 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ matrix.repo }}
           permission-contents: write
-      # ADR-1106. A bot leg also needs `pull_requests: write` for the
-      # `@dependabot rebase` comment, and `workflows: write`, without which GitHub refuses
-      # an App's write that touches `.github/workflows/` (dependabot's
-      # github-actions bumps do). Still one repository. A kind that is neither
-      # mints nothing, and `act` then reds on the missing token.
+      # ADR-1106. A bot leg also needs `workflows: write`, without which
+      # GitHub refuses an App's write that touches `.github/workflows/`
+      # (dependabot's github-actions bumps do). The squash merge and the branch
+      # delete need `contents: write` only, as an adoption merge proves. Still
+      # one repository. A kind that is neither mints nothing, and `act` then
+      # reds on the missing token.
       - name: mint the bot write token for this one repository
         id: app-bot
         if: ${{ matrix.kind == 'dependabot' || matrix.kind == 'repin' }}
@@ -226,7 +248,6 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ matrix.repo }}
           permission-contents: write
-          permission-pull-requests: write
           permission-workflows: write
       - name: merge or refresh
         env:
@@ -244,3 +265,27 @@ jobs:
         run: >-
           python3 scripts/sweep.py act --owner "$OWNER" --repo "$REPO"
           --n "$NUMBER" --head "$HEAD" --action "$ACTION" --kind "$KIND"
+
+  # THE NEXT RUN, WHEN A PULL REQUEST IS DUE. `follow_up` is set only by a live
+  # evaluate, and only to an integer from 1 to 59 that `sweep.py` checked;
+  # `next_hop` only to 1-6. Both reach the shell through env, never `${{ }}`.
+  # After `act`, whatever it did: a merge is what makes an M5 sibling due.
+  follow-up:
+    needs: [evaluate, act]
+    if: ${{ !cancelled() && needs.evaluate.outputs.live == 'true' && needs.evaluate.outputs.follow_up != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 65 # 59 for the longest sleep, the rest spare
+    permissions:
+      actions: write # POST .../actions/workflows/sweep.yaml/dispatches in this repository, nothing else
+    steps:
+      - name: sleep until the soonest pull request is due, then dispatch the next sweep
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MINUTES: ${{ needs.evaluate.outputs.follow_up }}
+          HOP: ${{ needs.evaluate.outputs.next_hop }}
+        run: |
+          set -euo pipefail
+          sleep "$((MINUTES * 60))"
+          gh api -X POST "repos/${REPO}/actions/workflows/sweep.yaml/dispatches" \
+            -f ref=main -f "inputs[dry_run]=false" -f "inputs[hop]=${HOP}"

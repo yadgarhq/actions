@@ -27,20 +27,25 @@ the producer, which calls `ci-pr.yaml` by local path; V3 is not asked); and
 `sweep.bot_soak_hours` ago (B10, parity with T5). All dependabot update types
 qualify, majors included.
 Of several open repin pull requests in one repository only the newest is
-judged (B4). repin.yaml's `git push` commit is unsigned, so today every repin
-pull request fails B3 and waits for a person.
+judged (B4). repin.yaml makes its commit through the git data API
+(actions#153), so GitHub signs it and `web-flow` commits it; a repin pull
+request from before that carries an unsigned `git push` commit, fails B3 and
+waits for a person.
 
 Up to date (U1, U2): a squash merge at the head sha (GitHub refuses it if the
 head moved), titled with the bot's own first commit subject (B7) and with the
 fixed `BOT_MESSAGE`, never the editable pull request title or body, so no text
 a person typed reaches history or `derive`; then the bot's branch is deleted, as `delete_branch_on_merge` is
-off. BEHIND: never update-branch, which adds a merge commit B3 refuses. A
-dependabot pull request gets one `@dependabot rebase` comment (at most one an
-hour, `max_refreshes_per_pr_per_day` a day: B6), and dependabot re-signs its
-own commit, so a LATER run merges it after CI. A repin one has no such path
-(B5). Red, pending or conflicting: a skip, left for a person. `act` judges the
-pull request again from scratch, B3 included, on the same head before it
-writes. The plan takes adoption writes first, then at most one bot write per
+off. BEHIND (ADR-1109; strict up-to-date checks are off estate-wide):
+the same squash merge at the head sha, when the base's rules do not require an
+up-to-date branch (U4, read from `rules/branches/<base>`) AND GitHub itself
+calls the pull request `clean` (U5, `mergeable_state`). Either one says no: a
+skip. A base that still requires up to date (U4) is a skip, and nothing is
+asked of anyone: dependabot ignores `@dependabot rebase` from the App (chart#84,
+two comments, no reaction), so the comment path is gone. Never update-branch,
+which adds a merge commit B3 refuses. Red, pending or conflicting: a skip, left
+for a person. `act` judges the pull request again from scratch, B3 included,
+on the same head before it writes. The plan takes adoption writes first, then at most one bot write per
 repository per run (M5) within the same merge cap (M4).
 
 A BEHIND pull request whose base did not touch `.pre-commit-config.yaml` is
@@ -60,6 +65,17 @@ a skip; any other failure (401, 403, 404, no usable auth, an error with no
 HTTP code) is the write token or the call, not the pull request, and reds the
 `act` job. So does a re-evaluation that could not read (yaadgaar 469).
 
+THE FOLLOW-UP (ADR-1108: bot merges within minutes). GitHub fires the
+cron every 3-4 hours, and no event in another repository reaches this one
+without a new credential or a webhook. So a LIVE run that leaves a pull request
+held back only by time (B10, whose row carries `due`) or by its own plan (M4,
+M5) dispatches the next run of this workflow for when that pull request is due:
+`follow_up` gives the minutes, the `follow-up` job sleeps them and dispatches
+with GITHUB_TOKEN (`actions: write`, this repository only). The dispatched run
+carries `hop` + 1 and judges everything from scratch; nothing it was handed
+admits anything. A run at `MAX_HOPS`, or one whose soonest due row is an hour
+or more away, asks for nothing, and the cron picks that up.
+
 DRY UNTIL ARMED. `classes.json` arms the sweep with `"sweep": {"live": true}`
 (yaadgaar 465). While it is false the workflow mints no write token and runs
 no `act` job, and `evaluate` writes its verdict table to the step summary only. Reads go through
@@ -68,15 +84,15 @@ read a private one. The merge and the branch rewrite, with the reads the
 rewrite makes (the repository's node id, the parent commit, the new commit, and
 the branch after a failed swap), are the only calls made with the App token,
 minted per repository with `contents: write`. A bot leg's token (ADR-1106) is
-minted per repository with `contents`, `pull_requests` and `workflows: write`,
-for the merge, the rebase comment and the branch delete.
+minted per repository with `contents` and `workflows: write`, for the merge and
+the branch delete.
 
 Commands:
 
     sweep.py mode                       EVENT, DRY_RUN, REF -> `live=true|false`
     sweep.py wait --owner O             WAIT_MINUTES -> sleep until the soak should be done
     sweep.py check-name -- NAME         a matrix leg's repository, or exit 1
-    sweep.py evaluate --owner O [--live]
+    sweep.py evaluate --owner O [--live]    HOP -> `plan`, and live `follow_up` and `next_hop`
     sweep.py act --owner O --repo R --n N --head SHA --action merge|refresh [--kind dependabot|repin]
 
 Tests: python3 -m pytest scripts/tests/ -q
@@ -124,7 +140,6 @@ BOTS = {
     "repin": (BOT_ID, "yadgarhq-bot[bot]", re.compile(r"repin/[A-Za-z0-9_+-]+(\.[A-Za-z0-9_+-]+)*")),
 }
 CI_SELF = ".github/workflows/ci-self.yaml"
-REBASE = "@dependabot rebase"
 # F1. A bot merge never carries the pull request's editable body: a `feat!`
 # bullet typed there would reach `next_version.derive`. Fixed text with no
 # bullet, so `derive` takes its synthetic `fix(deps)` path as for any bot merge.
@@ -155,10 +170,24 @@ DAY = datetime.timedelta(hours=24)
 CI_MARGIN = datetime.timedelta(minutes=5)
 MAX_WAIT_MINUTES = 60
 WAIT_INPUT = re.compile(r"0|[1-9][0-9]?")
+# The follow-up chain: a run dispatched by a run carries `hop` + 1, and a run
+# at MAX_HOPS dispatches nothing. Six hops cover a soak plus the M5 queue of a
+# busy repository; the cron is the backstop beyond that.
+MAX_HOPS = 6
+HOP_INPUT = re.compile(r"[0-9]")
+HELD = ("M4:", "M5:")
 
 
 class Skip(Exception):
     """This pull request is not merged or refreshed. The message says why."""
+
+
+class NotYet(Skip):
+    """A Skip that only time lifts: the pull request is due at `at` (B10)."""
+
+    def __init__(self, message, at):
+        super().__init__(message)
+        self.at = at
 
 
 def need(fact, reason):
@@ -616,10 +645,11 @@ def check_bot_commits(commits, timeline, kind, head):
     verified, and committed by GitHub's `web-flow`, with exactly one parent.
     An author id is only an email match, so it never admits a commit alone,
     and a merge commit is never admitted: one can carry any edit (conflict
-    resolution), whoever signed it. repin.yaml's `git push` commit is unsigned
-    and committed by the App, so a repin pull request fails this and waits for
-    a person until repin makes its commit through the API. Every force-push is
-    the bot's."""
+    resolution), whoever signed it. repin.yaml makes its commit through the
+    git data API (actions#153), which GitHub signs and `web-flow` commits; an
+    older repin pull request's `git push` commit is unsigned and committed by
+    the App, so it fails this and waits for a person. Every force-push is the
+    bot's."""
     bot_id = BOTS[kind][0]
     commits = as_list(commits, "commits")
     need(len(commits) >= 1 and dig(commits, -1, "sha") == head, "B3: the last commit is not the head")
@@ -680,22 +710,30 @@ def check_bot_pushes(activity, kind, head):
     return parse_time(dig(activity, 0, "timestamp"))
 
 
-def rebase_asks(timeline, now):
-    """The App's own `@dependabot rebase` comments: (in the last hour, in the last day)."""
-    hour = day = 0
-    for event in timeline:
-        if (event.get("event") == "commented" and (event.get("actor") or {}).get("id") == BOT_ID
-                and (event.get("body") or "").strip() == REBASE):
-            age = now - parse_time(dig(event, "created_at"))
-            hour += age < datetime.timedelta(hours=1)
-            day += age < DAY
-    return hour, day
+def strict_base(rules):
+    """U4 (ADR-1109). True unless the base branch's rules are read in full and no
+    `required_status_checks` rule on it asks for an up-to-date branch. A rule
+    whose `strict_required_status_checks_policy` is missing or not a boolean
+    may ask for it, so it counts as strict: fail closed."""
+    if not isinstance(rules, list) or len(rules) >= PAGE:
+        return True
+    for rule in rules:
+        if not isinstance(rule, dict):
+            return True
+        if rule.get("type") != "required_status_checks":
+            continue
+        params = rule.get("parameters")
+        policy = params.get("strict_required_status_checks_policy") if isinstance(params, dict) else None
+        if policy is not False:
+            return True
+    return False
 
 
 def evaluate_bot(api, owner, name, n, classes, now):
-    """ADR-1106: merge an up-to-date bot pull request whose `ci / passed` is
-    green on its head; ask dependabot to rebase a BEHIND one whose CI is green,
-    so a later run merges it on the new head. Red, pending or conflicting: a skip."""
+    """ADR-1106: merge a bot pull request whose `ci / passed` is green on its
+    head. Up to date, or BEHIND on a base that does not require up-to-date
+    branches and that GitHub calls `clean` (U4, U5). Red, pending, conflicting
+    or behind a strict base: a skip."""
     meta = api.get(f"repos/{owner}/{name}")
     check_bot_repo(meta, owner, classes)
     pr = api.get(f"repos/{owner}/{name}/pulls/{int(n)}")
@@ -710,8 +748,8 @@ def evaluate_bot(api, owner, name, n, classes, now):
               "object", "sha")
     need(isinstance(tip, str) and bool(SHA.fullmatch(tip)), "unexpected API shape: base tip")
     timeline = api.get(f"repos/{owner}/{name}/issues/{n}/timeline?per_page={PAGE}")
-    # A full page hides older events: B3's force-push actors and B6's rebase
-    # caps must read the whole timeline, or the pull request is a skip.
+    # A full page hides older events: B3's force-push actors must read the
+    # whole timeline, or the pull request is a skip.
     need(isinstance(timeline, list) and len(timeline) < PAGE, "B3: the timeline may be truncated")
     subject = check_bot_commits(api.get(f"repos/{owner}/{name}/pulls/{n}/commits?per_page={PAGE}"),
                                 timeline, kind, head)
@@ -728,19 +766,26 @@ def evaluate_bot(api, owner, name, n, classes, now):
                "kind": kind, "branch": branch, "reason": f"{kind} (ADR-1106)"}
     if status == "ahead" and behind == 0:
         need(dig(pr, "base", "sha") == tip, "U2: the pull request's base sha is not the base tip")
-        # B10, parity with T5: the head must have sat on the branch this long.
-        need(now - pushed >= datetime.timedelta(hours=classes["sweep"]["bot_soak_hours"]),
-             f"B10: the head is younger than the {classes['sweep']['bot_soak_hours']}h bot soak")
-        return dict(verdict, action="merge")
-    need(status == "diverged" and is_int(behind) and behind > 0, f"U1: compare status {status!r}")
-    # BEHIND. Only the bot can rebase its commit and keep it signed: dependabot
-    # does on `@dependabot rebase`. Nothing does that for a repin commit.
-    need(kind == "dependabot", "B5: behind, and nothing can rebase a repin commit and keep it signed")
-    hour, day = rebase_asks(timeline, now)
-    need(hour == 0, "B6: behind, and a rebase was asked within the hour")
-    need(day < classes["sweep"]["max_refreshes_per_pr_per_day"],
-         "B6: behind, and the rebase requests for today are capped")
-    return dict(verdict, action="refresh")
+    else:
+        need(status == "diverged" and is_int(behind) and behind > 0, f"U1: compare status {status!r}")
+        # BEHIND. U2 does not apply: `base.sha` is the old base by definition.
+        # The merge is still bound to the head sha. Two independent readings
+        # must both say an out-of-date branch may merge: the rule itself, and
+        # GitHub's verdict for this pull request.
+        # A full page: GitHub answers 30 rules without `per_page`, and
+        # `strict_base` can only tell a list of PAGE or more as truncated.
+        rules = api.get(f"repos/{owner}/{name}/rules/branches/"
+                        f"{urllib.parse.quote(base, safe='/')}?per_page={PAGE}")
+        need(not strict_base(rules), "U4: behind, and the base requires an up-to-date branch")
+        need(dig(pr, "mergeable_state") == "clean",  # U5 (ADR-1109)
+             f"U5: behind, and GitHub calls it {pr.get('mergeable_state')!r}, not 'clean'")
+    # B10, parity with T5: the head must have sat on the branch this long.
+    # Every other gate passed, so the row says when it is due (the follow-up).
+    soak = datetime.timedelta(hours=classes["sweep"]["bot_soak_hours"])
+    if now - pushed < soak:
+        raise NotYet(f"B10: the head is younger than the {classes['sweep']['bot_soak_hours']}h bot soak",
+                     pushed + soak)
+    return dict(verdict, action="merge")
 
 
 def route(api, owner, name, n, classes, now):
@@ -761,6 +806,8 @@ def judge(api, owner, name, n, classes, now):
     """`route`, with every failure of any kind turned into a Skip row."""
     try:
         return route(api, owner, name, n, classes, now)
+    except NotYet as later:
+        return {"repo": name, "n": n, "action": "skip", "reason": str(later), "due": later.at}
     except Skip as skip:
         return {"repo": name, "n": n, "action": "skip", "reason": str(skip)}
     except Exception as exc:  # fail closed: an error is never a merge
@@ -837,8 +884,9 @@ def sweep(api, owner, classes, now):
                          "reason": f"{len(prs)} open pull requests may be truncated: no bot pull request read"})
             continue
         found = [pr for pr in prs if bot_candidate(pr)]
-        # B4. A repin run has opened a NEW pull request on the SAME head branch
-        # while an older one stayed open (task-db #122/#125, 2026-10-31). Only
+        # B4. A repin run has opened a NEW pull request, on a new `repin/...`
+        # branch named for the newer tags, while an older one stayed open
+        # (task-db #122/#125, 2026-10-31). Only
         # the newest repin pull request is judged; an older one is left for a
         # person. Every write is keyed on the number and the head sha anyway.
         repins = [pr["number"] for pr in found if pr["head"]["ref"].startswith("repin/")]
@@ -856,9 +904,11 @@ def plan(rows, max_merges):
 
     Adoption rows are planned first, exactly as before. A bot row (ADR-1106)
     then takes what is left (M4), and at most ONE write per repository per run,
-    none in a repository an adoption write already holds (M5): strict status
-    checks leave every sibling BEHIND after a merge, so a second write there
-    is wasted CI or a refused merge."""
+    none in a repository an adoption write already holds (M5). With strict
+    checks off a sibling stays mergeable while BEHIND, but a merge makes GitHub
+    recompute every sibling's `mergeable` (null for a while: U3) and two bumps
+    of one lock file conflict, so the second write waits for the next run,
+    which judges it on the new base. `follow_up` asks for that run at once."""
     out, merges = [], 0
     for row in rows:
         if row.get("kind"):
@@ -886,6 +936,40 @@ def plan(rows, max_merges):
         out.append({"repo": row["repo"], "n": row["n"], "head": row["head"], "action": row["action"],
                     "kind": row["kind"]})
     return out
+
+
+def hop_input(text):
+    """The `hop` input. Empty (the schedule sends none) is 0; anything else must
+    be one digit from 0 to MAX_HOPS."""
+    if text == "":
+        return 0
+    if not (isinstance(text, str) and HOP_INPUT.fullmatch(text)) or int(text) > MAX_HOPS:
+        raise Refusal(f"hop must be an integer from 0 to {MAX_HOPS}")
+    return int(text)
+
+
+def follow_up(rows, now, hop):
+    """ADR-1108. Minutes until the next run should start, or None for no follow-up.
+
+    A row with `due` (B10) is due a minute after that time; a row the plan held
+    back (M4, M5) is due at once, one minute, after this run's `act`. Nothing
+    else is: a red, pending or conflicting pull request waits for the cron. A
+    run at MAX_HOPS, or one whose soonest row is MAX_WAIT_MINUTES or more away,
+    asks for nothing."""
+    if hop >= MAX_HOPS:
+        return None
+    soonest = None
+    for row in rows:
+        if isinstance(row.get("due"), datetime.datetime):
+            minutes = max(1, math.ceil((row["due"] - now).total_seconds() / 60) + 1)
+        elif row.get("action") == "skip" and str(row.get("reason", "")).startswith(HELD):
+            minutes = 1
+        else:
+            continue
+        soonest = minutes if soonest is None else min(soonest, minutes)
+    if soonest is None or soonest >= MAX_WAIT_MINUTES:
+        return None
+    return soonest
 
 
 def act(reader, writer, owner, name, n, head, action, classes, now, kind=""):
@@ -939,23 +1023,19 @@ def act_bot(reader, writer, owner, name, n, head, action, verdict):
     scratch (B3 included) on this same head. A merge is the same squash at the
     head sha as an adoption merge (GitHub refuses it if the head moved), then
     the bot's branch is deleted (`delete_branch_on_merge` is off estate-wide).
-    A refresh is one `@dependabot rebase` comment: dependabot rewrites and
-    re-signs its own commit, so B3 still holds on the new head. Never
-    update-branch: that adds a merge commit."""
-    if action == "merge":
-        try:
-            writer.merge_pr(owner, name, n, head, f"{verdict['title']} (#{n})", BOT_MESSAGE)
-        except Refusal as exc:
-            if REFUSED.search(str(exc)):
-                raise Skip(f"M2: the merge was refused: {exc}") from None
-            raise Refusal(f"M2: the merge call was denied: {exc}") from None
-        after = reader.get(f"repos/{owner}/{name}/pulls/{n}", fresh=True)
-        need(dig(after, "merged") is True, "M3: not merged after the merge call")
-        writer.delete_branch(owner, name, verdict["branch"])
-        return f"merged {owner}/{name}#{n} as {dig(after, 'merge_commit_sha')}; deleted {verdict['branch']}"
-    need(verdict["kind"] == "dependabot", "B5: only dependabot can be asked to rebase")
-    writer.comment(owner, name, n, REBASE)
-    return f"asked dependabot to rebase {owner}/{name}#{n} (head {head})"
+    A bot verdict is never a refresh. Never update-branch: that adds a merge
+    commit."""
+    need(action == "merge", f"M1: a bot leg only merges, not {action!r}")
+    try:
+        writer.merge_pr(owner, name, n, head, f"{verdict['title']} (#{n})", BOT_MESSAGE)
+    except Refusal as exc:
+        if REFUSED.search(str(exc)):
+            raise Skip(f"M2: the merge was refused: {exc}") from None
+        raise Refusal(f"M2: the merge call was denied: {exc}") from None
+    after = reader.get(f"repos/{owner}/{name}/pulls/{n}", fresh=True)
+    need(dig(after, "merged") is True, "M3: not merged after the merge call")
+    writer.delete_branch(owner, name, verdict["branch"])
+    return f"merged {owner}/{name}#{n} as {dig(after, 'merge_commit_sha')}; deleted {verdict['branch']}"
 
 
 # --------------------------------------------------------------------------
@@ -1007,13 +1087,6 @@ class SweepGh(fan_out.Gh):
         self._api("-X", "PUT", f"repos/{fan_out.q(owner)}/{fan_out.q(name)}/pulls/{int(n)}/merge",
                   payload={"merge_method": "squash", "sha": head,
                            "commit_title": title, "commit_message": message})
-
-    def comment(self, owner, name, n, body):
-        """ADR-1106. The one comment the sweeper writes: `@dependabot rebase`."""
-        if body != REBASE:
-            raise Refusal(f"refusing to comment {body!r}: only {REBASE!r}")
-        self._api("-X", "POST", f"repos/{fan_out.q(owner)}/{fan_out.q(name)}/issues/{int(n)}/comments",
-                  payload={"body": body})
 
     def delete_branch(self, owner, name, branch):
         """A merged bot pull request's branch, and no other. Gone already (404,
@@ -1109,10 +1182,17 @@ def main(argv):
         if args.command == "evaluate":
             if args.live and not env_live(classes):
                 raise Refusal("--live, but the run is not armed")
+            hop = hop_input(os.environ.get("HOP", ""))
             reader = SweepGh(os.environ.get("GH_TOKEN", ""))
-            rows, todo = sweep(reader, args.owner, classes, now_utc())
+            now = now_utc()
+            rows, todo = sweep(reader, args.owner, classes, now)
             fan_out.summary(report(rows, args.live))
             fan_out.output("plan", json.dumps(todo if args.live else [], separators=(",", ":")))
+            minutes = follow_up(rows, now, hop) if args.live else None
+            if minutes is not None:
+                fan_out.output("follow_up", str(minutes))
+                fan_out.output("next_hop", str(hop + 1))
+                fan_out.summary(f"\nFollow-up: the next run in {minutes} min (hop {hop + 1} of {MAX_HOPS}).\n")
             print(f"{len(rows)} rows to the step summary; {len(todo)} would act "
                   f"({'live' if args.live else 'dry'}).")
             # NO INFRA-GREEN. `judge` turns an API error into a skip row so one

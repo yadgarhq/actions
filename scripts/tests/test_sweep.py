@@ -94,9 +94,6 @@ class Fake:
         self.writes.append(("rewrite", owner, name, branch, parent, path, text, message, exists,
                             expect))
 
-    def comment(self, owner, name, n, body):
-        self.writes.append(("comment", owner, name, n, body))
-
     def delete_branch(self, owner, name, branch):
         self.writes.append(("delete", owner, name, branch))
 
@@ -1136,8 +1133,8 @@ def test_only_sweep_py_can_merge():
 def test_nothing_calls_update_branch():
     """ADR-0693: an adoption pull request is refreshed by `rewrite_branch`. A
     bot pull request (ADR-1106) is never update-branched either: that merges
-    the base in, and a merge commit is refused by B3. Dependabot rebases its
-    own branch on `@dependabot rebase`, and re-signs it."""
+    the base in, and a merge commit is refused by B3. A behind bot pull request
+    merges as it is once the base no longer requires up-to-date branches."""
     for path in (SCRIPT, WORKFLOW):
         assert "/update-branch" not in path.read_text()
         assert "pr update-branch" not in path.read_text()
@@ -1158,9 +1155,14 @@ def mints(job):
 
 
 def test_the_workflow_grants_no_write_at_the_top_or_on_a_job():
+    """One exception: the follow-up job dispatches this workflow, and needs
+    `actions: write` for that and nothing else."""
     wf = workflow()
     assert wf["permissions"] == {}
-    for job in wf["jobs"].values():
+    for name, job in wf["jobs"].items():
+        if name == "follow-up":
+            assert job["permissions"] == {"actions": "write"}
+            continue
         assert all(level in ("read", "none") for level in job["permissions"].values())
 
 
@@ -1189,17 +1191,17 @@ def test_every_write_mint_names_one_repository_and_only_contents_write():
         "permission-contents": "write"}
 
 
-def test_a_bot_leg_mints_for_one_repository_what_a_merge_and_a_comment_need():
+def test_a_bot_leg_mints_for_one_repository_what_a_merge_needs():
     """ADR-1106. A dependabot pull request can change `.github/workflows/`, and
-    an App may not merge that without `workflows: write`; the rebase comment
-    needs `pull_requests: write`. Only a leg whose kind is a known bot gets them."""
+    an App may not merge that without `workflows: write`. The squash merge and
+    the branch delete need `contents: write`. No `pull_requests: write`: the
+    sweeper no longer comments. Only a leg whose kind is a known bot gets them."""
     assert [m["id"] for m in mints("act")] == ["app", "app-bot"]
     [bot] = [m for m in mints("act") if m["id"] == "app-bot"]
     assert bot["if"] == "${{ matrix.kind == 'dependabot' || matrix.kind == 'repin' }}"
     assert bot["with"]["repositories"] == "${{ matrix.repo }}"
     assert {k: v for k, v in bot["with"].items() if k.startswith("permission-")} == {
-        "permission-contents": "write", "permission-pull-requests": "write",
-        "permission-workflows": "write"}
+        "permission-contents": "write", "permission-workflows": "write"}
     names = [s.get("id") or s.get("name") for s in steps("act")]
     assert names.index("leg") < names.index("app-bot")
     [go] = [s for s in steps("act") if s.get("name") == "merge or refresh"]
@@ -1382,7 +1384,7 @@ def test_the_wait_job_has_time_for_the_longest_wait():
 #
 #   task-106     dependabot, one verified dependabot commit, up to date, green:
 #                the merge baseline. Its timeline holds dependabot's own
-#                force-push, the rebase a `@dependabot rebase` comment asks for.
+#                force-push (a rebase dependabot made of its own accord).
 #   gateway-159  dependabot, green, but carrying m-agahi's merge commit from a
 #                merge-method update-branch: B3 leaves it for a person.
 #   gateway-160  repin, really BEHIND, green. Its commit is the App's unsigned
@@ -1407,7 +1409,6 @@ class BotCase(Case):
 
 DEPENDABOT_BRANCH = "dependabot/cargo/minor-and-patch-3a28fe187f"
 REPIN_BRANCH = "repin/dial-v0.2.28_lifecycle-v0.3.4_telemetry-v0.2.9"
-REBASE = "@dependabot rebase"
 
 
 def up_to_date(case):
@@ -1420,11 +1421,32 @@ def up_to_date(case):
 
 
 def behind(case):
+    """Behind the base by one commit, as GitHub reports it once the base does not
+    require up-to-date branches: `mergeable_state` `clean` (chart#84 and
+    iam-db#127, measured 2026-11-01 after strict was turned off)."""
     tip = "9" * 40
     old = case.compare
     case.data[f"{case.r}/git/ref/heads/main"]["object"]["sha"] = tip
     case.data[f"{case.r}/compare/{tip}...{case.head}"] = dict(old, status="diverged", behind_by=1)
     case.tip = tip
+    case.pr["mergeable_state"] = "clean"
+    return case
+
+
+RULES = "rules/branches/main?per_page=100"
+
+
+def rules(case):
+    return case.data[f"{case.r}/{RULES}"]
+
+
+def strict(case):
+    """The base requires up-to-date branches again: GitHub calls a behind pull
+    request `behind` (gateway#160 as recorded on 2026-10-31, strict on)."""
+    for rule in rules(case):
+        if rule["type"] == "required_status_checks":
+            rule["parameters"]["strict_required_status_checks_policy"] = True
+    case.pr["mergeable_state"] = "behind"
     return case
 
 
@@ -1467,15 +1489,101 @@ def test_an_up_to_date_green_bot_pull_request_is_merged(make, kind, branch):
     assert (got["kind"], got["branch"]) == (kind, branch)
 
 
-def test_a_behind_green_dependabot_pull_request_asks_dependabot_to_rebase():
+def test_a_behind_green_dependabot_pull_request_merges_when_the_base_is_not_strict():
+    """Strict is off (Max, 2026-11-01): GitHub calls a behind, green pull request
+    CLEAN, and it merges at its head sha like an up-to-date one."""
     got = dependabot_behind().judge()
-    assert got["action"] == "refresh", got
+    assert got["action"] == "merge", got
     assert got["kind"] == "dependabot"
 
 
-def test_a_behind_repin_pull_request_has_no_refresh():
-    """Nothing can rebase a repin commit and keep it the App's signed commit."""
-    skipped(signed(BotCase("gateway-160")), "B5")
+def test_a_behind_signed_repin_pull_request_merges_when_the_base_is_not_strict():
+    got = signed(behind(BotCase("gateway-160"))).judge()
+    assert got["action"] == "merge", got
+    assert got["kind"] == "repin"
+
+
+def test_the_recorded_behind_repin_pull_request_under_strict_is_skipped():
+    """gateway#160 as recorded under strict: `mergeable_state` `behind`."""
+    case = signed(BotCase("gateway-160"))
+    assert case.pr["mergeable_state"] == "behind"
+    strict(case)
+    skipped(case, "U4")
+
+
+@pytest.mark.parametrize("make", [dependabot_behind, lambda: signed(behind(BotCase("gateway-160")))])
+def test_a_behind_bot_pull_request_on_a_strict_base_is_skipped_not_asked_to_rebase(make):
+    """Dependabot ignores `@dependabot rebase` from the App (chart#84: two
+    comments, no reaction, head unchanged), so a strict base is a plain skip."""
+    case = strict(make())
+    skipped(case, "U4")
+    # GitHub's own verdict alone, with the rule read as not strict, still skips.
+    for rule in rules(case):
+        if rule["type"] == "required_status_checks":
+            rule["parameters"]["strict_required_status_checks_policy"] = False
+    skipped(case, "U5")
+
+
+@pytest.mark.parametrize("state", ["behind", "blocked", "dirty", "unknown", "unstable", "has_hooks",
+                                   "draft", None, "", 7])
+def test_a_behind_bot_pull_request_github_does_not_call_clean_is_skipped(state):
+    case = dependabot_behind()
+    case.pr["mergeable_state"] = state
+    skipped(case, "U5")
+
+
+@pytest.mark.parametrize("change", [
+    lambda r: r.clear() or r.append({"type": "required_status_checks"}),
+    lambda r: [x["parameters"].update(strict_required_status_checks_policy="false")
+               for x in r if x["type"] == "required_status_checks"],
+    lambda r: [x["parameters"].pop("strict_required_status_checks_policy")
+               for x in r if x["type"] == "required_status_checks"],
+    lambda r: r.append({"type": "required_status_checks",
+                        "parameters": {"strict_required_status_checks_policy": True}}),
+    lambda r: r.append("not a rule"),
+])
+def test_rules_that_require_or_may_require_up_to_date_are_a_skip(change):
+    case = dependabot_behind()
+    change(rules(case))
+    skipped(case, "U4")
+
+
+def test_unreadable_rules_are_a_skip():
+    case = dependabot_behind()
+    del case.data[f"{case.r}/{RULES}"]
+    assert case.judge()["action"] == "skip"
+    case = dependabot_behind()
+    case.data[f"{case.r}/{RULES}"] = {"rules": []}
+    skipped(case, "U4")
+    case = dependabot_behind()
+    rules(case).extend({"type": "deletion"} for _ in range(100))
+    skipped(case, "U4")
+
+
+def test_the_rules_are_read_a_full_page_at_a_time():
+    """Adversarial review of actions#152. Without `per_page` GitHub answers 30
+    rules, which `strict_base` cannot tell from a complete list: the strict rule
+    may sit on page two. The query-less answer here is that first page (no
+    status-check rule, GitHub calls the pull request clean); it must never be
+    the one read."""
+    case = strict(dependabot_behind())
+    case.data[f"{case.r}/rules/branches/main"] = (
+        [{"type": "deletion"}] * 30)
+    case.pr["mergeable_state"] = "clean"
+    skipped(case, "U4")
+
+
+def test_a_base_with_no_rules_at_all_admits_a_clean_behind_pull_request():
+    case = dependabot_behind()
+    rules(case).clear()
+    assert case.judge()["action"] == "merge"
+
+
+def test_an_up_to_date_bot_pull_request_reads_no_rules():
+    """The up-to-date path is unchanged: GitHub's merge is the gate there."""
+    case = dependabot_merge()
+    del case.data[f"{case.r}/{RULES}"]
+    assert case.judge()["action"] == "merge"
 
 
 def test_a_major_dependabot_bump_qualifies_like_any_other():
@@ -1640,40 +1748,6 @@ def test_a_compare_neither_ahead_nor_behind_is_skipped():
     skipped(case, "U1")
 
 
-# the rebase request and its cap
-
-
-def rebase_comment(case, hours_ago, actor=BOT, body=REBASE):
-    when = (BOT_NOW - datetime.timedelta(hours=hours_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    case.timeline.append({"event": "commented", "actor": {"id": actor}, "body": body,
-                          "created_at": when})
-
-
-def test_a_rebase_asked_within_the_hour_is_not_asked_again():
-    case = dependabot_behind()
-    rebase_comment(case, 0.5)
-    skipped(case, "B6")
-    case.timeline.pop()
-    rebase_comment(case, 2)
-    assert case.judge()["action"] == "refresh"
-
-
-def test_the_rebase_requests_per_day_are_capped():
-    case = dependabot_behind()
-    for hours in (2, 5, 9):
-        rebase_comment(case, hours)
-    skipped(case, "B6")
-    case.timeline.pop()
-    assert case.judge()["action"] == "refresh"
-
-
-def test_only_the_apps_own_rebase_comments_count():
-    case = dependabot_behind()
-    rebase_comment(case, 0.5, actor=7)
-    rebase_comment(case, 0.5, body="looks fine")
-    assert case.judge()["action"] == "refresh"
-
-
 # the act legs
 
 
@@ -1810,11 +1884,22 @@ def test_a_repin_merge_deletes_the_repin_branch():
     assert writes[-1] == ("delete", OWNER, "gateway", REPIN_BRANCH)
 
 
-def test_a_dependabot_refresh_is_one_rebase_comment():
+def test_a_behind_bot_merge_squashes_at_the_head_and_deletes_the_branch():
     case = dependabot_behind()
-    done, writes = bot_act(case, "refresh", "dependabot")
-    assert writes == [("comment", OWNER, "task", 106, REBASE)]
-    assert done.startswith("asked dependabot to rebase yadgarhq/task#106")
+    done, writes = bot_act(case, "merge", "dependabot")
+    assert done.startswith("merged yadgarhq/task#106")
+    assert [w[0] for w in writes] == ["merge", "delete"]
+    assert writes[0][4]["sha"] == case.head
+
+
+def test_a_bot_leg_handed_a_refresh_writes_nothing():
+    """No bot verdict is a refresh any more, so `act` refuses it at M1."""
+    for case in (dependabot_merge(), dependabot_behind(), strict(dependabot_behind())):
+        writes = []
+        with pytest.raises(sweep.Skip, match="M1"):
+            sweep.act(Fake(case.data, writes), Fake(case.data, writes), OWNER, case.repo, case.n,
+                      case.head, "refresh", classes(), BOT_NOW, "dependabot")
+        assert writes == []
 
 
 def test_a_refused_bot_merge_is_a_skip_and_deletes_nothing():
@@ -1868,16 +1953,11 @@ def test_a_bot_head_that_moved_since_evaluate_is_not_merged():
 # the real client
 
 
-def test_the_real_client_comments_exactly_the_rebase_command():
-    gh = sweep.SweepGh("token")
-    calls = []
-    gh._api = lambda *a, **k: calls.append((a, k))
-    gh.comment(OWNER, "task", 106, REBASE)
-    assert calls == [(("-X", "POST", "repos/yadgarhq/task/issues/106/comments"),
-                      {"payload": {"body": REBASE}})]
-    with pytest.raises(Refusal):
-        gh.comment(OWNER, "task", 106, "@dependabot merge")
-    assert len(calls) == 1
+def test_the_sweeper_writes_no_comment():
+    """`@dependabot rebase` from the App did nothing (chart#84, 2026-11-01):
+    dependabot ignored two of them. The comment path is gone."""
+    assert not hasattr(sweep.SweepGh, "comment") and not hasattr(sweep, "REBASE")
+    assert "/comments" not in SCRIPT.read_text()
 
 
 @pytest.mark.parametrize("branch", ["main", "actions-adopt", "repin", "repin/", "repin/../main",
@@ -1952,7 +2032,7 @@ def test_a_bot_write_yields_its_repository_to_an_adoption_write():
 
 def test_one_bot_write_per_repository_per_run():
     rows = [{"repo": "a", "n": 1, "head": "a" * 40, "action": "merge", "kind": "dependabot"},
-            {"repo": "a", "n": 2, "head": "b" * 40, "action": "refresh", "kind": "dependabot"}]
+            {"repo": "a", "n": 2, "head": "b" * 40, "action": "merge", "kind": "dependabot"}]
     assert [t["n"] for t in sweep.plan(rows, 10)] == [1]
     assert rows[1]["reason"].startswith("M5")
 
@@ -2077,17 +2157,184 @@ def test_the_bot_soak_counts_from_the_push_of_the_head_not_the_commit_date():
     skipped(case, "B10")
 
 
-def test_a_behind_pull_request_is_asked_to_rebase_inside_the_soak():
-    case = dependabot_behind()
-    assert case.judge(cfg=classes(bot_soak_hours=24))["action"] == "refresh"
+def test_a_behind_pull_request_inside_the_soak_is_not_merged():
+    """B10 holds on the behind path too."""
+    skipped(dependabot_behind(), "B10", cfg=classes(bot_soak_hours=24))
 
 
 @pytest.mark.parametrize("make", [dependabot_merge, dependabot_behind])
 def test_a_timeline_that_may_be_truncated_is_skipped(make):
-    """A full page hides older events: the force-push actors (B3) and the
-    rebase-ask caps (B6) would read only part of it."""
+    """A full page hides older events: the force-push actors (B3) would read
+    only part of it."""
     case = make()
     case.timeline.extend({"event": "labeled"} for _ in range(100 - len(case.timeline)))
     skipped(case, "B3: the timeline may be truncated")
     case.timeline.pop()
-    assert case.judge()["action"] in ("merge", "refresh")
+    assert case.judge()["action"] == "merge"
+
+
+# --------------------------------------------------------------------------
+# the follow-up: the next run, asked for when a bot pull request is due soon
+# --------------------------------------------------------------------------
+#
+# Max, 2026-11-01: bot merges should land within minutes, not at the next cron
+# (GitHub fired the schedule every 3-4 h on 2026-10-31). No event from another
+# repository reaches this one without a new credential or a webhook, so the run
+# that sees a bot pull request held back only by time (B10) or by its own plan
+# (M4, M5) dispatches the next run for when it is due. Bounded by `hop`.
+
+PUSHED = datetime.datetime(2026, 10, 31, 21, 57, 31, tzinfo=datetime.timezone.utc)
+
+
+def test_a_bot_pull_request_inside_the_soak_says_when_it_is_due():
+    case = dependabot_merge()
+    got = skipped(case, "B10", now=PUSHED + datetime.timedelta(minutes=10))
+    assert got["due"] == PUSHED + datetime.timedelta(minutes=30)
+
+
+def test_only_the_soak_makes_a_row_due():
+    case = dependabot_merge()
+    case.pr["mergeable"] = None
+    got = skipped(case, "U3", now=PUSHED + datetime.timedelta(minutes=10))
+    assert "due" not in got
+
+
+def test_the_follow_up_waits_for_the_soonest_due_row_plus_a_minute():
+    rows = [{"repo": "a", "n": 1, "action": "skip", "reason": "B10: x", "due": NOW + datetime.timedelta(minutes=20)},
+            {"repo": "b", "n": 2, "action": "skip", "reason": "B10: x",
+             "due": NOW + datetime.timedelta(minutes=7, seconds=10)},
+            {"repo": "c", "n": 3, "action": "skip", "reason": "V1: red"}]
+    assert sweep.follow_up(rows, NOW, 0) == 9
+
+
+def test_a_row_the_plan_held_back_is_due_at_once():
+    for reason in ("M5: one write per repository per run, and this one has it",
+                   "M4: the cap of 10 merges per run is reached"):
+        rows = [{"repo": "a", "n": 1, "action": "skip", "reason": reason, "kind": "dependabot"}]
+        assert sweep.follow_up(rows, NOW, 0) == 1
+
+
+def test_a_due_time_already_past_is_due_at_once():
+    rows = [{"repo": "a", "n": 1, "action": "skip", "reason": "B10", "due": NOW - datetime.timedelta(minutes=5)}]
+    assert sweep.follow_up(rows, NOW, 0) == 1
+
+
+def test_no_follow_up_without_a_due_row_beyond_the_cap_or_past_the_last_hop():
+    assert sweep.follow_up([{"repo": "a", "n": 1, "action": "merge"}], NOW, 0) is None
+    assert sweep.follow_up([], NOW, 0) is None
+    far = [{"repo": "a", "n": 1, "action": "skip", "reason": "B10",
+            "due": NOW + datetime.timedelta(minutes=sweep.MAX_WAIT_MINUTES)}]
+    assert sweep.follow_up(far, NOW, 0) is None
+    held = [{"repo": "a", "n": 1, "action": "skip", "reason": "M5: x"}]
+    assert sweep.follow_up(held, NOW, sweep.MAX_HOPS - 1) == 1
+    assert sweep.follow_up(held, NOW, sweep.MAX_HOPS) is None
+
+
+def test_an_adoption_row_held_by_the_plan_is_due_too():
+    rows = [{"repo": "a", "n": 1, "action": "skip", "reason": "M4: the cap of 1 merges per run is reached"}]
+    assert sweep.follow_up(rows, NOW, 0) == 1
+
+
+@pytest.mark.parametrize("text, hop", [("", 0), ("0", 0), ("3", 3), (str(6), 6)])
+def test_the_hop_input_is_an_integer_from_zero_to_the_last_hop(text, hop):
+    assert sweep.MAX_HOPS == 6
+    assert sweep.hop_input(text) == hop
+
+
+@pytest.mark.parametrize("text", ["7", "-1", "01", " 1", "1.0", "x", "1;rm", "99"])
+def test_a_hop_input_out_of_range_is_refused(text):
+    with pytest.raises(Refusal):
+        sweep.hop_input(text)
+
+
+def live_evaluate(tmp_path, monkeypatch, data, now, hop="", **sweep_overrides):
+    out = tmp_path / "out"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary"))
+    monkeypatch.setenv("EVENT", "schedule")
+    monkeypatch.setenv("REF", "refs/heads/main")
+    monkeypatch.setenv("HOP", hop)
+    armed = classes(live=True, **sweep_overrides)
+    monkeypatch.setattr(sweep, "load", lambda text: armed)
+    monkeypatch.setattr(sweep, "SweepGh", lambda token: Fake(data))
+    monkeypatch.setattr(sweep, "now_utc", lambda: now)
+    code = sweep.main(["evaluate", "--owner", OWNER, "--live"])
+    return code, outputs(out) if out.exists() else {}
+
+
+def test_a_live_evaluate_asks_for_the_next_run_when_a_bot_pull_request_is_due(tmp_path, monkeypatch):
+    data = bot_estate(dependabot_merge())
+    code, out = live_evaluate(tmp_path, monkeypatch, data, PUSHED + datetime.timedelta(minutes=10), "2")
+    assert code == 0
+    assert out == {"plan": "[]", "follow_up": "21", "next_hop": "3"}
+
+
+def test_a_live_evaluate_with_nothing_due_asks_for_nothing(tmp_path, monkeypatch):
+    data = bot_estate(dependabot_merge())
+    code, out = live_evaluate(tmp_path, monkeypatch, data, BOT_NOW)
+    assert code == 0
+    assert set(out) == {"plan"} and out["plan"] != "[]"
+
+
+def test_the_last_hop_asks_for_nothing(tmp_path, monkeypatch):
+    data = bot_estate(dependabot_merge())
+    _, out = live_evaluate(tmp_path, monkeypatch, data, PUSHED + datetime.timedelta(minutes=10),
+                           str(sweep.MAX_HOPS))
+    assert out == {"plan": "[]"}
+
+
+def test_a_bad_hop_input_reds_the_evaluate_run(tmp_path, monkeypatch):
+    data = bot_estate(dependabot_merge())
+    code, out = live_evaluate(tmp_path, monkeypatch, data, BOT_NOW, "9")
+    assert code == 1 and "follow_up" not in out
+
+
+def test_a_dry_evaluate_never_asks_for_a_follow_up(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary"))
+    monkeypatch.setattr(sweep, "SweepGh", lambda token: Fake(bot_estate(dependabot_merge())))
+    monkeypatch.setattr(sweep, "now_utc", lambda: PUSHED + datetime.timedelta(minutes=10))
+    assert sweep.main(["evaluate", "--owner", OWNER, "--classes", str(REPO / "classes.json")]) == 0
+    assert outputs(out) == {"plan": "[]"}
+
+
+def test_the_workflow_takes_a_hop_input_and_hands_it_to_evaluate():
+    wf = workflow()
+    hop = wf[True]["workflow_dispatch"]["inputs"]["hop"]
+    assert hop["type"] == "string" and hop["default"] == "0"
+    [step] = [s for s in steps("evaluate") if s.get("id") == "evaluate"]
+    assert step["env"]["HOP"] == "${{ inputs.hop }}"
+    outs = wf["jobs"]["evaluate"]["outputs"]
+    assert outs["follow_up"] == "${{ steps.evaluate.outputs.follow_up }}"
+    assert outs["next_hop"] == "${{ steps.evaluate.outputs.next_hop }}"
+
+
+def test_the_follow_up_job_only_dispatches_this_workflow_live_after_act():
+    job = workflow()["jobs"]["follow-up"]
+    assert job["needs"] == ["evaluate", "act"]
+    assert job["if"] == ("${{ !cancelled() && needs.evaluate.outputs.live == 'true'"
+                         " && needs.evaluate.outputs.follow_up != '' }}")
+    assert job["permissions"] == {"actions": "write"}
+    assert "concurrency" not in job
+    assert job["timeout-minutes"] >= sweep.MAX_WAIT_MINUTES + 1
+    [step] = job["steps"]
+    assert "uses" not in step
+    assert step["env"] == {"GH_TOKEN": "${{ github.token }}", "REPO": "${{ github.repository }}",
+                           "MINUTES": "${{ needs.evaluate.outputs.follow_up }}",
+                           "HOP": "${{ needs.evaluate.outputs.next_hop }}"}
+    assert "${{" not in step["run"]
+    assert 'repos/${REPO}/actions/workflows/sweep.yaml/dispatches' in step["run"]
+    assert '-f "inputs[dry_run]=false"' in step["run"] and '-f "inputs[hop]=${HOP}"' in step["run"]
+    assert "-f ref=main" in step["run"]
+    assert mints("follow-up") == []
+
+
+def test_a_bot_merge_the_plan_held_back_asks_for_the_next_run_at_once(tmp_path, monkeypatch):
+    """End to end: `plan` marks the held row in place (M4 here), and
+    `follow_up` reads that mark from the same rows."""
+    data = bot_estate(dependabot_merge(), adoption=("store-45",))
+    code, out = live_evaluate(tmp_path, monkeypatch, data, BOT_NOW, max_merges=1)
+    assert code == 0
+    assert [t["repo"] for t in json.loads(out["plan"])] == ["store"]
+    assert (out["follow_up"], out["next_hop"]) == ("1", "1")
