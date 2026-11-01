@@ -39,8 +39,9 @@ checked nothing.
 WHAT IT DOES NOT DO. It does not cover the apt `shellcheck` or `pre-commit`
 itself, which still float. It does not check that a read step really reads
 `versions.yaml` (`test_tool_versions.py` and the workflow wiring do that). The
-image toolchain `rust-image` is spelt two ways: a `rust:` base-image tag that
-names major.minor only, and a full rustup toolchain. A site marked `prefix` matches when its dotted
+one Rust version `rust-toolchain` (ADR-1118) is spelt three ways: a workflow read,
+a `rust:` base-image tag that names major.minor only, and a full rustup toolchain
+in a Containerfile. A site marked `prefix` matches when its dotted
 value is a leading part of the canonical one. It does not change any pin. It does not read
 `scripts/tests/`. It does not check action SHAs (Dependabot moves those). The
 `azure/setup-helm` steps are also held equal to each other by
@@ -125,10 +126,12 @@ SCANNERS = {
         uses_input("aquasecurity/trivy-action"),
         ("line", re.compile(rf"^TRIVY_VERSION\s*=\s*{VALUE}")),
     ],
-    "rust-toolchain": [uses_input("dtolnay/rust-toolchain", "toolchain")],
-    # The build images. `rust:1.98-bookworm` names major.minor only, so that
-    # site is a PREFIX match; `--default-toolchain` names the full version.
-    "rust-image": [
+    # ADR-1118: ONE Rust version. The CI toolchain step and the build images
+    # are one tool, so an image can never sit at another value than CI.
+    # `rust:1.99-bookworm` names major.minor only, so that site is a PREFIX
+    # match; `--default-toolchain` names the full version.
+    "rust-toolchain": [
+        uses_input("dtolnay/rust-toolchain", "toolchain"),
         ("line", re.compile(r"^FROM\s+(?:\S*/)?rust:(\d+(?:\.\d+)*)-"), "prefix"),
         ("line", re.compile(r"--default-toolchain\s+v?(\d[\w.]*)")),
     ],

@@ -84,10 +84,10 @@ def test_every_tool_the_task_lists_is_in_versions_yaml():
         "prettier": "3.9.6",
         "pytest": "9.1.1",
         "pyyaml": "6.0.3",
-        # Measured, not chosen: `toolchain: stable` resolved to rustc 1.99.1 in
-        # yadgarhq/gateway run 39572682285 (2026-10-21). The images stay 1.98.0.
+        # ADR-1118: one Rust version org-wide, the latest stable. 1.99.1 is
+        # upstream stable (channel-rust-stable.toml, 2026-10-13), and the CI
+        # toolchain and the build images carry it alike.
         "rust-toolchain": "1.99.1",
-        "rust-image": "1.98.0",
         "python": "3.14",
     }
     for name, version in expected.items():
@@ -229,21 +229,42 @@ def test_a_malformed_sha256_is_refused(tree):
 
 
 def test_a_drifted_rust_image_tag_is_caught_by_its_prefix(tree):
-    rewrite(tree, "containers/rust-build/Containerfile", "rust:1.98-bookworm", "rust:1.97-bookworm")
+    rewrite(tree, "containers/rust-build/Containerfile", "rust:1.99-bookworm", "rust:1.97-bookworm")
     problems = versions_parity.check(tree)
-    assert any(p.startswith("containers/rust-build/Containerfile:3:") and "rust-image" in p for p in problems), problems
+    assert any(p.startswith("containers/rust-build/Containerfile:3:") and "rust-toolchain" in p for p in problems), problems
 
 
 def test_a_drifted_estate_runner_toolchain_is_caught(tree):
-    rewrite(tree, "containers/estate-runner/Containerfile", "--default-toolchain 1.98.0", "--default-toolchain 1.97.0")
+    rewrite(tree, "containers/estate-runner/Containerfile", "--default-toolchain 1.99.1", "--default-toolchain 1.97.0")
     problems = versions_parity.check(tree)
-    assert any(p.startswith("containers/estate-runner/Containerfile:") and "rust-image" in p for p in problems), problems
+    assert any(p.startswith("containers/estate-runner/Containerfile:") and "rust-toolchain" in p for p in problems), problems
 
 
 def test_a_prefix_is_not_a_loose_match(tree):
-    """`1.9` is not a prefix of `1.98.0` in the dotted sense."""
-    rewrite(tree, "containers/rust-build/Containerfile", "rust:1.98-bookworm", "rust:1.9-bookworm")
-    assert any("rust-image" in p for p in versions_parity.check(tree))
+    """`1.9` is not a prefix of `1.99.1` in the dotted sense."""
+    rewrite(tree, "containers/rust-build/Containerfile", "rust:1.99-bookworm", "rust:1.9-bookworm")
+    assert any("rust-toolchain" in p for p in versions_parity.check(tree))
+
+
+# ADR-1118: ONE Rust version. The CI toolchain and the build images are one
+# tool in `versions.yaml`, so they cannot carry two values.
+def test_versions_yaml_names_one_rust_version():
+    tools = yaml.safe_load((REPO / "versions.yaml").read_text())["tools"]
+    assert [name for name in tools if name.startswith("rust")] == ["rust-toolchain"]
+
+
+@pytest.mark.parametrize(
+    "relative, old, new",
+    [
+        ("containers/rust-build/Containerfile", "rust:1.99-bookworm", "rust:1.98-bookworm"),
+        ("containers/estate-runner/Containerfile", "--default-toolchain 1.99.1", "--default-toolchain 1.98.0"),
+    ],
+)
+def test_an_image_behind_the_ci_toolchain_is_refused(tree, relative, old, new):
+    """The split ADR-1118 ended: an image at 1.98 while CI installs 1.99.1."""
+    rewrite(tree, relative, old, new)
+    problems = versions_parity.check(tree)
+    assert any(p.startswith(f"{relative}:") and "rust-toolchain" in p for p in problems), problems
 
 
 # ---------------------------------------------------------------------------

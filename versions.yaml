@@ -38,9 +38,11 @@
 # the upstream checksum file at that version (URLs in
 # scripts/tests/test_versions_parity.py). The install step refuses any other sum.
 #
-# `rust-toolchain` is the toolchain CI installs: `stable` resolved to 1.99.1 when it was pinned
-# (2026-10-21). `rust-image` is the toolchain the build images carry. They differ
-# today; moving either is its own change.
+# `rust-toolchain` is THE Rust version of the org (ADR-1118): the latest stable
+# release, 1.99.1 (upstream channel-rust-stable.toml, 2026-10-13). One value
+# governs the CI toolchain step AND the build images (`rust:` base tag,
+# `--default-toolchain`); every consumer's `rust-toolchain.toml` takes it too.
+# A new stable release moves this line, the image sites and the consumers.
 #
 # `python` is a minor, which `actions/setup-python` resolves to its newest patch.
 #
@@ -55,8 +57,7 @@ tools:
   zizmor: { version: "1.29.0", sites: 1 }
   helm: { version: "3.18.4", sites: 6 }
   trivy: { version: "0.74.0", sites: 6 }
-  rust-toolchain: { version: "1.99.1", sites: 3 }
-  rust-image: { version: "1.98.0", sites: 2 }
+  rust-toolchain: { version: "1.99.1", sites: 5 }
   python: { version: "3.14", sites: 12 }
   prettier: { version: "3.9.6", sites: 2 }
   pytest: { version: "9.1.1", sites: 2 }
