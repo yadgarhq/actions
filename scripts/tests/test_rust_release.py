@@ -436,9 +436,11 @@ def test_armed_reads_a_json_boolean_only():
             rr.armed(bad)
 
 
-def test_classes_json_ships_the_detector_dry():
+def test_classes_json_ships_the_detector_armed():
+    # Armed by ADR-1120 rollout step 6, after dry dispatch 41428639897 on main
+    # showed all 14 repositories current and "nothing to do".
     data = json.loads((REPO / "classes.json").read_text())
-    assert rr.armed(data) is False
+    assert rr.armed(data) is True
 
 
 def test_the_gh_writes_only_rust_release_branches():

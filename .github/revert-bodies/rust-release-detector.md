@@ -31,7 +31,7 @@
   in `ci-pr.yaml`, the `rust_toolchain_previous` output of `detect` and the
   `--previous`/`--base` arguments and `fetch-depth: 2` of `rust_parity`; the
   sweeper's `rust-release` kind (`BOTS["rust-release"]`, `RELEASE_FILES`,
-  `check_release`, `main_text`, `release_index_ok`) and its arm of the bot
+  `check_release`, `main_text`, `release_net`, `release_digest`) and its arm of the bot
   mints in `sweep.yaml`; `classes.json` `rust_bump.release_live`; the comment
   rewordings in `versions.yaml` and the estate runner Containerfile; and their
   tests.
