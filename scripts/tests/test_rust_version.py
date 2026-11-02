@@ -497,3 +497,106 @@ def test_exclude_covers_the_directory_and_below_but_not_a_sibling_prefix():
              "crates/older/Cargo.toml": MEMBER, "./crates/x": "", "crates/a/Cargo.toml": MEMBER}
     assert sorted(p for p in rv.workspace(files) if p.endswith("Cargo.toml")) == [
         "Cargo.toml", "crates/a/Cargo.toml", "crates/older/Cargo.toml"]
+
+
+# ---------------------------------------------------------------------------
+# yaadgaar 529: cargo implicit members, and exact equality.
+# ---------------------------------------------------------------------------
+
+ROOT_PKG = ('[package]\nname = "app"\nrust-version = "1.99.1"\n\n[workspace]\nmembers = []\n\n'
+            '[dependencies]\ncore = { path = "crates/core" }\n')
+CORE = '[package]\nname = "core"\nrust-version = "1.90"\n\n[dependencies]\nleaf = { path = "../leaf" }\n'
+LEAF = '[package]\nname = "leaf"\nrust-version = "1.91"\n'
+
+
+def test_a_path_dependency_of_the_root_is_an_implicit_member_even_with_empty_members():
+    files = {"Cargo.toml": ROOT_PKG, "crates/core/Cargo.toml": CORE,
+             "crates/leaf/Cargo.toml": LEAF, "tests/fixtures/old/Cargo.toml": FIXTURE}
+    assert sorted(rv.workspace(files)) == ["Cargo.toml", "crates/core/Cargo.toml",
+                                           "crates/leaf/Cargo.toml"]
+
+
+def test_an_implicit_member_that_drifts_is_a_finding():
+    files = {"rust-toolchain.toml": TOOLCHAIN.replace("1.98.0", V), "Cargo.toml": ROOT_PKG,
+             "crates/core/Cargo.toml": CORE, "crates/leaf/Cargo.toml": LEAF}
+    found = rv.findings(rv.workspace(files), V)
+    assert [f.split(" ")[0] for f in found] == ["crates/core/Cargo.toml", "crates/leaf/Cargo.toml"]
+
+
+def test_an_excluded_or_outside_path_dependency_is_not_a_member():
+    root = ROOT_PKG.replace("members = []", 'members = []\nexclude = ["crates/core"]')
+    files = {"Cargo.toml": root, "crates/core/Cargo.toml": CORE, "crates/leaf/Cargo.toml": LEAF}
+    assert sorted(rv.workspace(files)) == ["Cargo.toml"]
+    up = ROOT_PKG.replace("crates/core", "../elsewhere")
+    assert sorted(rv.workspace({"Cargo.toml": up, "crates/core/Cargo.toml": CORE})) == ["Cargo.toml"]
+
+
+def test_a_target_specific_path_dependency_is_an_implicit_member():
+    root = ('[package]\nname = "app"\n[workspace]\n'
+            '[target.\'cfg(unix)\'.dependencies]\ncore = { path = "crates/core" }\n')
+    files = {"Cargo.toml": root, "crates/core/Cargo.toml": LEAF}
+    assert "crates/core/Cargo.toml" in rv.workspace(files)
+
+
+def test_a_virtual_workspace_with_empty_members_and_a_workspace_path_dep_is_refused():
+    root = ('[workspace]\nmembers = []\n[workspace.dependencies]\n'
+            'core = { path = "crates/core" }\n')
+    with pytest.raises(rv.Refusal, match="workspace.dependencies"):
+        rv.workspace({"Cargo.toml": root, "crates/core/Cargo.toml": LEAF})
+
+
+def test_a_workspace_path_dep_that_members_name_or_exclude_lists_is_not_refused():
+    base = '[workspace]\nmembers = {m}\nexclude = {e}\n[workspace.dependencies]\ncore = {{ path = "crates/core" }}\n'
+    files = {"crates/core/Cargo.toml": LEAF}
+    named = base.format(m='["crates/core"]', e="[]")
+    assert "crates/core/Cargo.toml" in rv.workspace({"Cargo.toml": named, **files})
+    excluded = base.format(m="[]", e='["crates/core"]')
+    assert sorted(rv.workspace({"Cargo.toml": excluded, **files})) == ["Cargo.toml"]
+
+
+ESTATE_ROOT = (
+    '[workspace]\nresolver = "2"\nmembers = ["crates/harness", "crates/front"]\n\n'
+    '[workspace.package]\nversion = "0.1.0"\nrust-version = "1.99.1"\n\n'
+    '[workspace.dependencies]\nanyhow = "1"\nestate-harness = { path = "crates/harness" }\n')
+ESTATE_HARNESS = '[package]\nname = "estate-harness"\nrust-version.workspace = true\n'
+ESTATE_FRONT = ('[package]\nname = "estate-front"\nrust-version.workspace = true\n\n'
+                '[dependencies]\nanyhow.workspace = true\nestate-harness.workspace = true\n')
+
+
+def test_the_estate_shape_is_unchanged():
+    """The real estate main: both crates are declared members, and front reaches
+    harness through a `[workspace.dependencies]` path. Nothing is refused."""
+    files = {"Cargo.toml": ESTATE_ROOT, "crates/harness/Cargo.toml": ESTATE_HARNESS,
+             "crates/front/Cargo.toml": ESTATE_FRONT}
+    assert sorted(rv.workspace(files)) == sorted(files)
+
+
+def test_a_workspace_inherited_path_dependency_is_an_implicit_member_not_a_refusal():
+    root = ('[workspace]\nmembers = ["crates/a"]\n[workspace.dependencies]\n'
+            'b = { path = "crates/b" }\n')
+    a = '[package]\nname = "a"\n[dependencies]\nb.workspace = true\n'
+    files = {"Cargo.toml": root, "crates/a/Cargo.toml": a, "crates/b/Cargo.toml": LEAF,
+             "tests/fixtures/old/Cargo.toml": FIXTURE}
+    assert sorted(rv.workspace(files)) == ["Cargo.toml", "crates/a/Cargo.toml", "crates/b/Cargo.toml"]
+
+
+def test_a_workspace_dependency_that_is_not_inherited_by_name_is_still_refused():
+    root = ('[workspace]\nmembers = ["crates/a"]\n[workspace.dependencies]\n'
+            'b = { path = "crates/b" }\n')
+    a = '[package]\nname = "a"\n[dependencies]\nc.workspace = true\n'
+    with pytest.raises(rv.Refusal, match="workspace.dependencies"):
+        rv.workspace({"Cargo.toml": root, "crates/a/Cargo.toml": a, "crates/b/Cargo.toml": LEAF})
+
+
+@pytest.mark.parametrize("short", ["1.99", "1.99.0", "1.99.10", "^1.99.1", ">=1.99.1", "1.99.1-beta"])
+def test_parity_is_exact_string_equality_and_says_what_it_expected(short):
+    files = {"rust-toolchain.toml": TOOLCHAIN.replace("1.98.0", V),
+             "Cargo.toml": CARGO.replace('"1.90"', f'"{short}"')}
+    assert rv.findings(files, V) == [
+        f"Cargo.toml [package] rust-version is {short!r}, expected exactly {V!r}"]
+
+
+def test_a_channel_off_by_a_patch_says_what_it_expected():
+    files = {"rust-toolchain.toml": TOOLCHAIN.replace("1.98.0", "1.99"),
+             "Cargo.toml": CARGO.replace('"1.90"', f'"{V}"')}
+    assert rv.findings(files, V) == ["rust-toolchain.toml channel is '1.99', expected exactly '1.99.1'"]

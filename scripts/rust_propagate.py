@@ -29,14 +29,17 @@ root `Cargo.toml` and its declared workspace members. A test fixture or a
 vendored crate is never moved (yaadgaar 527 step 6).
 
 ALL CURRENT. A run whose every row is `current` or `not rust` (and at least
-one `current`) writes the step output `all_current=true`; the Rust release
+one `current`) writes the step output `all_current=true` (and `lagging`, the names of the rest); the Rust release
 detector then ends the grace window `versions.yaml` `previous` opened.
 
 WHICH REPOSITORIES. Every public repository of the owner that is live, not a
 fork and not in `classes.json` `sweep.exclude`, with a `Cargo.toml` at the root
 of its default branch. Listed with `GITHUB_TOKEN`, which sees public
 repositories only: the sweeper merges public ones only (R1), so a private one
-would carry a pull request nobody merges. The write token is then minted for
+would carry a pull request nobody merges. PUBLIC-ONLY IS BY DESIGN for
+`all_current` too (yaadgaar 529): a private Rust consumer does not hold the
+grace window open and is not checked when it closes. None exists today
+(argocd-verify and docs carry no Cargo.toml); the token scope is not widened. The write token is then minted for
 exactly those names; an empty list is a refusal, because an empty
 `repositories:` beside `owner:` mints for every repository.
 
@@ -171,6 +174,14 @@ def all_current(rows):
             and all(r.get("status") in ("current", "not rust") for r in rows))
 
 
+def lagging(rows):
+    """Names of the repositories that keep `all_current` false: any row that is
+    neither `current` nor `not rust`. The Rust release detector names them in
+    the stuck-window warning (yaadgaar 529)."""
+    return sorted(r["repo"].split("/")[-1] for r in rows
+                  if r.get("status") not in ("current", "not rust") and r.get("repo"))
+
+
 def candidates(repos, classes, owner):
     """Public, live, not a fork, not excluded. A listing missing `private`
     reads as private (fail closed)."""
@@ -285,6 +296,7 @@ def do_run(args):
             print(f"::error::{args.owner}/{name}: {fan_out.annotation(str(refusal))}")
     report(rows, version, args.live)
     fan_out.output("all_current", "true" if all_current(rows) else "false")
+    fan_out.output("lagging", ",".join(lagging(rows)))
     return 1 if any(r["status"] == "error" for r in rows) else 0
 
 

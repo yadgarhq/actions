@@ -11,6 +11,8 @@ Run: python3 -m pytest scripts/tests/ -q
 
 import io
 import json
+import os
+import subprocess
 import sys
 import urllib.error
 from pathlib import Path
@@ -527,3 +529,127 @@ def test_a_missing_file_at_the_tip_is_a_refusal():
 
     with pytest.raises(rr.Refusal, match="missing"):
         Missing().files_at("a" * 40)
+
+
+# ---------------------------------------------------------------------------
+# yaadgaar 529: a stuck window warns, and fails red once it is old.
+# ---------------------------------------------------------------------------
+
+DAY = 86400
+T0 = 1_800_000_000
+
+
+def stuck_run(capsys, opened, now, lagging=("dial", "store"), max_days=7):
+    row = go_with(Fake(files=graced()), Net(upstream=NEWER), lagging=lagging, opened=opened,
+                  now=now, max_days=max_days)
+    return row, capsys.readouterr().out
+
+
+def go_with(fake, net, **kw):
+    return rr.run(fake, net, False, True, org_template, **kw)
+
+
+def test_a_young_stuck_window_warns_and_names_the_lagging_repositories(capsys):
+    row, out = stuck_run(capsys, T0, T0 + 3 * DAY)
+    assert row["action"] == "wait" and row["overdue"] is False
+    assert out.startswith("::warning::") and "dial, store" in out and "3 day(s)" in out
+
+
+def test_an_old_stuck_window_is_an_error_row(capsys):
+    row, out = stuck_run(capsys, T0, T0 + 7 * DAY)
+    assert row["overdue"] is True
+    assert out.startswith("::error::") and "7 day(s)" in out and "dial, store" in out
+
+
+def test_one_day_short_of_the_limit_still_warns(capsys):
+    row, out = stuck_run(capsys, T0, T0 + 7 * DAY - 1)
+    assert row["overdue"] is False and out.startswith("::warning::")
+
+
+def test_the_limit_is_the_configured_one(capsys):
+    row, _ = stuck_run(capsys, T0, T0 + 2 * DAY, max_days=2)
+    assert row["overdue"] is True
+
+
+def test_an_unknown_age_warns_and_never_fails(capsys):
+    row, out = stuck_run(capsys, None, T0 + 400 * DAY)
+    assert row["overdue"] is False and "unknown" in out and out.startswith("::warning::")
+
+
+def test_no_lagging_list_is_said_so(capsys):
+    _, out = stuck_run(capsys, T0, T0, lagging=())
+    assert "none reported" in out
+
+
+def test_a_closed_window_or_a_current_version_does_not_alarm(capsys):
+    fake = Fake()
+    row = go_with(fake, Net(upstream=OLD), lagging=("dial",), opened=T0, now=T0 + 90 * DAY)
+    assert "overdue" not in row and capsys.readouterr().out == ""
+
+
+def test_the_alarm_writes_nothing(capsys):
+    fake = Fake(files=graced())
+    go_with(fake, Net(upstream=NEWER), opened=T0, now=T0 + 99 * DAY)
+    assert fake.writes == []
+
+
+def test_grace_days_is_a_whole_number_of_days():
+    assert rr.grace_days({"rust_bump": {"grace_days": 7}}) == 7
+    for bad in ({}, {"rust_bump": {}}, {"rust_bump": {"grace_days": 0}},
+                {"rust_bump": {"grace_days": True}}, {"rust_bump": {"grace_days": "7"}},
+                {"rust_bump": {"grace_days": 1.5}}):
+        with pytest.raises(rr.Refusal):
+            rr.grace_days(bad)
+
+
+def test_the_real_classes_json_sets_grace_days():
+    import json
+    assert rr.grace_days(json.loads((REPO / "classes.json").read_text())) >= 1
+
+
+def _git_env():
+    """The ambient environment less every GIT_* (a pre-commit run exports GIT_DIR)."""
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
+def git(root, *args, env=None):
+    subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True,
+                   env=dict(_git_env(), GIT_CONFIG_GLOBAL="/dev/null", **(env or {})))
+
+
+def test_the_window_age_is_the_commit_that_added_previous(tmp_path, monkeypatch):
+    for name in [k for k in os.environ if k.startswith("GIT_")]:
+        monkeypatch.delenv(name)  # window_opened reads the ambient environment
+    git(tmp_path, "init", "-q")
+    for key, val in (("user.email", "a@b.c"), ("user.name", "n"), ("commit.gpgsign", "false")):
+        git(tmp_path, "config", key, val)
+    path = tmp_path / "versions.yaml"
+
+    def commit(text, when):
+        path.write_text(text)
+        git(tmp_path, "add", "versions.yaml")
+        git(tmp_path, "commit", "-q", "-m", "m", env={"GIT_COMMITTER_DATE": f"{when} +0000",
+                                                      "GIT_AUTHOR_DATE": f"{when} +0000"})
+
+    assert rr.window_opened(str(tmp_path)) is None
+    # the header of the real versions.yaml names the field in a comment
+    header = "# adds `previous: \"<the old version>\"` to this line\n"
+    commit(header + "a: { version: \"1\" }\n", 1_700_000_000)
+    assert rr.window_opened(str(tmp_path)) is None
+    commit(header + "a: { version: \"2\", previous: \"1\" }\n", 1_700_100_000)
+    commit(header + "a: { version: \"2\", previous: \"1\" }\n# comment\n", 1_700_200_000)
+    assert rr.window_opened(str(tmp_path)) == 1_700_100_000
+
+
+def test_main_exits_red_for_an_overdue_window(monkeypatch, capsys):
+    monkeypatch.setattr(rr, "Gh", lambda owner: Fake(files=graced()))
+    monkeypatch.setattr(rr, "Net", lambda: Net(upstream=NEWER))
+    monkeypatch.setattr(rr, "window_opened", lambda: 1)
+    monkeypatch.setattr(rr, "report", lambda row, live: None)
+    monkeypatch.setenv("LAGGING", "dial,bad name!")
+    monkeypatch.delenv("ALL_CURRENT", raising=False)
+    assert rr.main(["run", "--owner", "o", "--classes", str(REPO / "classes.json")]) == 1
+    out = capsys.readouterr().out
+    assert "::error::" in out and "dial" in out and "bad name" not in out
+    monkeypatch.setattr(rr, "window_opened", lambda: int(__import__("time").time()))
+    assert rr.main(["run", "--owner", "o", "--classes", str(REPO / "classes.json")]) == 0
