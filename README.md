@@ -110,7 +110,10 @@ scanner] Skipping chart` WARN and zero findings — silent, not clean (ledger
 other shared gate uses, scans it with nothing suppressed, and applies
 `.trivyignore.yaml` itself: an upstream finding (a vendored chart's own
 templates) may be covered by a reviewed, expiring entry; a finding in this
-repository's own templates may never be.
+repository's own templates may never be. trivy's helm scanner never reports
+an object annotated `helm.sh/hook`, so the gate also renders the chart with
+`helm template` and scans the chart's own hook objects as kubernetes manifests
+at their `chart/templates/` path (yaadgaar #526).
 
 ## One definition of "clean": the hooks
 
