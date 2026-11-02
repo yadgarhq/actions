@@ -174,3 +174,41 @@ def test_files_changed_only_on_the_base_branch_are_not_reported(tmp_path):
     assert result.returncode == 0, result.stderr
     assert "src/mine.rs: 4 lines" in summary
     assert "keep.rs" not in summary
+
+
+def test_a_stale_event_base_does_not_list_files_the_base_branch_changed(tmp_path):
+    """YAADGAAR 243 (#161 review follow-up ii). On a pull request the tree is
+    the pull merge commit, and its FIRST parent is the base tip the merge was
+    made against. `base.sha` in the event payload is the base when the event
+    fired and can be older; diffing against it lists every file the base branch
+    changed in between."""
+    stale = _repo(tmp_path)
+    _git(tmp_path, "checkout", "-q", "-b", "pr")
+    (tmp_path / "src" / "mine.rs").write_text("// padding\n" * 4)
+    _git(tmp_path, "add", "src")
+    _git(tmp_path, "commit", "-q", "-m", "mine")
+    _git(tmp_path, "checkout", "-q", "main")
+    (tmp_path / "src" / "keep.rs").write_text("// padding\n" * 9)
+    _git(tmp_path, "add", "src")
+    _git(tmp_path, "commit", "-q", "-m", "theirs")
+    _git(tmp_path, "merge", "-q", "--no-ff", "-m", "pull merge ref", "pr")
+    assert _git(tmp_path, "rev-parse", "HEAD^2")  # a real merge commit
+    result, summary = _run_block(tmp_path, stale)
+    assert result.returncode == 0, result.stderr
+    assert "src/mine.rs: 4 lines" in summary
+    assert "keep.rs" not in summary
+
+
+def test_a_merge_commit_needs_no_event_base(tmp_path):
+    _repo(tmp_path)
+    _git(tmp_path, "checkout", "-q", "-b", "pr")
+    (tmp_path / "src" / "mine.rs").write_text("// padding\n" * 4)
+    _git(tmp_path, "add", "src")
+    _git(tmp_path, "commit", "-q", "-m", "mine")
+    _git(tmp_path, "checkout", "-q", "main")
+    (tmp_path / "src" / "keep.rs").write_text("// padding\n" * 9)
+    _git(tmp_path, "add", "src")
+    _git(tmp_path, "commit", "-q", "-m", "theirs")
+    _git(tmp_path, "merge", "-q", "--no-ff", "-m", "pull merge ref", "pr")
+    result, summary = _run_block(tmp_path, "")
+    assert "src/mine.rs: 4 lines" in summary and "keep.rs" not in summary

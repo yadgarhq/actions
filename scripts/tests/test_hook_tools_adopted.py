@@ -349,6 +349,39 @@ def test_the_report_cell_cannot_inject_a_workflow_command():
     assert "::error" not in text and "|y" not in text
 
 
+def test_an_attested_row_says_it_was_not_measured():
+    """YAADGAAR 243 (#478): an attested rev is never read from the repository,
+    and a move pull request can set it to any accepting tag. The report says so."""
+    data = classes(private={"docs": {"rev": "v1.50.0"}}, exclude={"docs": "private"})
+    ok, rows, moves = run(two_consumers(), {"v1.50.0": versions(accept=[NEW])}.get, data=data)
+    text = hta.report(ok, rows, moves)
+    docs = next(l for l in text.splitlines() if l.startswith("| `docs`"))
+    assert "attested, not measured" in docs
+    chart = next(l for l in text.splitlines() if l.startswith("| `chart`"))
+    assert "not measured" not in chart
+
+
+def test_changed_private_consumers_are_named():
+    base = {"private_consumers": {"docs": {"rev": "v1.37.1"}, "gone": {"rev": "v1.1.0"}}}
+    head = {"private_consumers": {"docs": {"rev": "v1.50.0"}, "new": {"exempt": "x"}}}
+    assert hta.private_drift(base, head) == ["docs", "gone", "new"]
+    assert hta.private_drift(head, head) == []
+
+
+def test_an_exempt_reason_change_counts_as_drift():
+    base = {"private_consumers": {"docs": {"exempt": "a"}}}
+    head = {"private_consumers": {"docs": {"exempt": "b"}}}
+    assert hta.private_drift(base, head) == ["docs"]
+
+
+def test_drift_is_a_warning_annotation_and_never_an_error(capsys):
+    hta.warn_private_drift(["docs"], "yadgarhq")
+    out = capsys.readouterr().out
+    assert out.startswith("::warning::") and "docs" in out and "docs and argocd-verify" in out
+    hta.warn_private_drift([], "yadgarhq")
+    assert capsys.readouterr().out == ""
+
+
 # --------------------------------------------------------------------------
 # the workflow
 # --------------------------------------------------------------------------

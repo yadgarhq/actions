@@ -218,6 +218,13 @@ forbid_joined \
 # needs the receiver's type, not a regex.
 # ALSO OPEN: a fallback applied through an intermediate binding
 # (`let v = env::var("K"); v.unwrap_or(..)`); the sweep found none.
+# THE LOOKUP-NAME MATCH IS A SUFFIX MATCH ON PURPOSE (YAADGAAR 243; ADR-0645).
+# `($names)\(` has no left word boundary, so it also matches inside a longer
+# name: `parse_bucket_env(KEY).unwrap_or(..)` (gateway src/boot/config.rs),
+# `opt_env("PORT")`, `config_var("TIMEOUT")` and `try_lookup(KEY) == Some("1")`
+# are all refused. That catches wrapper helpers around an env read, and a `\b`
+# would let each of them through. A real false positive (`forget(KEY)`) takes an
+# ADR-0569-EXCEPTION marker with the argument, like any other.
 KEY='&?"?[A-Z][A-Z0-9_]*"?'
 KEY_PATH='(&?"[A-Z][A-Z0-9_]*"|&?([A-Za-z_][A-Za-z0-9_]*::)*[A-Z][A-Z0-9_]*)'
 LINK='\.[a-z_]+\([^)]*\)'

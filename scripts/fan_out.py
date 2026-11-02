@@ -814,6 +814,11 @@ def run(client, owner, tag, classes, live, manifest_text=None):
                 "private consumer with no classes.json `private_consumers` entry "
                 "(`{\"rev\": \"vX.Y.Z\"}` or `{\"exempt\": \"why\"}`; ADR-0983 step 2)"))
             continue
+        # YAADGAAR 243 (#478). This token reads a private consumer, so the rev
+        # classes.json attests for it is printed beside the one measured.
+        attested = classes.get("private_consumers", {}).get(meta["name"], {}).get("rev")
+        if meta.get("private", True) and attested:
+            row["attested"] = attested
         try:
             one(client, owner, meta, names[0], tag, classes, live, row)
         except Unverified:
@@ -850,6 +855,11 @@ def report(rows, tag, live):
     ]
     for r in rows:
         notes = clean("; ".join(r["changes"]) or r["note"])
+        if r.get("attested"):
+            seen = r["current"] or "unread"
+            drift_note = "" if seen == r["attested"] else " (differs: update `private_consumers`)"
+            notes = clean("; ".join(filter(None, [
+                notes, f"attested {r['attested']}, measured {seen}{drift_note}"])))
         out.append(
             f"| `{r['repo']}` | {r['class'] or '—'} | {r['current'] or '—'} | {r['target']} "
             f"| {r['status']} | {r['url'] or '—'} | {r['diff'] or '—'} | {notes or '—'} |"

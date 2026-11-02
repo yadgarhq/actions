@@ -12,6 +12,7 @@ go red:
 Run: python3 -m pytest scripts/tests/ -q
 """
 
+import copy
 import pathlib
 import re
 
@@ -153,8 +154,12 @@ def publish_problems(steps):
             found.append(f"{label}: no non-zero exit after the final failure")
         if not isinstance(step.get("timeout-minutes"), int):
             found.append(f"{label}: no timeout-minutes")
-    if push[0].get("run", "").count("helm registry login") != 1:
+    run = push[0].get("run", "")
+    if run.count("helm registry login") != 1:
         found.append("push: login is not done exactly once")
+    elif not LOOP.search(run) or run.index("helm registry login") < LOOP.search(run).start():
+        # YAADGAAR 243: the login is a network hop, retried inside the loop.
+        found.append("push: the login is outside the retry loop")
     if "helm registry login" in pkg[0].get("run", ""):
         found.append("package: logs in")
     return found
@@ -162,6 +167,18 @@ def publish_problems(steps):
 
 def test_chart_package_and_push_retry_separately_and_log_in_once():
     assert publish_problems(chart_steps()) == []
+
+
+def test_mutation_login_outside_the_retry_loop_is_red():
+    steps = copy.deepcopy(chart_steps())
+    for s in steps:
+        if s.get("name") == "push":
+            s["run"] = (
+                'echo "$TOKEN" | helm registry login "$REGISTRY"\n'
+                "for i in 1 2 3; do\n"
+                '  helm push x && break\n  [ "$i" = 3 ] && exit 1\n  sleep 1\ndone\n'
+            )
+    assert "push: the login is outside the retry loop" in publish_problems(steps)
 
 
 def test_chart_steps_keep_their_order():

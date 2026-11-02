@@ -238,7 +238,7 @@ READ_FILE = {"open", "options"}
 # the FUNCTION is refused so the call always names its module -- which is also
 # how every one of these repositories already writes it.
 FS_IMPORT = re.compile(
-    r"\buse\s+(?:[A-Za-z_][A-Za-z0-9_]*::)*(?:fs|fs_err)::(\{[^}]*\}|[A-Za-z_][A-Za-z0-9_]*)"
+    r"\buse\s+(?:::\s*)?(?:[A-Za-z_][A-Za-z0-9_]*::)*(?:fs|fs_err)::(\{[^}]*\}|[A-Za-z_][A-Za-z0-9_]*)"
 )
 
 # `OpenOptions::new()` builds a handle that MAY read, and the mode is decided by
@@ -314,6 +314,11 @@ def _use_paths(tree: str) -> list[tuple[tuple[str, ...], str | None]]:
             out.append((path, alias))
             return out
 
+    # A leading `::` (`use ::std::fs as X`) only anchors the path at the crate
+    # graph root; it names no segment and is skipped (YAADGAAR 243).
+    skip()
+    if tree.startswith("::", pos):
+        pos += 2
     return parse(())
 
 
