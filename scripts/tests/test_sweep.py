@@ -1794,6 +1794,120 @@ def test_an_admitted_update_branch_commit_still_needs_its_push_to_be_the_apps():
     skipped(case, "B9")
 
 
+def test_a_dependabot_push_of_an_admitted_refresh_sha_is_refused():
+    """Mutant M7 (yaadgaar 518 g). B9 admits an update-branch sha only as the
+    App's push: dependabot pushing the very sha B3 admitted is not the App's
+    refresh, whatever the commit says."""
+    case = app_refreshed()
+    case.activity[0]["actor"] = {"id": DEPENDABOT, "login": "dependabot[bot]"}
+    skipped(case, "B9")
+
+
+# yaadgaar 518 (f). Dependabot RECREATES its branch (a force-push of a fresh
+# commit) after the sweeper refreshed it. The App's update-branch push stays in
+# the activity API, but its `after` is no longer among the pull request's
+# commits, so B3 never admitted it and B9 refused the branch for good. Such an
+# ORPHANED App push is admitted only when its `after`, re-read by sha, has the
+# exact update-branch shape: App author (type Bot), verified, `web-flow`
+# committer, two parents, the first the branch tip the push moved (the older
+# activity event's `after`), the second on the base, and GitHub's message.
+
+ORPHAN = "4" * 40
+OLD_BASE = "e" * 40
+
+
+def orphaned():
+    """task-106 with a refresh that a dependabot recreate then orphaned."""
+    case = dependabot_merge()
+    created = case.activity[-1]["after"]
+    case.activity.insert(1, {"activity_type": "push", "actor": {"id": BOT, "login": "yadgarhq-bot[bot]"},
+                             "after": ORPHAN, "timestamp": "2026-10-31T10:00:00Z"})
+    case.data[f"{case.r}/commits/{ORPHAN}"] = {
+        "sha": ORPHAN, "author": dict(APP_USER), "committer": {"id": WEB_FLOW, "login": "web-flow"},
+        "commit": {"verification": {"verified": True},
+                   "message": f"Merge branch 'main' into {DEPENDABOT_BRANCH}"},
+        "parents": [{"sha": created}, {"sha": OLD_BASE}]}
+    case.data[f"{case.r}/compare/{OLD_BASE}...{case.tip}"] = {"status": "ahead", "ahead_by": 3,
+                                                              "behind_by": 0}
+    return case
+
+
+def orphan(case):
+    return case.data[f"{case.r}/commits/{ORPHAN}"]
+
+
+def test_an_orphaned_app_refresh_push_in_the_exact_update_branch_shape_is_admitted():
+    """The companion assertion (ADR-0646): every refusal below mutates one conjunct."""
+    case = orphaned()
+    assert ORPHAN not in {c["sha"] for c in case.commits}
+    api = Fake(case.data)
+    got = sweep.judge(api, OWNER, case.repo, case.n, classes(), BOT_NOW)
+    assert got["action"] == "merge", got
+    assert f"{case.r}/commits/{ORPHAN}" in api.reads  # re-read by sha, not trusted from the list
+
+
+@pytest.mark.parametrize("change", [
+    # not the App's commit
+    lambda c: orphan(c).update(author={"id": 64974579, "login": "m-agahi", "type": "User"}),
+    lambda c: orphan(c).update(author={"id": DEPENDABOT, "login": "dependabot[bot]", "type": "Bot"}),
+    lambda c: orphan(c)["author"].update(type="User"),
+    lambda c: orphan(c).update(author=None),
+    # not GitHub's own commit
+    lambda c: orphan(c).update(committer={"id": BOT, "login": "yadgarhq-bot[bot]"}),
+    lambda c: orphan(c)["commit"]["verification"].update(verified=False),
+    # not exactly two parents, the first the tip the push moved, the second on the base
+    lambda c: orphan(c)["parents"].pop(),
+    lambda c: orphan(c)["parents"].append({"sha": "2" * 40}),
+    lambda c: orphan(c)["parents"].reverse(),
+    lambda c: orphan(c)["parents"][0].update(sha="3" * 40),
+    lambda c: c.data[f"{c.r}/compare/{OLD_BASE}...{c.tip}"].update(status="diverged", behind_by=1),
+    lambda c: orphan(c)["parents"][1].update(sha="not a sha"),
+    lambda c: (orphan(c)["parents"][0].update(sha=None), c.activity[2].update(after=None)),
+    # not GitHub's update-branch message
+    lambda c: orphan(c)["commit"].update(message=f"Merge branch 'other' into {DEPENDABOT_BRANCH}"),
+    lambda c: orphan(c)["commit"].update(message="Merge branch 'main' into main"),
+    lambda c: orphan(c)["commit"].update(
+        message=f"Merge branch 'main' into {DEPENDABOT_BRANCH}\n\nedit"),
+    # the re-read is not that commit
+    lambda c: orphan(c).update(sha="5" * 40),
+    # not the App's plain push
+    lambda c: c.activity[1].update(activity_type="force_push"),
+    lambda c: c.activity[1]["actor"].update(id=64974579, login="m-agahi"),
+    lambda c: c.activity[1].update(after="not a sha"),
+    # no older ref update for the first parent to be
+    lambda c: c.activity.pop(),
+])
+def test_an_orphaned_app_push_that_deviates_in_any_way_is_refused(change):
+    case = orphaned()
+    change(case)
+    skipped(case, "B9")
+
+
+@pytest.mark.parametrize("change", [
+    lambda c: orphan(c)["commit"].pop("verification"),
+    lambda c: c.data.pop(f"{c.r}/compare/{OLD_BASE}...{c.tip}"),
+    lambda c: c.data.pop(f"{c.r}/commits/{ORPHAN}"),
+])
+def test_an_orphaned_app_push_whose_commit_or_ancestry_cannot_be_read_is_refused(change):
+    """An unreadable re-read fails closed: a skip, never a merge."""
+    case = orphaned()
+    change(case)
+    assert case.judge()["action"] == "skip"
+
+
+def test_an_orphaned_app_push_admits_nothing_else():
+    """The orphan path widens B9 for the App's push only: a branch deletion, a
+    stranger's push and a non-head newest event are refused as before."""
+    case = orphaned()
+    case.activity.insert(1, {"activity_type": "branch_deletion", "actor": {"id": DEPENDABOT},
+                             "after": "0" * 40, "timestamp": "2026-10-31T11:00:00Z"})
+    skipped(case, "B9")
+    case = orphaned()
+    case.activity.insert(0, {"activity_type": "push", "actor": {"id": BOT}, "after": ORPHAN,
+                             "timestamp": "2026-10-31T23:00:00Z"})
+    skipped(case, "B9")
+
+
 def test_a_merge_commit_that_edits_a_file_outside_the_ecosystem_is_refused_by_b8():
     """After update-branch the merge base is the base tip, so an edit the merge
     carries to a file outside the ecosystem's allowlist is a changed file B8
