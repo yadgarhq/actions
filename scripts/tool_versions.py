@@ -26,6 +26,13 @@ output, because CI installs `version` only. `accepted()` returns it for
 `hooks/tool_version.py`. Each entry is a dotted number of ASCII digits; a
 duplicate, an empty list, or the tool's own `version` in its list is refused.
 
+`previous` (yaadgaar 527 step 6, ADR-1120): the grace version of
+`rust-toolchain` and of no other tool. The Rust release detector's pull
+request writes it as the version it replaces; a later bot pull request deletes
+it once every Rust repository is current. It must be `X.Y.Z` and strictly older
+than `version`. It is the ONE extra step output, `rust_toolchain_previous`,
+which ci-pr's `rust_parity` reads; absent, there is no such output.
+
 FAIL CLOSED. A missing file, a missing or malformed version, a malformed
 sha256, a duplicate key, or a line in a shape it does not know: it prints
 `::error::` on stderr, prints NOTHING on stdout, and exits 1. A partial set of
@@ -45,6 +52,8 @@ ENTRY = re.compile(r"^  ([a-z0-9][a-z0-9-]*):\s*\{(.*)\}\s*(?:#.*)?$")
 PAIR = re.compile(r'\s*([a-z0-9_]+):\s*(?:"([^"]*)"|([0-9]+)|\[([^\]]*)\])\s*(?:,|$)')
 ITEM = re.compile(r'^\s*"([^"]*)"\s*$')
 VERSION = re.compile(r"^[0-9]+(?:\.[0-9]+)*$")  # ASCII digits only, never `\d`
+RUST_XYZ = re.compile(r"^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$")
+GRACE_TOOL = "rust-toolchain"
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -130,6 +139,15 @@ def _entries(path):
         yield number, name, _fields(path, number, name, body)
 
 
+def _previous(path, number, name, version, previous):
+    if name != GRACE_TOOL:
+        raise ReadError(f"{path}:{number}: {name} carries `previous`; only {GRACE_TOOL} may (ADR-1120)")
+    if not RUST_XYZ.match(version) or not RUST_XYZ.match(previous):
+        raise ReadError(f"{path}:{number}: {name} `version` and `previous` must each be X.Y.Z")
+    if tuple(map(int, previous.split("."))) >= tuple(map(int, version.split("."))):
+        raise ReadError(f"{path}:{number}: {name} previous {previous} is not older than {version}")
+
+
 def accepted(path):
     """{tool: tuple of the extra versions its hook accepts}, every tool listed.
 
@@ -161,6 +179,9 @@ def read(path):
                 f"{path}:{number}: {name} accept lists {version}, which is its own version; "
                 "delete it from `accept`"
             )
+        if "previous" in fields:
+            _previous(path, number, name, version, fields["previous"])
+            outputs[f"{key}_previous"] = fields["previous"]
         if "sha256" in fields:
             if not SHA256.match(fields["sha256"]):
                 raise ReadError(f"{path}:{number}: {name} sha256 is not 64 lowercase hex characters")

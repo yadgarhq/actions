@@ -322,3 +322,46 @@ def test_the_gh_writes_only_rust_bump_branches():
         Recorder([]).create_ref("repin/dial-v1.0.0", "f" * 40)
     with pytest.raises(repin.Refusal):
         Recorder([]).create_ref("main", "f" * 40)
+
+
+# ---------------------------------------------------------------------------
+# yaadgaar 527 step 6: the workspace only, and the all-current signal that
+# ends the grace window
+# ---------------------------------------------------------------------------
+
+FIXTURE = '[package]\nname = "fixture"\nrust-version = "1.60"\n'
+
+
+def test_a_fixture_crate_outside_the_workspace_is_not_moved():
+    fake = Fake(files={"rust-toolchain.toml": TOOLCHAIN, "Cargo.toml": CARGO.replace("1.90", V),
+                       "tests/fixtures/old/Cargo.toml": FIXTURE})
+    assert one(fake)["status"] == "current"
+    assert fake.writes == []
+
+
+def test_a_declared_member_is_moved():
+    root = '[workspace]\nmembers = ["crates/*"]\n'
+    fake = Fake(files={"rust-toolchain.toml": TOOLCHAIN, "Cargo.toml": root,
+                       "crates/a/Cargo.toml": CARGO, "tests/x/Cargo.toml": FIXTURE})
+    row = one(fake)
+    assert row["paths"] == ["crates/a/Cargo.toml"]
+
+
+def test_a_workspace_cargo_cannot_read_is_an_error_row():
+    fake = Fake(files={"rust-toolchain.toml": TOOLCHAIN, "Cargo.toml": '[workspace]\nmembers = "x"\n'})
+    with pytest.raises(rprop.Refusal):
+        one(fake)
+
+
+@pytest.mark.parametrize("statuses,current", [
+    (["current", "current"], True),
+    (["current", "not rust"], True),
+    (["current", "would open"], False),
+    (["current", "opened"], False),
+    (["current", "declined"], False),
+    (["current", "error"], False),
+    (["not rust"], False),
+    ([], False),
+])
+def test_all_current_is_every_rust_repository_at_the_version(statuses, current):
+    assert rprop.all_current([{"status": s} for s in statuses]) is current

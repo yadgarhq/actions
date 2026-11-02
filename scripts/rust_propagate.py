@@ -24,6 +24,14 @@ person CLOSED is never proposed again for that version (`declined`, a
 warning). One that MERGED while the default branch differs again is an error
 row: something moved the fields back.
 
+WHICH FILES. `rust_version.workspace`: the toolchain file, the workflows, the
+root `Cargo.toml` and its declared workspace members. A test fixture or a
+vendored crate is never moved (yaadgaar 527 step 6).
+
+ALL CURRENT. A run whose every row is `current` or `not rust` (and at least
+one `current`) writes the step output `all_current=true`; the Rust release
+detector then ends the grace window `versions.yaml` `previous` opened.
+
 WHICH REPOSITORIES. Every public repository of the owner that is live, not a
 fork and not in `classes.json` `sweep.exclude`, with a `Cargo.toml` at the root
 of its default branch. Listed with `GITHUB_TOKEN`, which sees public
@@ -131,7 +139,7 @@ def one(client, repository, version, live, org_template):
     if "Cargo.toml" not in files:
         return dict(row, status="not rust")
     try:
-        moved = rust_version.changes(files, version)
+        moved = rust_version.changes(rust_version.workspace(files), version)
     except rust_version.Refusal as refusal:
         raise Refusal(str(refusal)) from None
     if not moved:
@@ -153,6 +161,14 @@ def one(client, repository, version, live, org_template):
                                 body(template, version, repository, row["paths"]), tip,
                                 {p: t.encode() for p, t in moved.items()}, lane=LANE)
     return dict(row, status=got["status"], url=got["url"], closed=got["closed"])
+
+
+def all_current(rows):
+    """True when at least one Rust repository was read and every row is
+    `current` or `not rust`: no error, nothing open, nothing declined. The
+    Rust release detector ends the grace window on it (`rust_release.py`)."""
+    return (any(r.get("status") == "current" for r in rows)
+            and all(r.get("status") in ("current", "not rust") for r in rows))
 
 
 def candidates(repos, classes, owner):
@@ -268,6 +284,7 @@ def do_run(args):
                          "note": str(refusal)[:300]})
             print(f"::error::{args.owner}/{name}: {fan_out.annotation(str(refusal))}")
     report(rows, version, args.live)
+    fan_out.output("all_current", "true" if all_current(rows) else "false")
     return 1 if any(r["status"] == "error" for r in rows) else 0
 
 

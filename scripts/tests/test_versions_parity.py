@@ -24,6 +24,15 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 import versions_parity  # noqa: E402
 
+# The org Rust version at this checkout (ADR-1118). The Rust release bot
+# (ADR-1120) moves it in `versions.yaml` and the images alone, so no test here
+# names it: a literal would red that bot's own pull request.
+RUST = yaml.safe_load((REPO / "versions.yaml").read_text())["tools"]["rust-toolchain"]["version"]
+RUST_MINOR = ".".join(RUST.split(".")[:2])
+_RM, _RN = (int(x) for x in RUST.split(".")[:2])
+BEHIND = f"{_RM}.{_RN - 1}.0"  # an older release
+BEHIND_MINOR = f"{_RM}.{_RN - 1}"
+
 COPIED = [
     ".github/workflows",
     ".pre-commit-config.yaml",
@@ -84,10 +93,9 @@ def test_every_tool_the_task_lists_is_in_versions_yaml():
         "prettier": "3.9.6",
         "pytest": "9.1.1",
         "pyyaml": "6.0.3",
-        # ADR-1118: one Rust version org-wide, the latest stable. 1.99.1 is
-        # upstream stable (channel-rust-stable.toml, 2026-10-13), and the CI
-        # toolchain and the build images carry it alike.
-        "rust-toolchain": "1.99.1",
+        # ADR-1118: one Rust version org-wide, the latest stable, moved by the
+        # Rust release bot (ADR-1120); `RUST` is read, not named.
+        "rust-toolchain": RUST,
         "python": "3.14",
     }
     for name, version in expected.items():
@@ -128,8 +136,8 @@ READ_SITES = [
     (".github/workflows/ci-release.yaml", "version: v${{ needs.detect.outputs.trivy }}", "version: v0.74.0", "trivy"),
     (".github/workflows/base-images.yaml", "version: v${{ steps.versions.outputs.trivy }}", "version: v0.74.0", "trivy"),
     (".github/workflows/estate-runner-image.yaml", "version: v${{ steps.versions.outputs.trivy }}", "version: v0.74.0", "trivy"),
-    (".github/workflows/ci-pr.yaml", "toolchain: ${{ needs.detect.outputs.rust_toolchain }}", "toolchain: 1.99.1", "rust-toolchain"),
-    (".github/workflows/repin.yaml", "toolchain: ${{ steps.versions.outputs.rust_toolchain }}", "toolchain: 1.99.1", "rust-toolchain"),
+    (".github/workflows/ci-pr.yaml", "toolchain: ${{ needs.detect.outputs.rust_toolchain }}", f"toolchain: {RUST}", "rust-toolchain"),
+    (".github/workflows/repin.yaml", "toolchain: ${{ steps.versions.outputs.rust_toolchain }}", f"toolchain: {RUST}", "rust-toolchain"),
     (".github/workflows/ci-pr.yaml", "python-version: ${{ needs.detect.outputs.python }}", 'python-version: "3.14"', "python"),
     (".github/workflows/ci-self.yaml", "python-version: ${{ steps.versions.outputs.python }}", 'python-version: "3.14"', "python"),
     (".github/workflows/seed-declaration.yaml", "python-version: ${{ steps.versions.outputs.python }}", 'python-version: "3.14"', "python"),
@@ -229,20 +237,21 @@ def test_a_malformed_sha256_is_refused(tree):
 
 
 def test_a_drifted_rust_image_tag_is_caught_by_its_prefix(tree):
-    rewrite(tree, "containers/rust-build/Containerfile", "rust:1.99-bookworm", "rust:1.97-bookworm")
+    rewrite(tree, "containers/rust-build/Containerfile", f"rust:{RUST_MINOR}-bookworm", f"rust:{_RM}.{_RN - 2}-bookworm")
     problems = versions_parity.check(tree)
     assert any(p.startswith("containers/rust-build/Containerfile:3:") and "rust-toolchain" in p for p in problems), problems
 
 
 def test_a_drifted_estate_runner_toolchain_is_caught(tree):
-    rewrite(tree, "containers/estate-runner/Containerfile", "--default-toolchain 1.99.1", "--default-toolchain 1.97.0")
+    rewrite(tree, "containers/estate-runner/Containerfile", f"--default-toolchain {RUST}", f"--default-toolchain {_RM}.{_RN - 2}.0")
     problems = versions_parity.check(tree)
     assert any(p.startswith("containers/estate-runner/Containerfile:") and "rust-toolchain" in p for p in problems), problems
 
 
 def test_a_prefix_is_not_a_loose_match(tree):
-    """`1.9` is not a prefix of `1.99.1` in the dotted sense."""
-    rewrite(tree, "containers/rust-build/Containerfile", "rust:1.99-bookworm", "rust:1.9-bookworm")
+    """`1.9` is not a prefix of `1.99.1` in the dotted sense (a string prefix of
+    the minor that is not a dotted one)."""
+    rewrite(tree, "containers/rust-build/Containerfile", f"rust:{RUST_MINOR}-bookworm", f"rust:{RUST_MINOR[:-1]}-bookworm")
     assert any("rust-toolchain" in p for p in versions_parity.check(tree))
 
 
@@ -256,12 +265,12 @@ def test_versions_yaml_names_one_rust_version():
 @pytest.mark.parametrize(
     "relative, old, new",
     [
-        ("containers/rust-build/Containerfile", "rust:1.99-bookworm", "rust:1.98-bookworm"),
-        ("containers/estate-runner/Containerfile", "--default-toolchain 1.99.1", "--default-toolchain 1.98.0"),
+        ("containers/rust-build/Containerfile", f"rust:{RUST_MINOR}-bookworm", f"rust:{BEHIND_MINOR}-bookworm"),
+        ("containers/estate-runner/Containerfile", f"--default-toolchain {RUST}", f"--default-toolchain {BEHIND}"),
     ],
 )
 def test_an_image_behind_the_ci_toolchain_is_refused(tree, relative, old, new):
-    """The split ADR-1118 ended: an image at 1.98 while CI installs 1.99.1."""
+    """The split ADR-1118 ended: an image one release behind what CI installs."""
     rewrite(tree, relative, old, new)
     problems = versions_parity.check(tree)
     assert any(p.startswith(f"{relative}:") and "rust-toolchain" in p for p in problems), problems
