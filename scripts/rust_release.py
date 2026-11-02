@@ -33,6 +33,23 @@ repository current, this opens `rust-release/X.Y.Z-end`, which deletes
 proposed: one window at a time. A consumer whose rust-bump a person declined
 keeps the window open, and the step summary says so.
 
+A STUCK WINDOW IS LOUD, NOT SILENT (yaadgaar 529). On every run that finds the
+window open, a `::warning::` names the repositories that are not current
+(`LAGGING`, from the propagation step) and how many days the window has been
+open. The age is when `previous` landed in `versions.yaml`, read from the
+checkout's history (`git log -S`). Once it reaches `classes.json`
+`rust_bump.grace_days` the same run emits an `::error::` and exits 1, so the
+upstream job goes red and somebody looks: merge or fix the lagging bump, or
+end the window by hand. Without history the age is unknown: the warning says
+so and the job does not fail. WHICH REPOSITORIES COUNT: `all_current` and
+`LAGGING` list the PUBLIC Rust repositories only, by design. The sweeper merges
+public ones only (R1), the listing token sees no private one, and the App token
+is not widened for this. No private repository has a `Cargo.toml` today
+(argocd-verify and docs have none). A private Rust consumer that is added
+later does not hold the window open and is not checked when it closes: give it
+a reviewed entry like `private_consumers`, or widen the listing, in the pull
+request that adds it.
+
 THE FILES ARE READ AT THE TIP of actions main through the API, never from the
 workflow checkout, because `repin_publish.publish` lays them over the tip's
 tree: texts from an older checkout would revert whatever main changed since.
@@ -48,7 +65,7 @@ pull request that set it true.
 Commands:
 
     rust_release.py mode                 EVENT, DRY_RUN, REF -> `live=true|false`
-    rust_release.py run --owner O [--live]   GH_TOKEN (App, actions only), ALL_CURRENT
+    rust_release.py run --owner O [--live]   GH_TOKEN (App, actions only), ALL_CURRENT, LAGGING
 
 Tests: python3 -m pytest scripts/tests/ -q
 """
@@ -58,7 +75,9 @@ import http.client
 import json
 import os
 import re
+import subprocess
 import sys
+import time
 import tomllib
 import urllib.error
 import urllib.request
@@ -349,17 +368,64 @@ def body(template, action, version, old, digest):
     return "\n".join(out).rstrip() + "\n"
 
 
-def run(client, net, all_current, live, org_template):
-    """One run against actions main. Returns a row; raises Refusal for an error."""
+SECONDS_PER_DAY = 86400
+PREVIOUS_ADDED = ', previous: "'
+
+
+def window_opened(root="."):
+    """Epoch seconds of the newest commit that changed the number of
+    `, previous: "` in `versions.yaml` (the one that added it while a window is
+    open), or None when the checkout has no such history (shallow, or none)."""
+    done = subprocess.run(["git", "-C", root, "log", "-1", "--format=%ct", "-S" + PREVIOUS_ADDED,
+                           "--", VERSIONS], capture_output=True, text=True, check=False)
+    text = done.stdout.strip()
+    return int(text) if done.returncode == 0 and text.isdigit() else None
+
+
+def grace_days(classes):
+    section = classes.get("rust_bump")
+    days = section.get("grace_days") if isinstance(section, dict) else None
+    if isinstance(days, bool) or not isinstance(days, int) or days < 1:
+        raise Refusal("classes.json: `rust_bump.grace_days` must be a whole number of days, 1 or more")
+    return days
+
+
+def stuck(row, previous, lagging, opened, now, max_days):
+    """Print the warning (or the error, once `max_days` is reached) for an open
+    window and mark `row["overdue"]`. Names go through `fan_out.annotation`."""
+    who = ", ".join(lagging) if lagging else "none reported (the propagation step gave no list)"
+    if opened is None:
+        age, late = "its age is unknown (no history of versions.yaml in the checkout)", False
+    else:
+        days = max(0, (now - opened) // SECONDS_PER_DAY)
+        age, late = f"it has been open {days} day(s)", days >= max_days
+    text = (f"ADR-1120: the grace window from {previous} to {row['version']} is still open, {age}. "
+            f"Repositories not current: {who}. Merge or fix their rust-bump pull request.")
+    if late:
+        text += (f" The limit is {max_days} day(s), so this job fails until the window ends "
+                 "(`rust_bump.grace_days` in classes.json).")
+    print(f"::{'error' if late else 'warning'}::{fan_out.annotation(text)}")
+    row["overdue"] = late
+    row["why"] = f"{row['why']}; {age}; not current: {who}"
+
+
+def run(client, net, all_current, live, org_template, lagging=(), opened=None, now=None,
+        max_days=7):
+    """One run against actions main. Returns a row; raises Refusal for an error.
+    `lagging`, `opened` (epoch) and `now` (epoch) feed the stuck-window alarm."""
     meta = client.repo()
     tip = client.branch_sha(meta["default_branch"])
     files = client.files_at(tip)
     upstream = stable(net.channel())
     action, version, why = decide(files[VERSIONS], upstream, all_current)
     row = {"action": action, "version": version, "why": why, "status": "", "url": ""}
-    if action in ("wait", "current"):
-        return dict(row, status="nothing to do")
     _, old, _, previous = read_entry(files[VERSIONS])
+    if action == "wait":
+        row = dict(row, status="nothing to do")
+        stuck(row, previous, lagging, opened, time.time() if now is None else now, max_days)
+        return row
+    if action == "current":
+        return dict(row, status="nothing to do")
     digest = None
     if action == "bump":
         digest, note = resolve(net, version)
@@ -427,6 +493,8 @@ def report(row, live):
     lines = [f"## Rust release detector ({'LIVE' if live else 'dry run'})", "",
              f"- action: `{row['action']}` at `{row['version']}`",
              f"- status: {row['status']}", f"- why: {fan_out.clean(row['why'])}"]
+    if row.get("overdue"):
+        lines.append("- OVERDUE: the window is past `rust_bump.grace_days`; this job fails")
     if row.get("url"):
         lines.append(f"- pull request: {row['url']}")
     repin_publish.summary("\n".join(lines))
@@ -440,6 +508,7 @@ def main(argv):
     go = sub.add_parser("run")
     go.add_argument("--owner", required=True)
     go.add_argument("--live", action="store_true")
+    go.add_argument("--classes", default="classes.json")
     args = parser.parse_args(argv)
     try:
         if args.command == "mode":
@@ -449,11 +518,14 @@ def main(argv):
             fan_out.output("live", "true" if live else "false")
             print(f"live={'true' if live else 'false'}")
             return 0
+        with open(args.classes, encoding="utf-8") as handle:
+            days = grace_days(json.load(handle))
+        lagging = [n for n in os.environ.get("LAGGING", "").split(",") if fan_out.NAME.fullmatch(n)]
         row = run(Gh(args.owner), Net(), os.environ.get("ALL_CURRENT") == "true", args.live,
-                  repin.org_template)
+                  repin.org_template, lagging=lagging, opened=window_opened(), max_days=days)
         report(row, args.live)
         print(f"{row['action']} {row['version']}: {row['status']} ({row['why']})")
-        return 0
+        return 1 if row.get("overdue") else 0
     except Refusal as refusal:
         print(f"::error::{fan_out.annotation(str(refusal))}")
         return 1

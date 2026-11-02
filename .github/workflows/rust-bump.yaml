@@ -82,6 +82,7 @@ jobs:
       contents: read
     outputs:
       all_current: ${{ steps.propagate.outputs.all_current }}
+      lagging: ${{ steps.propagate.outputs.lagging }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -175,6 +176,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The window's age is when `previous` landed: `git log -S` needs history.
+          fetch-depth: 0
 
       - name: live or dry
         id: mode
@@ -231,6 +234,7 @@ jobs:
           LIVE: ${{ steps.mode.outputs.live }}
           OWNER: ${{ github.repository_owner }}
           ALL_CURRENT: ${{ needs.propagate.outputs.all_current }}
+          LAGGING: ${{ needs.propagate.outputs.lagging }}
         run: |
           set -euo pipefail
           args=(run --owner "$OWNER")

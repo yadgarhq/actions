@@ -365,3 +365,14 @@ def test_a_workspace_cargo_cannot_read_is_an_error_row():
 ])
 def test_all_current_is_every_rust_repository_at_the_version(statuses, current):
     assert rprop.all_current([{"status": s} for s in statuses]) is current
+
+
+@pytest.mark.parametrize("rows,names", [
+    ([], []),
+    ([{"repo": "o/a", "status": "current"}, {"repo": "o/b", "status": "not rust"}], []),
+    ([{"repo": "o/b", "status": "error"}, {"repo": "o/a", "status": "declined"},
+      {"repo": "o/c", "status": "current"}, {"repo": "o/d", "status": "opened"}], ["a", "b", "d"]),
+])
+def test_lagging_names_every_repository_that_keeps_all_current_false(rows, names):
+    assert rprop.lagging(rows) == names
+    assert (not names) == (rprop.all_current(rows) or not rows)

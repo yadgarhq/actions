@@ -28,11 +28,17 @@ table would move something that is not the MSRV.
 
 WHICH `Cargo.toml` (yaadgaar 527 step 6). `workspace` keeps the root manifest
 and, when it declares `[workspace]`, the manifests of its declared `members`
-(cargo's globs, less `exclude`); nothing else. A test fixture or a vendored
-crate is not a package cargo builds here, so its `rust-version` is not the
-repository's MSRV. Cargo's implicit members (path dependencies under the root
-that `members` does not name) are not read. A root cargo cannot parse is kept,
-so it stays a finding, and lets no nested manifest in.
+(cargo's globs, less `exclude`) and its IMPLICIT members: a path dependency
+(`dependencies`, `dev-dependencies`, `build-dependencies`, also under `target`)
+of the root or of a member (`x.workspace = true` resolves through the root's
+`[workspace.dependencies]`), whose directory lies under the root and outside
+`exclude`, followed transitively as cargo does. A test fixture or a vendored
+crate that nothing depends on is not a package cargo builds here, so its
+`rust-version` is not the repository's MSRV. A path dependency named only in
+`[workspace.dependencies]`, under the root, not a member and not excluded, is
+REFUSED: cargo may build it, and reading it silently or not at all would hide
+a drifted field (a pull request that sets `members = []` is the case). A root
+cargo cannot parse is kept, so it stays a finding, and lets no nested manifest in.
 
 THE GRACE WINDOW (yaadgaar 527 step 6, ADR-1120). Between the actions pull
 request that moves `versions.yaml` rust-toolchain and each consumer's
@@ -166,9 +172,48 @@ def _strings(value, what):
     return value
 
 
+DEP_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
+
+
+def _path_dirs(tables, base, inherited=None):
+    """Directories (normalised, relative to the root) of the `path` dependencies
+    in `tables`, a list of dependency tables whose manifest sits in `base`. A
+    dependency `x.workspace = true` takes the `path` of `x` in `inherited`, the
+    root's `[workspace.dependencies]`, which is relative to the root. A path
+    that leaves the root, or is absolute, is dropped."""
+    out = []
+    for table in tables:
+        if not isinstance(table, dict):
+            continue
+        for name, dep in table.items():
+            if not isinstance(dep, dict):
+                continue
+            path, where = dep.get("path"), base
+            if dep.get("workspace") is True and isinstance(inherited, dict):
+                shared = inherited.get(name)
+                path = shared.get("path") if isinstance(shared, dict) else None
+                where = "."
+            if not isinstance(path, str) or os.path.isabs(path):
+                continue
+            norm = os.path.normpath(os.path.join(where, path))
+            if norm != ".." and not norm.startswith("../"):
+                out.append(norm)
+    return out
+
+
+def _manifest_deps(data):
+    tables = [data.get(name) for name in DEP_TABLES]
+    target = data.get("target")
+    if isinstance(target, dict):
+        for sub in target.values():
+            if isinstance(sub, dict):
+                tables += [sub.get(name) for name in DEP_TABLES]
+    return tables
+
+
 def workspace(files):
-    """`files` less every `Cargo.toml` that is neither the root manifest nor a
-    declared workspace member. Other kinds pass through."""
+    """`files` less every `Cargo.toml` that is neither the root manifest, a
+    declared workspace member nor an implicit one. Other kinds pass through."""
     out = {p: t for p, t in files.items() if kind_of(p) not in (None, "cargo")}
     root = files.get("Cargo.toml")
     if root is None:
@@ -185,13 +230,36 @@ def workspace(files):
         raise Refusal("Cargo.toml: `workspace` is not a table")
     members = [_glob(m) for m in _strings(table.get("members", []), "members")]
     exclude = [e.removeprefix("./").rstrip("/") for e in _strings(table.get("exclude", []), "exclude")]
+    def excluded(where):
+        return any(where == e or where.startswith(e + "/") for e in exclude)
+
     for path, text in files.items():
         if kind_of(path) != "cargo" or path == "Cargo.toml":
             continue
         where = path[:-len("/Cargo.toml")]
-        if (any(m.fullmatch(where) for m in members)
-                and not any(where == e or where.startswith(e + "/") for e in exclude)):
+        if any(m.fullmatch(where) for m in members) and not excluded(where):
             out[path] = text
+    queue = list(out)
+    while queue:  # implicit members: path dependencies of the root and of members
+        path = queue.pop()
+        try:
+            parsed = tomllib.loads(out[path])
+        except tomllib.TOMLDecodeError:
+            continue  # a finding of its own; its dependencies are not followed
+        base = os.path.dirname(path) or "."
+        for where in _path_dirs(_manifest_deps(parsed), base, table.get("dependencies")):
+            manifest = "Cargo.toml" if where == "." else f"{where}/Cargo.toml"
+            if manifest in files and manifest not in out and not excluded(where):
+                out[manifest] = files[manifest]
+                queue.append(manifest)
+    deps = table.get("dependencies")
+    for where in _path_dirs([deps], "."):
+        manifest = "Cargo.toml" if where == "." else f"{where}/Cargo.toml"
+        if manifest in files and manifest not in out and not excluded(where):
+            raise Refusal(f"Cargo.toml: `workspace.dependencies` names the path {where!r}, which "
+                          "holds a Cargo.toml that is neither a declared nor an implicit workspace "
+                          "member; cargo may build it, so its rust-version cannot go unread. "
+                          "Declare it in `members` or `exclude` it")
     return out
 
 
@@ -212,6 +280,9 @@ def _base_slots(base, path):
 def findings(files, version, previous=None, base=None):
     """What differs from `version`, one line each. `files` maps path -> text.
 
+    EXACT STRING EQUALITY (ADR-1118: one X.Y.Z). `1.99` is not `1.99.1`, though
+    cargo reads it as a lower bound: the field must be the whole version.
+
     With `previous` AND `base` (path -> text at the pull request's base), a
     field that is exactly `previous` here and in the same place at the base is
     no finding: the grace window, and only for a field left untouched."""
@@ -230,7 +301,7 @@ def findings(files, version, previous=None, base=None):
             channel = _channel(_toml(TOOLCHAIN_FILE, files[TOOLCHAIN_FILE]))
             if channel != version and not (grace and channel == previous
                                            and _base_channel(base) == previous):
-                out.append(f"{TOOLCHAIN_FILE} channel is {channel!r}, not {version!r}")
+                out.append(f"{TOOLCHAIN_FILE} channel is {channel!r}, expected exactly {version!r}")
         except Refusal as refusal:
             out.append(str(refusal))
     for path in cargo:
@@ -242,7 +313,7 @@ def findings(files, version, previous=None, base=None):
         for where, value in slots:
             if value != version and not (grace and value == previous
                                          and _base_slots(base, path).get(where) == previous):
-                out.append(f"{path} [{where}] rust-version is {value!r}, not {version!r}")
+                out.append(f"{path} [{where}] rust-version is {value!r}, expected exactly {version!r}")
     return out
 
 
