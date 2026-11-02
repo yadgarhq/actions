@@ -83,6 +83,8 @@ READ_IN_WORKFLOWS = {
     # The pip pins in workflow `run:` lines read through `env:` (review round).
     "pyyaml",
     "pytest",
+    # yadgarhq/chart's own test tools, installed by ci-pr's pre_pin_parent job.
+    "shellcheck-py",
 }
 # These are downloaded as artefacts; `versions.yaml` carries their sha256.
 SHA256_REQUIRED = ("gitleaks", "hadolint", "actionlint", "cargo-deny")
@@ -140,6 +142,8 @@ SCANNERS = {
     "pytest": [("line", re.compile(rf"\bpytest=={VERSION}")), env("PYTEST_VERSION")],
     "pyyaml": [("line", re.compile(rf"\bpyyaml=={VERSION}", re.IGNORECASE)), env("PYYAML_VERSION")],
     "shellcheck-py": [
+        ("line", re.compile(rf"\bshellcheck-py=={VERSION}")),
+        env("SHELLCHECK_PY_VERSION"),
         (
             "block",
             re.compile(r"repo:\s*\S*shellcheck-py/shellcheck-py\s*$"),

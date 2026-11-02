@@ -28,6 +28,32 @@ lints and templates a chart: `--strict` lint first, then `template`, both with
 the parent's own `chart/ci/values.yaml` override when the parent carries one
 (C-A2) and the parent's own declared API versions on the render (ADR-0806).
 
+THEN THE PARENT'S OWN PYTEST (yaadgaar 536). With the candidate vendored and
+both renders green, `python3 -m pytest scripts/tests/` runs in the parent
+checkout's root, the command `yadgarhq/chart`'s own CI runs, with four changes:
+
+  * ISOLATED (`PYTEST_ISOLATION`): `-c /dev/null --rootdir=. --confcutdir=.
+    -p no:cacheprovider`, and no `PYTHONPATH` or `PYTEST_*` from the job. The
+    parent checkout sits INSIDE the pull request's working tree, and the parent
+    carries no pytest config, so without these a `pytest.ini` or `conftest.py`
+    at the pull request's root became the rootdir and could force the run green.
+  * MINUS A NAMED DESELECT LIST (Max's ruling, 2026-11-03, option (a)):
+    `LITERAL_COUNT_TESTS` pin object counts and sets as literals that the
+    parent moves AFTER a pin (its `ci.yaml`), so a module PR that adds one
+    object could never land if they blocked. `PUBLISHED_PIN_TESTS` render the
+    `packaged` fixture, whose `helm package -u` re-pulls every dependency from
+    GHCR and so tests the published pin, not the vendored candidate. Each id is
+    matched EXACTLY (or with its `[params]`); a listed id the parent no longer
+    collects, or a deselect that would also catch an unlisted test, refuses.
+  * ATTRIBUTED AGAINST PARENT MAIN: only when the vendored run has failures,
+    the published tarball is put back and the same selection runs on parent
+    main as checked out. A failure on both is named as parent main's and does
+    not refuse; a failure only after vendoring refuses and is named.
+  * FAIL CLOSED: a missing `scripts/tests`, no pytest, no interpreter, nothing
+    collected, a collection error, an exit other than 0 or 1, a failing run
+    that names no test, or the whole budget `PARENT_TESTS_TIMEOUT_SECONDS`
+    spent all refuse.
+
 WHAT A REFUSAL MEANS, AND WHY THE MESSAGE SAYS SO. The parent's fixture is a
 SEPARATE chart PR (K-8 step 2) that has to land before the module's contract
 (K-8 step 3) -- C-A2's gate change made that order self-enforcing on
@@ -58,10 +84,12 @@ Tests: `python3 -m pytest scripts/tests/ -q`.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import yaml
@@ -230,6 +258,213 @@ def failure_message(name: str, version: str, verb: str, result: subprocess.Compl
     )
 
 
+PARENT_TESTS_TIMEOUT_SECONDS = 20 * 60
+"""Ceiling on ALL the parent's pytest runs together (collect, the vendored run,
+and the parent-main run when that one is needed); the job's own
+`timeout-minutes` is 30. Measured 2026-11-03 on yadgarhq/chart@c218688: one
+full run is 680 tests in 4m48s on a laptop."""
+
+PARENT_TEST_FILE = "scripts/tests/test_parent_chart.py"
+
+LITERAL_COUNT_TESTS: dict[str, str] = {
+    PARENT_TEST_FILE + "::test_global_image_and_labels_still_render": "len(documents) == ADOPTER_OBJECTS",
+    PARENT_TEST_FILE + "::test_platform_enabled_false_removes_the_whole_platform_layer": "modules-only kinds == EXPECTED",
+    PARENT_TEST_FILE + "::test_the_adopter_values_render_the_whole_platform_layer": "kinds == ADOPTER_EXPECTED",
+    PARENT_TEST_FILE + "::test_an_object_added_to_the_platform_layer_reddens_the_object_set_gate": "object-set gate: ADOPTER_OBJECTS + 1",
+    PARENT_TEST_FILE + "::test_dropping_the_second_preflight_probe_reddens_the_hook_job_and_triple_gates": "hook gate: ADOPTER_OBJECTS - OBJECTS_PER_PROBE_JOB",
+    PARENT_TEST_FILE + "::test_the_rbac_triple_names_are_asserted_independently_of_the_job_count": "kinds == ADOPTER_EXPECTED",
+    PARENT_TEST_FILE + "::test_a_vendored_job_that_lost_its_hook_annotation_reddens_the_hook_gate": "hook gate: len(documents) == ADOPTER_OBJECTS",
+    PARENT_TEST_FILE + "::test_a_mutation_helm_never_reads_is_refused_rather_than_passing_silently": "len(documents) == ADOPTER_OBJECTS",
+    PARENT_TEST_FILE + "::test_a_renamed_iam_keys_secret_with_the_toggle_off_still_renders_the_whole_estate": "len(documents) == ADOPTER_OBJECTS",
+    PARENT_TEST_FILE + "::test_a_vendored_job_that_renamed_the_minted_secret_reddens_the_drift_guard": "len(documents) == ADOPTER_OBJECTS",
+    PARENT_TEST_FILE + "::test_every_operator_key_stated_false_still_renders_the_whole_estate": "len(documents) == ADOPTER_OBJECTS",
+    PARENT_TEST_FILE + "::test_the_refusals_are_satisfied_at_the_defaults_and_unreachable_without_the_platform": "len(render) == ADOPTER_OBJECTS",
+    PARENT_TEST_FILE + "::test_k1_the_defaults_render_what_the_adopter_values_render": "k1: len(defaults) == ADOPTER_OBJECTS",
+    PARENT_TEST_FILE + "::test_k1_a_reverted_default_reddens_the_equality_and_names_the_key": "k1: len(stated) == ADOPTER_OBJECTS",
+}
+"""Max's ruling 2026-11-03, option (a): tests that pin the parent's rendered
+object counts or sets as LITERALS. yadgarhq/chart moves those literals after a
+pin lands (its `ci.yaml` runs against the published pins), so a module PR that
+adds, removes or renames one rendered object turns them red here and could
+never land if they blocked. Measured by vendoring `config` 0.2.7 with one extra
+ConfigMap on yadgarhq/chart@c218688: these 14 and
+`test_the_directory_and_the_package_render_the_same_objects` (below) are the
+15 tests that went red; nothing else did."""
+
+PUBLISHED_PIN_TESTS: dict[str, str] = {
+    PARENT_TEST_FILE + "::test_the_packaged_chart_renders_the_whole_estate": "packaged; also == ADOPTER_EXPECTED / EXPECTED",
+    PARENT_TEST_FILE + "::test_the_directory_and_the_package_render_the_same_objects": "directory (candidate) vs packaged (published): false red on any identity change",
+    PARENT_TEST_FILE + "::test_the_package_carries_every_subchart_so_an_adopter_needs_no_registry": "packaged",
+    PARENT_TEST_FILE + "::test_an_adopter_value_lands_in_the_rendered_child_object": "packaged (its CHART half is lost too)",
+    PARENT_TEST_FILE + "::test_a_value_for_one_child_does_not_reach_another": "packaged",
+    PARENT_TEST_FILE + "::test_no_knob_is_stated_in_two_configmaps": "packaged: the cross-chart knob gate is blind to the candidate",
+    PARENT_TEST_FILE + "::test_the_kind_example_on_heads_chart_probes_prometheus": "packaged",
+}
+"""Tests over chart's `packaged` fixture (`test_parent_chart.py`), which runs
+`helm package chart -u`: `-u` re-pulls every dependency from GHCR over the
+vendored candidate, so these test the PUBLISHED pin, never this pull request.
+They cannot see the candidate, and the directory-versus-package comparison
+reds falsely on any identity change. Deselected until chart's fixture packages
+what `charts/` already holds (chart-side follow-up)."""
+
+DESELECTED: dict[str, str] = {**LITERAL_COUNT_TESTS, **PUBLISHED_PIN_TESTS}
+
+PYTEST_ISOLATION = ["-p", "no:cacheprovider", "--rootdir=.", "--confcutdir=.", "-c", os.devnull]
+"""No ini file, rootdir and conftest search pinned to the parent checkout's
+root, no cache writes. The parent checkout is `.pre-pin-parent/` INSIDE the
+pull request's working tree and yadgarhq/chart carries no pytest config, so
+without these pytest walks up into the pull request's own root and takes its
+`pytest.ini` (addopts) and `conftest.py` (hooks) as the run's own."""
+
+FAILED_TEST = re.compile(r"^(?:FAILED|ERROR) (\S+)", re.MULTILINE)
+
+
+def failing_tests(result: subprocess.CompletedProcess) -> list[str]:
+    """PURE: the test ids a `-rfE` summary names as FAILED or ERROR, in order."""
+    return list(dict.fromkeys(FAILED_TEST.findall(f"{result.stdout}{result.stderr}")))
+
+
+def listed_match(listed: str, nodeid: str) -> bool:
+    """PURE: `nodeid` IS the listed test -- the same id, or it with `[params]`."""
+    return nodeid == listed or nodeid.startswith(listed + "[")
+
+
+def selection(collected: list[str], listed) -> tuple[list[str], list[str], list[tuple[str, str]]]:
+    """PURE: `(deselect, stale, overreach)` for the collected ids.
+
+    `deselect` is every collected id a listed id matches EXACTLY. `stale` is
+    every listed id that matches nothing collected: a renamed or deleted parent
+    test, which refuses rather than silently deselecting nothing. `overreach` is
+    `(deselected, kept)` pairs where pytest's own `--deselect`, a nodeid PREFIX
+    match, would also drop a test nobody listed (`test_x` swallows `test_x_y`).
+    """
+    listed = list(listed)
+    deselect = [nodeid for nodeid in collected if any(listed_match(entry, nodeid) for entry in listed)]
+    stale = [entry for entry in listed if not any(listed_match(entry, nodeid) for nodeid in collected)]
+    dropped = set(deselect)
+    overreach = [
+        (gone, kept)
+        for gone in deselect
+        for kept in collected
+        if kept not in dropped and kept.startswith(gone)
+    ]
+    return deselect, stale, overreach
+
+
+def parent_tests_message(name: str, version: str, result: subprocess.CompletedProcess, failing: list[str] | None = None) -> str:
+    """PURE: the sentence a red parent suite prints, the failing tests named."""
+    output = f"{result.stdout}{result.stderr}"
+    if failing is None:
+        failing = failing_tests(result)
+    named = "".join(f"\n  {test}" for test in failing) or "\n  (none named; read the output below)"
+    return (
+        f"yadgarhq/chart's own tests fail with {name!r} vendored at {version}, "
+        f"the pin yadgarhq/chart's own Chart.yaml already carries for it "
+        f"(exit {result.returncode}). Failing tests:{named}\n\n{output}"
+    )
+
+
+def pre_existing_message(sha: str, failing: list[str]) -> str:
+    """PURE: parent main's own red tests, named as parent main's."""
+    named = "".join(f"\n  {test}" for test in failing)
+    return (
+        f"yadgarhq/chart main's own tests already fail at {sha} with nothing of "
+        f"this pull request vendored; not this PR's failures:{named}"
+    )
+
+
+class Budget:
+    """One deadline across every pytest run of this job (`PARENT_TESTS_TIMEOUT_SECONDS`)."""
+
+    def __init__(self) -> None:
+        try:
+            self.ceiling = int(os.environ.get("PRE_PIN_PARENT_TESTS_TIMEOUT", PARENT_TESTS_TIMEOUT_SECONDS))
+        except ValueError:
+            self.ceiling = PARENT_TESTS_TIMEOUT_SECONDS
+        self.deadline = time.monotonic() + self.ceiling
+
+    def remaining(self) -> float:
+        return max(0.001, self.deadline - time.monotonic())
+
+
+def pytest_in_parent(budget: Budget, *arguments: str) -> subprocess.CompletedProcess:
+    """`python3 -m pytest <PYTEST_ISOLATION> scripts/tests/ <arguments>` in the
+    parent checkout's root, the command yadgarhq/chart's own CI runs (`ci.yaml`).
+
+    `PYTHONPATH` is dropped (the workflow points it at the staged gate, whose
+    module names must not shadow the parent's own), and so is every `PYTEST_*`
+    variable (`PYTEST_ADDOPTS`, `PYTEST_PLUGINS`). Any failure to RUN -- no
+    interpreter, no pytest, the budget spent -- comes back as a non-zero
+    result, never an exception: nothing run is never a pass.
+    """
+    interpreter = os.environ.get("PRE_PIN_PARENT_PYTHON") or sys.executable
+    environment = {
+        key: value for key, value in os.environ.items()
+        if key != "PYTHONPATH" and not key.startswith("PYTEST_")
+    }
+    command = [interpreter, "-m", "pytest", *PYTEST_ISOLATION, "scripts/tests/", *arguments]
+    try:
+        return subprocess.run(
+            command, cwd=str(PARENT.parent), env=environment,
+            capture_output=True, text=True, check=False, timeout=budget.remaining(),
+        )
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(command, 127, "", f"{interpreter}: command not found\n")
+    except subprocess.TimeoutExpired as expired:
+        partial = expired.stdout or ""
+        partial = partial.decode(errors="replace") if isinstance(partial, bytes) else partial
+        return subprocess.CompletedProcess(
+            command, 124, partial, f"pytest did not finish within {budget.ceiling} seconds\n"
+        )
+
+
+class Unusable(Exception):
+    """A parent pytest run that proves nothing; carries the refusal text."""
+
+
+def run_selection(budget: Budget, listed) -> tuple[subprocess.CompletedProcess, list[str]]:
+    """Collect, check the deselect list against what is collected, then run.
+
+    Returns `(result, failing)` for a run that exited 0 or 1 and, on 1, named
+    at least one failing test. Everything else raises `Unusable`.
+    """
+    collect = pytest_in_parent(budget, "--collect-only", "-q")
+    if collect.returncode != 0:
+        raise Unusable(
+            f"yadgarhq/chart's own tests cannot be collected (exit {collect.returncode}):\n\n"
+            f"{collect.stdout}{collect.stderr}"
+        )
+    collected = [line.strip() for line in collect.stdout.splitlines() if "::" in line]
+    deselect, stale, overreach = selection(collected, listed)
+    if stale:
+        raise Unusable(
+            "the deselect list in yadgarhq/actions `scripts/pre_pin_parent.py` names tests "
+            "yadgarhq/chart no longer collects; update `LITERAL_COUNT_TESTS` / "
+            "`PUBLISHED_PIN_TESTS` to the parent's current names:"
+            + "".join(f"\n  {entry}" for entry in stale)
+        )
+    if overreach:
+        raise Unusable(
+            "deselecting the listed tests would also drop tests nobody listed "
+            "(pytest's `--deselect` matches by prefix):"
+            + "".join(f"\n  {gone} would drop {kept}" for gone, kept in overreach)
+        )
+    flags = [flag for nodeid in deselect for flag in ("--deselect", nodeid)]
+    result = pytest_in_parent(budget, "-q", "-rfE", *flags)
+    failing = failing_tests(result)
+    if result.returncode not in (0, 1) or (result.returncode == 1 and not failing):
+        raise Unusable(parent_tests_message_raw(result))
+    return result, failing
+
+
+def parent_tests_message_raw(result: subprocess.CompletedProcess) -> str:
+    """PURE: a run that proves nothing, with its exit and output."""
+    return (
+        f"yadgarhq/chart's own tests did not run to a verdict (exit {result.returncode}); "
+        f"a pin nothing tested is not a pin that passed.\n\n{result.stdout}{result.stderr}"
+    )
+
+
 def main() -> int:
     if not CANDIDATE.is_dir():
         print(
@@ -275,9 +510,13 @@ def main() -> int:
 
     # A red baseline does NOT stop here: a chart PR that repairs a red parent
     # main would deadlock otherwise. Vendor and render again.
+    # The published tarball's bytes are kept so parent main can be tested
+    # again, unmodified, if the vendored run fails (attribution, below).
+    published_path = PARENT / "charts" / f"{name}-{pin}.tgz"
+    published = published_path.read_bytes() if published_path.is_file() else None
     with tempfile.TemporaryDirectory() as workspace:
         tarball = package_candidate(CANDIDATE, pin, Path(workspace))
-        vendor(PARENT, name, pin, tarball)
+        vendored = vendor(PARENT, name, pin, tarball)
 
     red = render_parent(values_flags, template_flags)
     if red is not None:
@@ -290,17 +529,63 @@ def main() -> int:
         else:
             print(f"::error::{failure_message(name, pin, verb, result, label)}")
         return result.returncode or 1
+
+    # THE PARENT'S OWN PYTEST (yaadgaar 536), with the candidate vendored: the
+    # other half of what yadgarhq/chart's CI asks of a pin. Fail closed.
+    if not (PARENT.parent / "scripts" / "tests").is_dir():
+        print(
+            f"::error::{PARENT.parent / 'scripts' / 'tests'} is missing; yadgarhq/chart's own "
+            f"tests cannot run, and a pin nothing tested is not a pin that passed."
+        )
+        return 1
+    budget = Budget()
+    try:
+        tests, failing = run_selection(budget, DESELECTED)
+    except Unusable as error:
+        print(f"::error::{error}")
+        return 1
+    if failing:
+        # ATTRIBUTION (yaadgaar 536 fix 4): put the published tarball back and
+        # run the same selection on parent main as checked out. Only a failure
+        # that main does not already have is this pull request's.
+        if published is None:
+            # No published tarball to put back: parent main would render WITHOUT
+            # this dependency, which is no baseline for it, so nothing is
+            # excused (fail closed, the same as an unusable run).
+            print(
+                f"::warning::there is no published {vendored.name} in the parent's charts/ "
+                f"to restore, so parent main cannot be run as a baseline and no failure is excused."
+            )
+            main_failing = []
+        else:
+            vendored.write_bytes(published)
+            try:
+                _, main_failing = run_selection(budget, DESELECTED)
+            except Unusable as error:
+                # Parent main proves nothing, so nothing is subtracted: every
+                # vendored failure stays this pull request's (fail closed).
+                print(f"::warning::parent main's own tests could not be run as a baseline, so no failure is excused:\n{error}")
+                main_failing = []
+        new = [test for test in failing if test not in main_failing]
+        already = [test for test in failing if test in main_failing]
+        if already:
+            print(f"::warning::{pre_existing_message(parent_sha(), already)}")
+        if new:
+            print(f"::error::{parent_tests_message(name, pin, tests, new)}")
+            return 1
     if baseline_red is not None:
         print(
             f"::warning::yadgarhq/chart main is red at {parent_sha()} before this pull "
             f"request's chart was vendored; this pull request repairs it ({name!r} "
-            f"vendored at {pin} renders and lints)."
+            f"vendored at {pin} renders and lints, and yadgarhq/chart's own tests "
+            f"add no failure)."
         )
         return 0
 
     print(
         f"pre-pin-parent: yadgarhq/chart main renders and lints with {name!r} "
-        f"vendored at {pin}, the pin it already carries."
+        f"vendored at {pin}, the pin it already carries, and yadgarhq/chart's own tests "
+        f"(minus {len(DESELECTED)} named literal-count and published-pin tests) add no failure."
     )
     return 0
 
