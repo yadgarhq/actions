@@ -40,10 +40,10 @@ tree: texts from an older checkout would revert whatever main changed since.
 NO VERSION LITERAL HERE. `versions_parity.py` counts every site that pins the
 Rust version; this file builds its lines from parts, so it adds no site.
 
-DRY UNLESS ARMED. `classes.json` `rust_bump.release_live` arms it, and it ships
-false. A dispatch with `dry_run` false does NOT bypass that: live needs the
-switch AND main. The first live detection is the first run after a reviewed
-pull request sets it true.
+DRY UNLESS ARMED. `classes.json` `rust_bump.release_live` arms it, and it is
+true now. A dispatch with `dry_run` false does NOT bypass that: live needs the
+switch AND main. The first live detection is the first run after the reviewed
+pull request that set it true.
 
 Commands:
 

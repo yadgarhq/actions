@@ -39,7 +39,7 @@ name: rust-bump
 # `previous` is set no newer release is proposed: one window at a time.
 #
 # `upstream` IS DRY UNTIL `classes.json` `rust_bump.release_live` IS TRUE, and
-# it ships false. Unlike `propagate`, a dispatch with `dry_run` false does not
+# it is true now. Unlike `propagate`, a dispatch with `dry_run` false does not
 # make it live on its own: live needs that switch AND main. Its token is
 # scoped to this repository, `contents` and `pull_requests` only.
 #
