@@ -221,6 +221,22 @@ def run(base_text, head_text, classes, client, owner, show):
     return all(r["ok"] for r in rows), rows, found
 
 
+def private_drift(base_classes, head_classes):
+    """Sorted names whose `private_consumers` entry differs between base and head."""
+    base = base_classes.get("private_consumers") or {}
+    head = head_classes.get("private_consumers") or {}
+    return sorted(n for n in set(base) | set(head) if base.get(n) != head.get(n))
+
+
+def warn_private_drift(names, owner):
+    """One `::warning::`: an attestation moved, and nothing here measured it."""
+    if names:
+        print("::warning::" + fan_out.annotation(
+            f"classes.json private_consumers changed for {', '.join(names)}. Attested revs are "
+            f"never measured here: check the real rev in {owner}/docs and argocd-verify main "
+            "(docs and argocd-verify are the private consumers) before merging."))
+
+
 def report(ok, rows, found):
     head = ", ".join(f"{t} {old} -> {new}" for t, (old, new) in found.items())
     if not found:
@@ -240,7 +256,10 @@ def report(ok, rows, found):
         "| --- | --- | --- | --- |",
     ]
     for r in rows:
-        out.append(f"| `{fan_out.clean(r['repo'], 100)}` | {r['source']} | "
+        # An attested rev is read from classes.json, never from the repository,
+        # and a move pull request can set it to any accepting tag (YAADGAAR 243).
+        source = "attested, not measured" if r["source"] == "attested" else r["source"]
+        out.append(f"| `{fan_out.clean(r['repo'], 100)}` | {source} | "
                    f"{fan_out.clean(r['rev'], 60) or '—'} | {fan_out.clean(r['why'])} |")
     return "\n".join(out) + "\n"
 
@@ -278,6 +297,15 @@ def _show_at(cwd, commit, env=None):
     return done.stdout
 
 
+def _classes_at(cwd, commit):
+    """classes.json at `commit`, or {} when it has none (the warning is advisory)."""
+    done = _git(cwd, "show", f"{commit}:classes.json")
+    try:
+        return json.loads(done.stdout) if done.returncode == 0 else {}
+    except ValueError:
+        return {}
+
+
 class Public(fan_out.Gh):
     """The listing, with `private`; and one config on a default branch."""
 
@@ -312,6 +340,8 @@ def main(argv):
             base, head = sides(cwd)
         with open(args.classes, encoding="utf-8") as handle:
             classes = fan_out.load_classes(handle.read())
+        warn_private_drift(private_drift(_classes_at(cwd, args.base or "HEAD^1"), classes),
+                           args.owner)
         ok, rows, found = run(base, head, classes, Public(), args.owner,
                               lambda rev: git_show(cwd, rev))
     except (OSError, ValueError, Refusal) as refusal:

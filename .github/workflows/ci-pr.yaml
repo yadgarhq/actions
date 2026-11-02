@@ -1031,6 +1031,15 @@ jobs:
             echo "Tree: \`$(git rev-parse HEAD)\` (pull request head \`${HEAD_SHA:-none}\` as merged). Ceilings: 500 lines a file, 120 lines a function. A function is listed from 60 lines."
             echo
           } >> "$GITHUB_STEP_SUMMARY"
+          # YAADGAAR 243. On a pull request HEAD is the pull merge commit and
+          # its FIRST parent is the base tip that merge was made against, so
+          # diffing from it lists exactly the pull request's files. `base.sha`
+          # is the base when the event fired and can be older: a stale one lists
+          # every file the base branch changed since. It is the fallback for a
+          # HEAD that is not a merge commit (a plain head).
+          if git rev-parse --verify -q 'HEAD^2' >/dev/null; then
+            BASE_SHA=$(git rev-parse 'HEAD^1')
+          fi
           if [ -z "$BASE_SHA" ]; then
             echo "No pull request base on this event, so no changed files to measure." >> "$GITHUB_STEP_SUMMARY"
             exit 0

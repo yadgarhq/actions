@@ -1177,6 +1177,32 @@ def test_a_module_alias_read_with_a_marker_passes(tmp_path):
     )
 
 
+def test_a_leading_colons_module_alias_read_is_a_read(tmp_path):
+    """YAADGAAR 243 (#161 review follow-up iii): `use ::std::fs as X` is the
+    2018-edition absolute path; the leading `::` must not hide the alias."""
+    result = _unmarked(
+        tmp_path, "use ::std::fs as sfs;\nfn f(p: &Path) { let _ = sfs::read_to_string(p); }\n"
+    )
+    assert result.returncode == 1
+    assert "no ADR-0523 marker" in result.stderr
+
+
+def test_a_leading_colons_file_alias_read_is_a_read(tmp_path):
+    result = _unmarked(
+        tmp_path, "use ::std::fs::File as F;\nfn f(p: &Path) { let _ = F::open(p); }\n"
+    )
+    assert result.returncode == 1
+    assert "no ADR-0523 marker" in result.stderr
+
+
+def test_a_leading_colons_function_import_is_refused(tmp_path):
+    result = run(
+        tree_with(tmp_path, "use ::std::fs::read;\nfn f(p: &Path) { let _ = read(p); }\n")
+    )
+    assert result.returncode == 1
+    assert "import the module, not the function" in result.stderr
+
+
 def test_a_file_alias_read_is_a_read(tmp_path):
     result = _unmarked(
         tmp_path, "use std::fs::File as F;\nfn f(p: &Path) { let _ = F::open(p); }\n"

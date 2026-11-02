@@ -611,7 +611,8 @@ jobs:
       # `helm push` hit a transient GHCR "Tag on destination: not found" and the
       # parent chart v0.10.3 was tagged with no artefact. `helm package -u`
       # re-pulls the OCI dependencies, so it flakes the same way. Three
-      # attempts, 10 s then 20 s apart for `package`, 15 s then 30 s for `push`;
+      # attempts, 10 s then 20 s apart for `package`, 15 s then 30 s for `login` + `push`
+      # (the login is retried inside the same loop, so a failed login costs an attempt);
       # a push of the same tgz is idempotent (GHCR re-tags by name). The
       # anonymous-pull step below stays the final arbiter.
       - name: package
@@ -637,11 +638,13 @@ jobs:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          echo "$TOKEN" | helm registry login "$REGISTRY" -u "$ACTOR" --password-stdin
+          # The login is a network hop too (YAADGAAR 243), so it sits inside the
+          # loop: a failed login or a failed push both cost one attempt.
           for i in 1 2 3; do
-            helm push ./*-"$VERSION".tgz "oci://${REGISTRY}/${OWNER}/charts" && break
+            echo "$TOKEN" | helm registry login "$REGISTRY" -u "$ACTOR" --password-stdin \
+              && helm push ./*-"$VERSION".tgz "oci://${REGISTRY}/${OWNER}/charts" && break
             [ "$i" = 3 ] && exit 1
-            echo "::warning::helm push failed (attempt $i of 3)"
+            echo "::warning::helm login or push failed (attempt $i of 3)"
             sleep $((i * 15))
           done
 

@@ -2010,3 +2010,26 @@ def test_mutation_any_widening_of_the_dispatch_reddens(mutate):
     flow = copy.deepcopy(workflow())
     mutate(flow)
     assert dispatch_violations(flow) != []
+
+
+def test_a_private_consumer_prints_its_attested_rev_beside_the_measured_one():
+    # yaadgaar 243 (#478): the fan-out token CAN read a private consumer, so the
+    # attested rev is shown next to the measured one and a difference is flagged.
+    repos = estate()
+    classes = json.loads(json.dumps(CLASSES))
+    classes["private_consumers"]["docs"] = {"rev": "v1.0.0"}
+    repos["docs"]["private"] = True
+    rows, _ = fan_out.run(Fake(repos), "yadgarhq", "v1.35.0", classes, live=False)
+    row = by_repo(rows)["docs"]
+    assert row["attested"] == "v1.0.0"
+    line = next(l for l in fan_out.report(rows, "v1.35.0", live=False).splitlines()
+                if l.startswith("| `docs`"))
+    assert f"attested v1.0.0, measured {row['current']}" in line
+    assert row["current"] != "v1.0.0"
+    assert "differs" in line
+
+
+def test_a_public_consumer_has_no_attested_note():
+    rows, _ = fan_out.run(Fake(estate()), "yadgarhq", "v1.35.0", CLASSES, live=False)
+    assert all("attested" not in r for r in rows)
+    assert "attested" not in fan_out.report(rows, "v1.35.0", live=False)

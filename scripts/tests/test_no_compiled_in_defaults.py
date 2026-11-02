@@ -581,3 +581,37 @@ def test_a_comment_ending_in_an_open_paren_does_not_hide_the_next_read(tmp_path)
         tmp_path,
         'fn f() {\n    // see foo(\n    let v = env::var("K").unwrap_or_default();\n}\n',
     )
+
+
+# YAADGAAR 243 (ADR-0645): the lookup-name match is a SUFFIX match on purpose.
+# A left word boundary was tried and rejected: it let wrapper helpers through.
+# These four shapes must stay refused; a real false positive takes a marker.
+
+
+def test_wrapper_helper_ending_in_env_with_a_bucket_fallback_is_refused(tmp_path):
+    _refused(
+        tmp_path,
+        'fn f() { let b = parse_bucket_env("YADGAR_LOGIN_RATE_LIMIT").unwrap_or(Bucket::OFF); }\n',
+    )
+
+
+def test_opt_env_with_a_default_fallback_is_refused(tmp_path):
+    _refused(tmp_path, 'fn f() { let p = opt_env("PORT").unwrap_or_default(); }\n')
+
+
+def test_config_var_with_an_else_fallback_is_refused(tmp_path):
+    _refused(
+        tmp_path, 'fn f() { let t = config_var("TIMEOUT").unwrap_or_else(|| 30); }\n'
+    )
+
+
+def test_try_lookup_presence_test_is_refused(tmp_path):
+    _refused(tmp_path, 'fn f() -> bool { try_lookup("TRUST_HEADERS") == Some("1") }\n')
+
+
+def test_a_wrapper_helper_false_positive_takes_a_marker(tmp_path):
+    _clean(
+        tmp_path,
+        'fn f() { let p = opt_env("PORT").unwrap_or_default(); } '
+        "// ADR-0569-EXCEPTION(ABS): wrapper reads an optional port\n",
+    )
