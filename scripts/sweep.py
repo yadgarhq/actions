@@ -854,6 +854,28 @@ def check_bot_pr(pr, meta, owner):
     return kind, pr["head"]["ref"]
 
 
+def update_branch_shape(commit, sha, previous, base, branch, on_base):
+    """The ONE merge commit shape B3 admits, and B9 for an orphaned App push:
+    the commit `sha`, authored by the App (BOT_ID, type Bot), verified,
+    committed by `web-flow`, EXACTLY two parents, the first `previous` (the
+    commit it brought up to date), the second on the base branch tip
+    (`on_base`, a compare), and GitHub's message
+    `Merge branch '<base>' into <branch>`. Anything else is False."""
+    author, committer, parents = dig(commit, "author"), dig(commit, "committer"), dig(commit, "parents")
+    if not (isinstance(parents, list) and len(parents) == 2):
+        return False
+    first, second = dig(parents, 0, "sha"), dig(parents, 1, "sha")
+    return (isinstance(sha, str) and bool(SHA.fullmatch(sha)) and dig(commit, "sha") == sha
+            and dig(commit, "commit", "verification", "verified") is True
+            and isinstance(committer, dict) and is_int(committer.get("id"))
+            and committer["id"] == WEB_FLOW_ID
+            and isinstance(author, dict) and is_int(author.get("id")) and author["id"] == BOT_ID
+            and author.get("type") == "Bot"
+            and dig(commit, "commit", "message") == f"Merge branch '{base}' into {branch}"
+            and isinstance(first, str) and bool(SHA.fullmatch(first)) and first == previous
+            and isinstance(second, str) and bool(SHA.fullmatch(second)) and on_base(second))
+
+
 def check_bot_commits(commits, timeline, kind, head, base, branch, on_base):
     """B3, PROVENANCE. EVERY commit is the bot's own (author id and type Bot),
     verified, and committed by GitHub's `web-flow`, with exactly one parent;
@@ -897,13 +919,8 @@ def check_bot_commits(commits, timeline, kind, head, base, branch, on_base):
             need(isinstance(author, dict) and is_int(author.get("id")) and author["id"] == bot_id
                  and author.get("type") == "Bot", f"B3: a commit not authored by the {kind} bot")
             continue
-        sha, first, second = dig(commit, "sha"), dig(parents, 0, "sha"), dig(parents, 1, "sha")
-        need(i > 0 and isinstance(author, dict) and is_int(author.get("id")) and author["id"] == BOT_ID
-             and author.get("type") == "Bot"
-             and dig(commit, "commit", "message") == f"Merge branch '{base}' into {branch}"
-             and first == dig(commits, i - 1, "sha")
-             and isinstance(second, str) and bool(SHA.fullmatch(second)) and on_base(second)
-             and isinstance(sha, str) and bool(SHA.fullmatch(sha)),
+        sha = dig(commit, "sha")
+        need(i > 0 and update_branch_shape(commit, sha, dig(commits, i - 1, "sha"), base, branch, on_base),
              "B3: a merge commit that is not the sweeper's update-branch (ADR-1119)")
         refreshes.add(sha)
     for event in as_list(timeline, "timeline"):
@@ -1099,7 +1116,7 @@ def check_rust_lines(f, name, version, read=None):
 PUSHES = ("branch_creation", "push", "force_push")
 
 
-def check_bot_pushes(activity, kind, head, refreshes):
+def check_bot_pushes(activity, kind, head, refreshes, orphan=lambda sha, previous: False):
     """B9. WHO PUSHED, which a commit cannot claim. The repository activity API
     names the actor of every ref update of the head branch, a plain push
     included. Every one must be the bot, or a plain `push` by the App
@@ -1109,16 +1126,29 @@ def check_bot_pushes(activity, kind, head, refreshes):
     put `head` there. Returns when the head arrived, where the bot soak (B10)
     counts from: a refresh push restarts it. It also closes the API-commit
     forgery B3 cannot: a commit made through the API with the bot's author
-    email may verify, but its push is the forger's."""
+    email may verify, but its push is the forger's.
+
+    AN ORPHANED REFRESH (yaadgaar 518 f): dependabot recreates its branch with
+    a force-push after a refresh, so the App's update-branch push stays in the
+    activity while its `after` is no longer among the commits B3 read. Such a
+    plain App `push`, never the newest, is admitted only when `orphan(after,
+    previous)` re-reads that sha and finds the exact update-branch shape, its
+    first parent `previous`, the `after` of the next older ref update (the tip
+    the push moved). Nothing else is widened."""
     bot_id = BOTS[kind][0]
     need(isinstance(activity, list) and 1 <= len(activity) < PAGE,
          "B9: the branch activity is empty or may be truncated")
-    for event in activity:
+    for i, event in enumerate(activity):
         kind_of = dig(event, "activity_type")
         need(kind_of in PUSHES, f"B9: a {event.get('activity_type')!r} on the branch")
-        actor = dig(event, "actor", "id")
-        refresh = kind_of == "push" and actor == BOT_ID and dig(event, "after") in refreshes
-        need(refresh or (actor == bot_id and dig(event, "after") not in refreshes),
+        actor, after = dig(event, "actor", "id"), dig(event, "after")
+        app_push = kind_of == "push" and actor == BOT_ID
+        refresh = app_push and after in refreshes
+        own = actor == bot_id and after not in refreshes
+        # Read only when nothing else admits it: the re-read is one GET per orphan.
+        # The head is never an orphan: B3 read it.
+        need(refresh or own or (app_push and after != head and i + 1 < len(activity)
+                                and orphan(after, dig(activity, i + 1, "after"))),
              "B9: a ref update not pushed by the bot")
     need(dig(activity, 0, "after") == head, "B9: the newest ref update is not the head")
     return parse_time(dig(activity, 0, "timestamp"))
@@ -1132,6 +1162,17 @@ def contains(api, owner, name, tip):
         compare = api.get(f"repos/{owner}/{name}/compare/{sha}...{tip}")
         return dig(compare, "status") in ("identical", "ahead") and dig(compare, "behind_by") == 0
     return on_base
+
+
+def orphan_refresh(api, owner, name, base, branch, on_base):
+    """For B9 (yaadgaar 518 f): whether the App push of `sha`, which B3 never
+    saw, is the sweeper's update-branch. The commit is re-read by its sha."""
+    def orphan(sha, previous):
+        if not (isinstance(sha, str) and SHA.fullmatch(sha)):
+            return False
+        return update_branch_shape(api.get(f"repos/{owner}/{name}/commits/{sha}"), sha, previous,
+                                   base, branch, on_base)
+    return orphan
 
 
 def head_text(api, owner, name, path, head):
@@ -1177,7 +1218,8 @@ def evaluate_bot(api, owner, name, n, classes, now):
                     read=lambda path: head_text(api, owner, name, path, head))
     ref = urllib.parse.quote(f"refs/heads/{branch}", safe="/")
     pushed = check_bot_pushes(api.get(f"repos/{owner}/{name}/activity?ref={ref}&per_page={PAGE}"),
-                              kind, head, refreshes)
+                              kind, head, refreshes, orphan_refresh(api, owner, name, base, branch,
+                                                                    contains(api, owner, name, tip)))
     compare = fetcher(api)(ci_verdict.compare_url(f"{owner}/{name}", tip, head))
     status, behind = dig(compare, "status"), dig(compare, "behind_by")
     workflow, caller = ci_shape(name)
