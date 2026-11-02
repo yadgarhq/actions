@@ -258,10 +258,11 @@ jobs:
       # (dependabot's github-actions bumps do, and so can a rust-bump, ADR-1120).
       # The squash merge and the branch delete need `contents: write` only, as
       # an adoption merge proves. Still one repository. A kind that is none of
-      # the three mints nothing, and `act` then reds on the missing token.
+      # the four (rust-release: ADR-1120 part b, in actions only) mints nothing,
+      # and `act` then reds on the missing token.
       - name: mint the bot write token for this one repository
         id: app-bot
-        if: ${{ (matrix.kind == 'dependabot' || matrix.kind == 'repin' || matrix.kind == 'rust') && matrix.action == 'merge' }}
+        if: ${{ (matrix.kind == 'dependabot' || matrix.kind == 'repin' || matrix.kind == 'rust' || matrix.kind == 'rust-release') && matrix.action == 'merge' }}
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
@@ -279,7 +280,7 @@ jobs:
       # update-branch). The update-branch is the only call made with it.
       - name: mint the bot refresh token for this one repository
         id: app-bot-refresh
-        if: ${{ (matrix.kind == 'dependabot' || matrix.kind == 'repin' || matrix.kind == 'rust') && matrix.action == 'refresh' }}
+        if: ${{ (matrix.kind == 'dependabot' || matrix.kind == 'repin' || matrix.kind == 'rust' || matrix.kind == 'rust-release') && matrix.action == 'refresh' }}
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}

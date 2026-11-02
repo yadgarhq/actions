@@ -20,10 +20,28 @@ name: rust-bump
 # the human path. A push by the sweeper's App-token merge does start
 # workflows; one by `GITHUB_TOKEN` would not.
 #
-# THE UPSTREAM HALF IS NOT HERE YET (ADR-1120 part b): a job that reads
-# `static.rust-lang.org/dist/channel-rust-stable.toml` and opens the actions
-# pull request moving `versions.yaml` and the images. Until it lands, a person
-# moves `versions.yaml`, and this workflow carries it to the consumers.
+# THE UPSTREAM HALF IS THE `upstream` JOB (ADR-1120 part b,
+# `scripts/rust_release.py`). It reads
+# `static.rust-lang.org/dist/channel-rust-stable.toml`; when stable is newer
+# than `versions.yaml` and Docker Hub serves `rust:X.Y.Z-bookworm` and
+# `rust:X.Y-bookworm` as one multi-arch index, it opens ONE signed App pull
+# request in THIS repository on `rust-release/X.Y.Z`: `versions.yaml` (the
+# version, plus `previous`, the old one), the rust-build base at that index
+# digest, and the estate runner's toolchain. Three lines; the sweeper's
+# `rust-release` lane admits nothing else. Its merge is a push to main that
+# changes `versions.yaml`, which starts `propagate`.
+#
+# THE GRACE WINDOW ENDS HERE TOO. `previous` lets ci-pr's `rust_parity` pass a
+# consumer field still at exactly the old version, so no consumer pull request
+# reds while its rust-bump is open. When `propagate` finds every Rust
+# repository current (`all_current`), `upstream` opens
+# `rust-release/X.Y.Z-end`, which deletes `previous` and nothing else. While
+# `previous` is set no newer release is proposed: one window at a time.
+#
+# `upstream` IS DRY UNTIL `classes.json` `rust_bump.release_live` IS TRUE, and
+# it ships false. Unlike `propagate`, a dispatch with `dry_run` false does not
+# make it live on its own: live needs that switch AND main. Its token is
+# scoped to this repository, `contents` and `pull_requests` only.
 #
 # DRY UNLESS ARMED. `rust_propagate.py mode` says `live=true` for the schedule
 # or a push to main only while `classes.json` `rust_bump.live` is true (it is true now,
@@ -62,6 +80,8 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+    outputs:
+      all_current: ${{ steps.propagate.outputs.all_current }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -127,6 +147,7 @@ jobs:
       # The version is `versions.yaml` rust-toolchain in THIS checkout, which
       # is main for every trigger that can be live.
       - name: propagate
+        id: propagate
         env:
           GH_TOKEN: ${{ steps.app-write.outputs.token || steps.app-read.outputs.token }}
           LIVE: ${{ steps.mode.outputs.live }}
@@ -138,3 +159,82 @@ jobs:
             args+=(--live)
           fi
           python3 scripts/rust_propagate.py "${args[@]}"
+
+  # ADR-1120 part b: a new stable Rust opens the actions pull request, and an
+  # all-current propagation ends the grace window. After `propagate`, whose
+  # `all_current` it reads; it runs when `propagate` failed too (a detection
+  # needs no consumer), and then `all_current` is empty, so no window ends.
+  upstream:
+    needs: propagate
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: live or dry
+        id: mode
+        env:
+          EVENT: ${{ github.event_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          REF: ${{ github.ref }}
+        run: python3 scripts/rust_release.py mode
+
+      - name: is the release App configured here
+        env:
+          CLIENT_ID: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          APP_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CLIENT_ID" ] || [ -z "$APP_KEY" ]; then
+            echo "::error::RELEASE_APP_CLIENT_ID and RELEASE_APP_PRIVATE_KEY must both be set"
+            exit 1
+          fi
+
+      # THIS REPOSITORY ONLY, BY ITS LITERAL NAME (`rust_release.Gh` writes to
+      # `fan_out.ACTIONS_REPO`): a schedule event carries no repository
+      # object, and an empty `repositories:` beside `owner:` would mint for
+      # every repository. The commit touches no workflow file, so no
+      # `workflows: write`. A dry run holds no write permission.
+      - name: mint the read token for this repository
+        id: app-read
+        if: steps.mode.outputs.live != 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: actions
+          permission-contents: read
+          permission-pull-requests: read
+      - name: mint the write token for this repository
+        id: app-write
+        if: steps.mode.outputs.live == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: actions
+          permission-contents: write
+          permission-pull-requests: write
+
+      # The files are read at the tip of main through the API, never from
+      # this checkout: the commit is laid over the tip's tree.
+      - name: detect or end the window
+        env:
+          GH_TOKEN: ${{ steps.app-write.outputs.token || steps.app-read.outputs.token }}
+          LIVE: ${{ steps.mode.outputs.live }}
+          OWNER: ${{ github.repository_owner }}
+          ALL_CURRENT: ${{ needs.propagate.outputs.all_current }}
+        run: |
+          set -euo pipefail
+          args=(run --owner "$OWNER")
+          if [ "$LIVE" = true ]; then
+            args+=(--live)
+          fi
+          python3 scripts/rust_release.py "${args[@]}"

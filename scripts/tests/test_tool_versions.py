@@ -179,3 +179,50 @@ def test_accept_given_twice_is_refused(tmp_path):
     path = write(tmp_path, 'tools:\n  gitleaks: { version: "8.30.1", accept: ["8.31.0"], accept: ["8.32.0"] }\n')
     with pytest.raises(tool_versions.ReadError, match="twice"):
         tool_versions.read(path)
+
+
+# ---------------------------------------------------------------------------
+# yaadgaar 527 step 6, ADR-1120: `previous`, the grace version. Only
+# rust-toolchain may carry it, only as X.Y.Z, only strictly older than its
+# `version`. It becomes ONE output, `rust_toolchain_previous`, that ci-pr's
+# `rust_parity` reads; without it there is no such output at all.
+# ---------------------------------------------------------------------------
+
+
+def test_previous_on_rust_toolchain_is_one_more_output(tmp_path):
+    path = write(tmp_path, 'tools:\n  rust-toolchain: { version: "1.100.0", sites: 5, previous: "1.99.1" }\n')
+    assert tool_versions.read(path) == {"rust_toolchain": "1.100.0", "rust_toolchain_previous": "1.99.1"}
+    proc = run(path)
+    assert proc.returncode == 0, proc.stderr
+    assert "rust_toolchain_previous=1.99.1" in proc.stdout.splitlines()
+
+
+def test_no_previous_means_no_previous_output(tmp_path):
+    path = write(tmp_path, 'tools:\n  rust-toolchain: { version: "1.99.1", sites: 5 }\n')
+    assert tool_versions.read(path) == {"rust_toolchain": "1.99.1"}
+
+
+@pytest.mark.parametrize(
+    "line,needle",
+    [
+        ('  helm: { version: "3.18.4", sites: 6, previous: "3.18.3" }', "only rust-toolchain"),
+        ('  rust-toolchain: { version: "1.100.0", sites: 5, previous: "1.100.0" }', "older"),
+        ('  rust-toolchain: { version: "1.100.0", sites: 5, previous: "1.101.0" }', "older"),
+        ('  rust-toolchain: { version: "1.100.0", sites: 5, previous: "1.99" }', "X.Y.Z"),
+        ('  rust-toolchain: { version: "1.100.0", sites: 5, previous: "" }', "X.Y.Z"),
+        ('  rust-toolchain: { version: "1.100", sites: 5, previous: "1.99.1" }', "X.Y.Z"),
+        ('  rust-toolchain: { version: "1.100.0", sites: 5, previous: ["1.99.1"] }', "previous"),
+    ],
+)
+def test_a_previous_that_is_not_an_older_rust_x_y_z_is_refused(tmp_path, line, needle):
+    path = write(tmp_path, f"tools:\n{line}\n")
+    with pytest.raises(tool_versions.ReadError, match=needle):
+        tool_versions.read(path)
+    assert run(path).stdout == ""
+
+
+def test_the_reader_agrees_with_yaml_on_previous(tmp_path):
+    body = 'tools:\n  rust-toolchain: { version: "1.100.0", sites: 5, previous: "1.99.1" }\n'
+    path = write(tmp_path, body)
+    entry = yaml.safe_load(body)["tools"]["rust-toolchain"]
+    assert tool_versions.read(path)["rust_toolchain_previous"] == entry["previous"]

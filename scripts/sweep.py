@@ -12,6 +12,9 @@ judged by `evaluate_bot` when `bot_kind` names it:
                 `repin/<crate>-<tag>_...` (`repin.branch`)
     rust        opener id 324366854, type Bot, login `yadgarhq-bot[bot]`, head
                 `rust-bump/X.Y.Z` (`rust_propagate.branch`, ADR-1120)
+    rust-release  opener id 324366854, type Bot, login `yadgarhq-bot[bot]`, head
+                `rust-release/X.Y.Z` or `rust-release/X.Y.Z-end`
+                (`rust_release.branch`, ADR-1120 part b), in yadgarhq/actions only
 
 Any other pull request, the App's `actions-adopt` included, goes to `evaluate`
 exactly as before. A bot pull request needs: head and base in this repository,
@@ -22,7 +25,12 @@ save the sweeper's own update-branch commit in its exact shape (ADR-1119),
 and every force-push the bot's; every changed file MODIFIED and owned by the
 ecosystem (B8: `FILES` for dependabot's cargo, github_actions and docker,
 Cargo files for repin; for rust, `RUST_FILES` and in them only the Rust
-version lines moving to the branch's version, `check_rust_lines`; any other
+version lines moving to the branch's version, `check_rust_lines`; for
+rust-release, `check_release`: exactly the detector's three files, one line
+each, from main's versions.yaml version to a NEWER branch version with
+`previous` set to main's, the base at the digest Docker Hub serves for
+`rust:X.Y.Z-bookworm` and `rust:X.Y-bookworm` alike; or, for `-end`, versions.yaml alone, deleting
+`previous` and nothing else; any other
 ecosystem is left for a person); every ref
 update of the head branch pushed by the bot, or by the App for an
 update-branch commit B3 admitted, the newest one the head (B9, the
@@ -163,6 +171,7 @@ import ci_verdict
 import config_only
 import fan_out
 import pr_body
+import rust_release
 import rust_version
 import tool_versions
 from repin import Refusal
@@ -192,9 +201,13 @@ BOTS = {
     "repin": (BOT_ID, "yadgarhq-bot[bot]", re.compile(r"repin/[A-Za-z0-9_+-]+(\.[A-Za-z0-9_+-]+)*")),
     # ADR-1120: `rust_propagate.branch`, one Rust version per branch name.
     "rust": (BOT_ID, "yadgarhq-bot[bot]", re.compile(r"rust-bump/[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}")),
+    # ADR-1120 part b: `rust_release.branch`, the detector's actions pull
+    # request and the one that ends its grace window.
+    "rust-release": (BOT_ID, "yadgarhq-bot[bot]", rust_release.BRANCH),
 }
 CI_SELF = ".github/workflows/ci-self.yaml"
-VERSIONS_YAML = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "versions.yaml")
+ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir)
+VERSIONS_YAML = os.path.join(ROOT, "versions.yaml")
 # F1. A bot merge never carries the pull request's editable body: a `feat!`
 # bullet typed there would reach `next_version.derive`. Fixed text with no
 # bullet, so `derive` takes its synthetic `fix(deps)` path as for any bot merge.
@@ -214,6 +227,9 @@ REPIN_FILES = FILES["cargo"]
 # ADR-1120. A rust-bump pull request changes these files, and in them only the
 # Rust version lines `rust_version.py` rewrites (`check_rust_lines`).
 RUST_FILES = re.compile(rf"rust-toolchain\.toml|{_ANY}Cargo\.toml|\.github/workflows/[^/]+\.ya?ml")
+# ADR-1120 part b. A rust-release pull request changes these, one line each
+# (`check_release`).
+RELEASE_FILES = re.compile("|".join(re.escape(p) for p in rust_release.FILES))
 # The only merge failures that are GitHub's verdict on the pull request. Any
 # other (401/403/404, 5xx, no usable auth, an error with no HTTP code) is not,
 # and reds the leg (yaadgaar 469).
@@ -909,7 +925,8 @@ def check_bot_files(files, pr, kind, branch, read=None):
     also names exactly versions.yaml rust-toolchain at this checkout, so no
     downgrade merges, and moves only its version lines (`check_rust_lines`,
     which reads a workflow file at the head through `read`)."""
-    allowed = {"repin": REPIN_FILES, "rust": RUST_FILES}.get(kind) or FILES.get(branch.split("/")[1])
+    allowed = ({"repin": REPIN_FILES, "rust": RUST_FILES, "rust-release": RELEASE_FILES}.get(kind)
+               or FILES.get(branch.split("/")[1]))
     need(allowed is not None, f"B8: no file allowlist for `{branch}`; left for a person")
     need(isinstance(files, list) and len(files) < PAGE, "B8: the files listing may be truncated")
     count = dig(pr, "changed_files")
@@ -925,6 +942,96 @@ def check_bot_files(files, pr, kind, branch, read=None):
              f"B8: {name!r} is not a file this pull request's ecosystem changes")
         if kind == "rust":
             check_rust_lines(f, name, branch.split("/", 1)[1], read)
+    if kind == "rust-release":
+        check_release(files, branch)
+
+
+def main_text(path):
+    """A file of yadgarhq/actions main: this checkout (B8 for a rust-release)."""
+    try:
+        with open(os.path.join(ROOT, path), encoding="utf-8") as handle:
+            return handle.read()
+    except OSError as exc:
+        raise Skip(f"B8: {path} is not readable in this checkout: {exc}") from None
+
+
+def release_net():
+    """Docker Hub, for B8 of a rust-release (tests replace it)."""
+    return rust_release.Net()
+
+
+def release_digest(version):
+    """B8 for a rust-release: the index digest Docker Hub serves for BOTH
+    `rust:X.Y.Z-bookworm` and `rust:X.Y-bookworm` now (`rust_release.resolve`),
+    which also proves X.Y.Z is a published release. Fail closed: no answer,
+    two answers, or ANY exception (http.client's included) is a skip."""
+    try:
+        digest, why = rust_release.resolve(release_net(), version)
+    except Exception as exc:  # noqa: BLE001  fail closed: a broken read is never a merge
+        raise Skip(f"B8: Docker Hub did not resolve rust:{version}-bookworm "
+                   f"({type(exc).__name__}: {str(exc)[:120]})") from None
+    need(digest is not None, f"B8: {why}")
+    return digest
+
+
+def check_release(files, branch):
+    """B8 for ADR-1120 part b, in yadgarhq/actions. A `rust-release/X.Y.Z`
+    pull request changes exactly versions.yaml and the two Containerfiles, ONE
+    line each (`rust_pairs`), and each replaced line is a line of that file on
+    main. versions.yaml's line is main's rust-toolchain entry, with no
+    `previous`, and becomes that entry at X.Y.Z, strictly NEWER than main's
+    version, with `previous` main's version: no downgrade, no sideways move,
+    no other key. The rust-build base moves from main's major.minor to X.Y at
+    a 64-hex digest; the
+    estate runner's `--default-toolchain` moves from main's version to X.Y.Z,
+    and nothing else on either line. The digest must be the one index Docker
+    Hub serves now for `rust:X.Y.Z-bookworm` and `rust:X.Y-bookworm`
+    (`release_digest`), bound to the tag, not merely some library/rust index. A `rust-release/X.Y.Z-end` pull request
+    changes versions.yaml alone: main's entry at X.Y.Z WITH `previous`, which
+    it deletes, and nothing else. Anything else is left for a person."""
+    tail = branch.split("/", 1)[1]
+    end = tail.endswith(rust_release.END)
+    version = tail.removesuffix(rust_release.END)
+    names = sorted(str(dig(f, "filename")) for f in files)
+    want = [rust_release.VERSIONS] if end else sorted(rust_release.FILES)
+    need(names == want, f"B8: `{branch}` changes {names}, not exactly {want}")
+    main = {path: main_text(path) for path in want}
+    try:
+        _, org, sites, previous = rust_release.read_entry(main[rust_release.VERSIONS])
+    except Refusal as refusal:
+        raise Skip(f"B8: main's versions.yaml: {refusal}") from None
+    pairs = {}
+    for f in files:
+        name, patch = f["filename"], f.get("patch")
+        need(isinstance(patch, str) and bool(patch), f"B8: no patch for {name!r} to read line by line")
+        got = rust_pairs(patch, name)
+        need(len(got) == 1, f"B8: {name!r} changes more than one line")
+        old, new, _ = got[0]
+        need(main[name].split("\n").count(old) == 1, f"B8: {name!r}: the replaced line is not one line of main's file")
+        pairs[name] = (old, new)
+    old, new = pairs[rust_release.VERSIONS]
+    need(old == rust_release.entry(org, sites, previous), "B8: the versions.yaml line is not main's rust-toolchain entry")
+    if end:
+        need(previous is not None and version == org and new == rust_release.entry(org, sites),
+             f"B8: `{branch}` does not delete `previous` from main's {org} entry and only that")
+        return
+    need(previous is None, f"B8: main's versions.yaml still carries previous {previous}")
+    need(rust_version.key(version) > rust_version.key(org),
+         f"B8: `{branch}` is not newer than versions.yaml rust-toolchain {org} (no downgrade, no sideways move)")
+    need(new == rust_release.entry(version, sites, org),
+         f"B8: the versions.yaml line is not the {org} entry moved to {version} with previous {org}")
+    old, new = pairs[rust_release.RUST_BUILD]
+    was, now = rust_release.IMAGE.fullmatch(old), rust_release.IMAGE.fullmatch(new)
+    need(bool(was) and was.group(1) == rust_release.minor(org) and bool(now)
+         and new == rust_release.image(rust_release.minor(version), now.group(2)),
+         f"B8: the rust-build base does not move from {rust_release.minor(org)} to {rust_release.minor(version)} only")
+    flag = rust_release.FLAG
+    old, new = pairs[rust_release.ESTATE_RUNNER]
+    need(old.count(f"{flag} {org} ") == 1 and old.count(flag) == 1
+         and new == old.replace(f"{flag} {org} ", f"{flag} {version} "),
+         f"B8: the estate runner's {flag} does not move from {org} to {version} only")
+    need(release_digest(version) == now.group(2),
+         f"B8: the rust-build digest is not the index Docker Hub serves for rust:{version}-bookworm")
 
 
 def org_rust():
@@ -1049,6 +1156,8 @@ def evaluate_bot(api, owner, name, n, classes, now):
     pr = api.get(f"repos/{owner}/{name}/pulls/{int(n)}")
     need(dig(pr, "number") == n, "unexpected API shape: another pull request")
     kind, branch = check_bot_pr(pr, meta, owner)
+    need(kind != "rust-release" or name == ACTIONS,
+         "B8: a rust-release pull request outside yadgarhq/actions")
     head = dig(pr, "head", "sha")
     need(isinstance(head, str) and bool(SHA.fullmatch(head)), "unexpected API shape: head sha")
     check_reviews(api.get(f"repos/{owner}/{name}/pulls/{n}/reviews?per_page={PAGE}"),
@@ -1534,7 +1643,8 @@ class SweepGh(fan_out.Gh):
         """A merged bot pull request's branch, and no other. Gone already (404,
         or 422 `Reference does not exist`) is done."""
         if not any(pattern.fullmatch(branch) for _, _, pattern in BOTS.values()) or ".." in branch:
-            raise Refusal(f"refusing to delete `{branch}`: not a dependabot, repin or rust-bump branch")
+            raise Refusal(f"refusing to delete `{branch}`: not a dependabot, repin, rust-bump or "
+                          "rust-release branch")
         try:
             self._api("-X", "DELETE",
                       f"repos/{fan_out.q(owner)}/{fan_out.q(name)}/git/refs/heads/{branch}",

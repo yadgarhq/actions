@@ -285,3 +285,215 @@ def test_rewrite_leaves_every_other_toolchain_key_alone():
     changed = [i for i, (a, b) in enumerate(zip(old, new)) if a != b]
     assert changed == [13, 16]
     assert new[13] == f"          toolchain: {V}" and new[16] == f"          toolchain: {V}"
+
+
+# ---------------------------------------------------------------------------
+# yaadgaar 527 step 6 (4): the workspace, not every git-listed Cargo.toml.
+# A test fixture or a vendored crate is not a package cargo builds here.
+# ---------------------------------------------------------------------------
+
+AT = WORKSPACE.replace("1.90", V)
+FIXTURE = '[package]\nname = "fixture"\nrust-version = "1.60"\n'
+
+
+def test_the_workspace_keeps_the_root_and_its_declared_members():
+    files = {"Cargo.toml": AT, "crates/front/Cargo.toml": MEMBER,
+             "tests/fixtures/old/Cargo.toml": FIXTURE, "vendor/x/Cargo.toml": FIXTURE,
+             "rust-toolchain.toml": TOOLCHAIN, ".github/workflows/smoke.yaml": SMOKE}
+    assert sorted(rv.workspace(files)) == [".github/workflows/smoke.yaml", "Cargo.toml",
+                                           "crates/front/Cargo.toml", "rust-toolchain.toml"]
+
+
+def test_a_fixture_crate_outside_the_workspace_is_no_finding():
+    files = {"rust-toolchain.toml": TOOLCHAIN.replace("1.98.0", V), "Cargo.toml": AT,
+             "crates/front/Cargo.toml": MEMBER, "tests/fixtures/old/Cargo.toml": FIXTURE}
+    assert rv.findings(rv.workspace(files), V) == []
+
+
+def test_a_root_crate_with_no_workspace_keeps_only_itself():
+    files = {"Cargo.toml": CARGO, "examples/x/Cargo.toml": FIXTURE}
+    assert sorted(rv.workspace(files)) == ["Cargo.toml"]
+
+
+def test_member_globs_and_exclude_follow_cargo():
+    root = ('[workspace]\nmembers = ["crates/*", "tools/gen"]\nexclude = ["crates/old"]\n'
+            '[workspace.package]\nrust-version = "1.90"\n')
+    files = {"Cargo.toml": root, "crates/a/Cargo.toml": MEMBER, "crates/old/Cargo.toml": FIXTURE,
+             "crates/a/deep/Cargo.toml": FIXTURE, "tools/gen/Cargo.toml": MEMBER,
+             "tools/genx/Cargo.toml": FIXTURE}
+    assert sorted(rv.workspace(files)) == ["Cargo.toml", "crates/a/Cargo.toml", "tools/gen/Cargo.toml"]
+
+
+def test_a_member_that_drifts_is_still_a_finding():
+    """The filter narrows WHICH files; a declared member is checked as before."""
+    member = '[package]\nname = "front"\nrust-version = "1.90"\n'
+    files = {"rust-toolchain.toml": TOOLCHAIN.replace("1.98.0", V), "Cargo.toml": AT,
+             "crates/front/Cargo.toml": member}
+    got = rv.findings(rv.workspace(files), V)
+    assert len(got) == 1 and "crates/front/Cargo.toml" in got[0]
+
+
+def test_an_unparseable_root_is_kept_and_stays_a_finding():
+    """Fail closed: a root cargo cannot read is never dropped, and nested
+    manifests are not let in by it."""
+    files = {"Cargo.toml": "[package\n", "crates/front/Cargo.toml": FIXTURE}
+    kept = rv.workspace(files)
+    assert sorted(kept) == ["Cargo.toml"]
+    assert any("not valid TOML" in f for f in rv.findings(kept, V))
+
+
+def test_no_root_manifest_keeps_no_manifest():
+    files = {"crates/front/Cargo.toml": FIXTURE, "rust-toolchain.toml": TOOLCHAIN}
+    assert sorted(rv.workspace(files)) == ["rust-toolchain.toml"]
+
+
+@pytest.mark.parametrize("members", ['"crates/front"', '[1]', '["../x"]', '["/abs"]'])
+def test_a_members_list_cargo_would_not_read_is_refused(members):
+    files = {"Cargo.toml": f"[workspace]\nmembers = {members}\n"}
+    with pytest.raises(rv.Refusal):
+        rv.workspace(files)
+
+
+def test_cli_ignores_a_fixture_crate(tmp_path):
+    _repo(tmp_path, {"rust-toolchain.toml": TOOLCHAIN.replace("1.98.0", V),
+                     "Cargo.toml": CARGO.replace("1.90", V),
+                     "tests/fixtures/old/Cargo.toml": FIXTURE})
+    done = _check(tmp_path, "--version", V, "--mode", "fail")
+    assert done.returncode == 0, done.stdout
+
+
+# ---------------------------------------------------------------------------
+# yaadgaar 527 step 6 (3): the grace window. While versions.yaml carries
+# `previous`, a field still at EXACTLY that version passes, and only when the
+# pull request did not put it there (the same field at the base is `previous`
+# too). Without `previous`, or without a base, nothing changes.
+# ---------------------------------------------------------------------------
+
+NEW = "1.100.0"
+OLD_TREE = {"rust-toolchain.toml": TOOLCHAIN.replace("1.98.0", V), "Cargo.toml": CARGO.replace("1.90", V)}
+
+
+def test_grace_admits_an_untouched_field_at_the_previous_version():
+    assert rv.findings(OLD_TREE, NEW, previous=V, base=OLD_TREE) == []
+
+
+def test_without_grace_the_previous_version_is_a_finding():
+    assert len(rv.findings(OLD_TREE, NEW)) == 2
+    assert len(rv.findings(OLD_TREE, NEW, previous=None, base=OLD_TREE)) == 2
+
+
+def test_grace_needs_a_base():
+    assert len(rv.findings(OLD_TREE, NEW, previous=V, base=None)) == 2
+
+
+@pytest.mark.parametrize("other", ["1.99.0", "1.98.0", "1.90", "1.99", "1.99.1 "])
+def test_grace_admits_exactly_the_previous_version(other):
+    head = {"rust-toolchain.toml": TOOLCHAIN.replace("1.98.0", V),
+            "Cargo.toml": CARGO.replace("1.90", other)}
+    base = {"rust-toolchain.toml": TOOLCHAIN.replace("1.98.0", V),
+            "Cargo.toml": CARGO.replace("1.90", other)}
+    got = rv.findings(head, NEW, previous=V, base=base)
+    assert len(got) == 1 and "Cargo.toml" in got[0]
+
+
+def test_grace_refuses_a_field_the_pull_request_moved_back():
+    """The base is at the new version; the pull request moves it to previous."""
+    base = {"rust-toolchain.toml": TOOLCHAIN.replace("1.98.0", NEW), "Cargo.toml": CARGO.replace("1.90", NEW)}
+    got = rv.findings(OLD_TREE, NEW, previous=V, base=base)
+    assert len(got) == 2
+
+
+def test_grace_refuses_a_field_the_pull_request_added_at_previous():
+    """A new member crate (absent at the base) at the previous version."""
+    head = dict(OLD_TREE, **{"Cargo.toml": WORKSPACE.replace("1.90", NEW),
+                             "crates/front/Cargo.toml": CARGO.replace("1.90", V)})
+    base = {"rust-toolchain.toml": TOOLCHAIN.replace("1.98.0", NEW),
+            "Cargo.toml": WORKSPACE.replace("1.90", NEW)}
+    got = rv.findings(head, NEW, previous=V, base=base)
+    assert any("crates/front/Cargo.toml" in f for f in got)
+
+
+def test_grace_matches_the_same_slot_not_any_slot():
+    """A base `[workspace.package]` at previous does not cover a `[package]` slot."""
+    both = '[package]\nname = "x"\nrust-version = "{}"\n[workspace]\n[workspace.package]\nrust-version = "{}"\n'
+    head = {"rust-toolchain.toml": TOOLCHAIN.replace("1.98.0", NEW), "Cargo.toml": both.format(V, NEW)}
+    base = {"rust-toolchain.toml": TOOLCHAIN.replace("1.98.0", NEW), "Cargo.toml": both.format(NEW, V)}
+    got = rv.findings(head, NEW, previous=V, base=base)
+    assert len(got) == 1 and "[package]" in got[0]
+
+
+@pytest.mark.parametrize("previous", [NEW, "1.101.0", "1.99", "", "x"])
+def test_a_previous_that_is_not_an_older_x_y_z_is_refused(previous):
+    with pytest.raises(rv.Refusal):
+        rv.findings(OLD_TREE, NEW, previous=previous, base=OLD_TREE)
+
+
+def _commit(tmp_path, message):
+    """A fixture commit in a throwaway repository: no user or system config
+    (as test_fan_out does), so the runner needs no identity of its own."""
+    env = dict(_git_env(), GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
+               GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
+               GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid")
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", message], check=True, env=env)
+    return subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "HEAD"], check=True,
+                          capture_output=True, text=True, env=_git_env()).stdout.strip()
+
+
+def test_cli_grace_passes_an_untouched_tree(tmp_path):
+    _repo(tmp_path, OLD_TREE)
+    base = _commit(tmp_path, "base")
+    done = _check(tmp_path, "--version", NEW, "--mode", "fail", "--previous", V, "--base", base)
+    assert done.returncode == 0, done.stdout
+
+
+def test_cli_grace_refuses_a_move_back_to_previous(tmp_path):
+    _repo(tmp_path, {"rust-toolchain.toml": TOOLCHAIN.replace("1.98.0", NEW),
+                     "Cargo.toml": CARGO.replace("1.90", NEW)})
+    base = _commit(tmp_path, "base")
+    _repo(tmp_path, OLD_TREE)
+    done = _check(tmp_path, "--version", NEW, "--mode", "fail", "--previous", V, "--base", base)
+    assert done.returncode == 1 and done.stdout.count("::error::") == 2
+
+
+def test_cli_empty_previous_and_base_mean_no_grace(tmp_path):
+    _repo(tmp_path, OLD_TREE)
+    _commit(tmp_path, "base")
+    done = _check(tmp_path, "--version", NEW, "--mode", "fail", "--previous", "", "--base", "")
+    assert done.returncode == 1
+
+
+def test_cli_an_unreadable_base_is_an_error(tmp_path):
+    _repo(tmp_path, OLD_TREE)
+    _commit(tmp_path, "base")
+    done = _check(tmp_path, "--version", NEW, "--mode", "fail", "--previous", V, "--base", "f" * 40)
+    assert done.returncode == 2
+
+
+@pytest.mark.parametrize("other", ["1.99.0", "1.98.0", NEW + ".1"])
+def test_grace_admits_exactly_the_previous_channel(other):
+    """The toolchain file too: a channel at another version is a finding even
+    when the base carries the same channel."""
+    head = {"rust-toolchain.toml": TOOLCHAIN.replace("1.98.0", other), "Cargo.toml": CARGO.replace("1.90", NEW)}
+    got = rv.findings(head, NEW, previous=V, base=dict(head))
+    assert len(got) == 1 and "rust-toolchain.toml" in got[0]
+
+
+def test_grace_admits_the_previous_channel_left_untouched():
+    head = {"rust-toolchain.toml": TOOLCHAIN.replace("1.98.0", V), "Cargo.toml": CARGO.replace("1.90", NEW)}
+    assert rv.findings(head, NEW, previous=V, base=dict(head)) == []
+
+
+def test_grace_refuses_a_channel_moved_off_previous():
+    """The base is at previous; the pull request moves the channel elsewhere."""
+    base = {"rust-toolchain.toml": TOOLCHAIN.replace("1.98.0", V), "Cargo.toml": CARGO.replace("1.90", NEW)}
+    head = dict(base, **{"rust-toolchain.toml": TOOLCHAIN})
+    got = rv.findings(head, NEW, previous=V, base=base)
+    assert len(got) == 1 and "rust-toolchain.toml" in got[0]
+
+
+def test_exclude_covers_the_directory_and_below_but_not_a_sibling_prefix():
+    root = '[workspace]\nmembers = ["crates/**"]\nexclude = ["crates/old"]\n'
+    files = {"Cargo.toml": root, "crates/old/Cargo.toml": FIXTURE, "crates/old/sub/Cargo.toml": FIXTURE,
+             "crates/older/Cargo.toml": MEMBER, "./crates/x": "", "crates/a/Cargo.toml": MEMBER}
+    assert sorted(p for p in rv.workspace(files) if p.endswith("Cargo.toml")) == [
+        "Cargo.toml", "crates/a/Cargo.toml", "crates/older/Cargo.toml"]

@@ -60,3 +60,37 @@ def test_the_revert_body_follows_the_template():
         assert header in text
     assert "ADR-0583" in text
     assert "--mode warn" in text  # the revert restores the warn-only shape
+
+
+# yaadgaar 527 step 6: the grace window reaches the check, and only through
+# versions.yaml's `previous` and the merge commit's first parent.
+
+
+def test_detect_exports_the_grace_version():
+    outputs = workflow()["detect"]["outputs"]
+    assert outputs["rust_toolchain_previous"] == "${{ steps.versions.outputs.rust_toolchain_previous }}"
+
+
+def test_the_check_is_given_previous_and_the_base():
+    step = next(s for s in job()["steps"] if s.get("name", "").startswith("every Rust version field"))
+    assert step["env"]["PREVIOUS"] == "${{ needs.detect.outputs.rust_toolchain_previous }}"
+    assert step["env"]["HEAD_SHA"] == "${{ github.event.pull_request.head.sha }}"
+    run = step["run"]
+    assert '--previous "$PREVIOUS" --base "$base"' in run
+    # the base is HEAD^1 only for the merge of this pull request's head
+    assert '[ "${#parents[@]}" -eq 3 ] && [ "${parents[2]}" = "$HEAD_SHA" ]' in run
+    assert 'base="${parents[1]}"' in run
+
+
+def test_the_checkout_carries_the_merge_parents():
+    checkout = job()["steps"][0]
+    assert checkout["uses"].startswith("actions/checkout@")
+    assert checkout["with"]["fetch-depth"] == 2
+
+
+def test_the_grace_window_revert_body_follows_the_template():
+    text = (ROOT / ".github" / "revert-bodies" / "rust-release-detector.md").read_text()
+    for header in ("## What", "## Why", "## Changelog", "## Verification", "## Risk"):
+        assert header in text
+    assert "ADR-0583" in text
+    assert "previous" in text  # the revert must not strand the grace key

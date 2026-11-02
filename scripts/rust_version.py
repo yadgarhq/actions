@@ -26,13 +26,32 @@ a column-0 `channel = "..."` or `rust-version = "..."` line, or of an indented
 parsed difference is the field it meant to move: a matching line in some other
 table would move something that is not the MSRV.
 
+WHICH `Cargo.toml` (yaadgaar 527 step 6). `workspace` keeps the root manifest
+and, when it declares `[workspace]`, the manifests of its declared `members`
+(cargo's globs, less `exclude`); nothing else. A test fixture or a vendored
+crate is not a package cargo builds here, so its `rust-version` is not the
+repository's MSRV. Cargo's implicit members (path dependencies under the root
+that `members` does not name) are not read. A root cargo cannot parse is kept,
+so it stays a finding, and lets no nested manifest in.
+
+THE GRACE WINDOW (yaadgaar 527 step 6, ADR-1120). Between the actions pull
+request that moves `versions.yaml` rust-toolchain and each consumer's
+rust-bump merge, every consumer's fields sit at the old version. While
+`versions.yaml` carries `previous` (the old version, which only the detector's
+pull request writes), `check --previous P --base REV` passes a field that is
+EXACTLY `P` when the same field (the same file, the same table) is `P` at
+`REV`, the pull request's base: a field the pull request did not move. A field
+the pull request moved back to `P`, or added at `P`, is a finding as before.
+No `previous`, or no base, is the check as before.
+
 STANDARD LIBRARY ONLY: `rust_parity` runs on the runner's own `python3` with
 no `setup-python` step, so it adds no `python` or `pyyaml` site to
 `versions.yaml`.
 
 Commands:
 
-    rust_version.py check --version X.Y.Z --mode warn|fail   in the repository root
+    rust_version.py check --version X.Y.Z --mode warn|fail [--previous P --base REV]
+                                                             in the repository root
 
 Tests: python3 -m pytest scripts/tests/ -q
 """
@@ -101,9 +120,105 @@ def _channel(data):
     return table.get("channel") if isinstance(table, dict) else None
 
 
-def findings(files, version):
-    """What differs from `version`, one line each. `files` maps path -> text."""
+def key(version):
+    """`X.Y.Z` as a tuple of ints, for ordering."""
     check_version(version)
+    return tuple(int(part) for part in version.split("."))
+
+
+def check_previous(previous, version):
+    """The grace version: X.Y.Z and strictly older than `version`."""
+    check_version(previous)
+    if key(previous) >= key(version):
+        raise Refusal(f"the grace version {previous!r} is not older than {version!r}")
+
+
+def _glob(pattern):
+    """A cargo `members` glob as a regex over a directory path: `*` and `?`
+    stay inside one segment, `**` crosses segments."""
+    if (not isinstance(pattern, str) or not pattern or pattern.startswith("/")
+            or ".." in pattern.split("/") or "\\" in pattern):
+        raise Refusal(f"Cargo.toml: workspace member {pattern!r} is not a relative path glob")
+    pattern = pattern.removeprefix("./").rstrip("/")
+    out, i = "", 0
+    while i < len(pattern):
+        if pattern.startswith("**", i):
+            out, i = out + ".*", i + 2
+        elif pattern[i] == "*":
+            out, i = out + "[^/]*", i + 1
+        elif pattern[i] == "?":
+            out, i = out + "[^/]", i + 1
+        elif pattern[i] == "[":
+            end = pattern.find("]", i + 1)
+            if end < 0:
+                raise Refusal(f"Cargo.toml: workspace member {pattern!r} has an open `[`")
+            body = pattern[i + 1:end]
+            out += "[" + ("^" + body[1:] if body.startswith("!") else body).replace("/", "") + "]"
+            i = end + 1
+        else:
+            out, i = out + re.escape(pattern[i]), i + 1
+    return re.compile(out)
+
+
+def _strings(value, what):
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise Refusal(f"Cargo.toml: `workspace.{what}` is not a list of strings")
+    return value
+
+
+def workspace(files):
+    """`files` less every `Cargo.toml` that is neither the root manifest nor a
+    declared workspace member. Other kinds pass through."""
+    out = {p: t for p, t in files.items() if kind_of(p) not in (None, "cargo")}
+    root = files.get("Cargo.toml")
+    if root is None:
+        return out
+    out["Cargo.toml"] = root
+    try:
+        data = tomllib.loads(root)
+    except tomllib.TOMLDecodeError:
+        return out  # kept, so `findings` reports it; nothing nested let in
+    table = data.get("workspace")
+    if table is None:
+        return out
+    if not isinstance(table, dict):
+        raise Refusal("Cargo.toml: `workspace` is not a table")
+    members = [_glob(m) for m in _strings(table.get("members", []), "members")]
+    exclude = [e.removeprefix("./").rstrip("/") for e in _strings(table.get("exclude", []), "exclude")]
+    for path, text in files.items():
+        if kind_of(path) != "cargo" or path == "Cargo.toml":
+            continue
+        where = path[:-len("/Cargo.toml")]
+        if (any(m.fullmatch(where) for m in members)
+                and not any(where == e or where.startswith(e + "/") for e in exclude)):
+            out[path] = text
+    return out
+
+
+def _base_channel(base):
+    try:
+        return _channel(_toml(TOOLCHAIN_FILE, base[TOOLCHAIN_FILE]))
+    except (KeyError, TypeError, Refusal):
+        return None
+
+
+def _base_slots(base, path):
+    try:
+        return dict(_msrv_slots(_toml(path, base[path])))
+    except (KeyError, TypeError, Refusal):
+        return {}
+
+
+def findings(files, version, previous=None, base=None):
+    """What differs from `version`, one line each. `files` maps path -> text.
+
+    With `previous` AND `base` (path -> text at the pull request's base), a
+    field that is exactly `previous` here and in the same place at the base is
+    no finding: the grace window, and only for a field left untouched."""
+    check_version(version)
+    if previous is not None:
+        check_previous(previous, version)
+    grace = previous is not None and base is not None
     cargo = sorted(p for p in files if kind_of(p) == "cargo")
     if not cargo:
         return []
@@ -113,7 +228,8 @@ def findings(files, version):
     else:
         try:
             channel = _channel(_toml(TOOLCHAIN_FILE, files[TOOLCHAIN_FILE]))
-            if channel != version:
+            if channel != version and not (grace and channel == previous
+                                           and _base_channel(base) == previous):
                 out.append(f"{TOOLCHAIN_FILE} channel is {channel!r}, not {version!r}")
         except Refusal as refusal:
             out.append(str(refusal))
@@ -124,7 +240,8 @@ def findings(files, version):
             out.append(str(refusal))
             continue
         for where, value in slots:
-            if value != version:
+            if value != version and not (grace and value == previous
+                                         and _base_slots(base, path).get(where) == previous):
                 out.append(f"{path} [{where}] rust-version is {value!r}, not {version!r}")
     return out
 
@@ -218,7 +335,8 @@ def changes(files, version):
 
 
 def tracked(root="."):
-    """The Rust version files `git ls-files` lists, as `{path: text}`."""
+    """The Rust version files `git ls-files` lists, as `{path: text}`: the
+    toolchain file, the root manifest and its declared members (`workspace`)."""
     done = subprocess.run(["git", "-C", root, "ls-files", "-z"], capture_output=True,
                           check=True)
     out = {}
@@ -230,6 +348,24 @@ def tracked(root="."):
             raise Refusal(f"{path} is over {MAX_BYTES} bytes")
         with open(full, encoding="utf-8") as handle:
             out[path] = handle.read()
+    return workspace(out)
+
+
+def at(rev, paths, root="."):
+    """`{path: text}` for each of `paths` present at commit `rev`. A `rev`
+    that is not a commit here is a refusal, never an empty base."""
+    if not isinstance(rev, str) or not re.fullmatch(r"[0-9a-f]{40}", rev):
+        raise Refusal(f"the base {rev!r} is not a 40-hex commit")
+    ok = subprocess.run(["git", "-C", root, "cat-file", "-e", f"{rev}^{{commit}}"],
+                        capture_output=True, check=False)
+    if ok.returncode != 0:
+        raise Refusal(f"the base {rev} is not a commit in this checkout")
+    out = {}
+    for path in paths:
+        got = subprocess.run(["git", "-C", root, "cat-file", "blob", f"{rev}:{path}"],
+                             capture_output=True, check=False)
+        if got.returncode == 0 and len(got.stdout) <= MAX_BYTES:
+            out[path] = got.stdout.decode("utf-8", errors="replace")
     return out
 
 
@@ -246,10 +382,19 @@ def main(argv):
     check = sub.add_parser("check")
     check.add_argument("--version", required=True)
     check.add_argument("--mode", required=True, choices=("warn", "fail"))
+    check.add_argument("--previous", default="")
+    check.add_argument("--base", default="")
     args = parser.parse_args(argv)
     try:
         check_version(args.version)
-        found = findings(tracked(), args.version)
+        files = tracked()
+        previous = args.previous or None
+        base = at(args.base, sorted(files)) if previous and args.base else None
+        if previous and base is None:
+            print(f"::notice::versions.yaml carries previous {previous}, but no base commit was "
+                  "given; no grace (ADR-1120)")
+        found = findings(files, args.version, previous=previous if base is not None else None,
+                         base=base)
     except Refusal as refusal:
         print(f"::error::{refusal}")
         return 2

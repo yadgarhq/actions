@@ -39,10 +39,16 @@
 # scripts/tests/test_versions_parity.py). The install step refuses any other sum.
 #
 # `rust-toolchain` is THE Rust version of the org (ADR-1118): the latest stable
-# release, 1.99.1 (upstream channel-rust-stable.toml, 2026-10-13). One value
-# governs the CI toolchain step AND the build images (`rust:` base tag,
-# `--default-toolchain`); every consumer's `rust-toolchain.toml` takes it too.
-# A new stable release moves this line, the image sites and the consumers.
+# release (upstream channel-rust-stable.toml). One value governs the CI
+# toolchain step AND the build images (`rust:` base tag, `--default-toolchain`);
+# every consumer's `rust-toolchain.toml` takes it too. A new stable release
+# moves this line and the image sites in ONE bot pull request
+# (`scripts/rust_release.py`, ADR-1120), then the consumers. That pull request
+# also adds `previous: "<the old version>"` to this line, the grace window in
+# which ci-pr's `rust_parity` still passes an untouched consumer field at the
+# old version; a later bot pull request deletes it once every Rust repository
+# is current. `previous` is allowed on this tool only. No comment here names
+# the version: the bot changes the line and nothing else.
 #
 # `python` is a minor, which `actions/setup-python` resolves to its newest patch.
 #

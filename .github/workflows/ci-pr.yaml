@@ -148,6 +148,8 @@ jobs:
       helm: ${{ steps.versions.outputs.helm }}
       trivy: ${{ steps.versions.outputs.trivy }}
       rust_toolchain: ${{ steps.versions.outputs.rust_toolchain }}
+      # ADR-1120 grace window: empty unless versions.yaml carries `previous`.
+      rust_toolchain_previous: ${{ steps.versions.outputs.rust_toolchain_previous }}
       python: ${{ steps.versions.outputs.python }}
       pyyaml: ${{ steps.versions.outputs.pyyaml }}
     steps:
@@ -1067,6 +1069,17 @@ jobs:
   # same day and all fourteen Rust repositories now match. The job skips where
   # there is no `Cargo.toml` (charts, config), on a text-only edit and on a
   # config-only one. Rollback is `.github/revert-bodies/rust-parity-fail.md`.
+  #
+  # THE GRACE WINDOW (yaadgaar 527 step 6). The Rust release detector's
+  # actions pull request moves `versions.yaml` rust-toolchain and sets
+  # `previous` to the version it replaces; until each consumer's rust-bump
+  # merges, its fields sit at `previous`. While `previous` is set, a field at
+  # EXACTLY that version passes when it is the same at the pull request's
+  # base (HEAD^1 of the merge commit, so a field this pull request did not
+  # move). No `previous`, or a HEAD that is not the merge of this pull
+  # request's head, is the check as before. A bot pull request deletes
+  # `previous` once every Rust repository is current. Rollback:
+  # `.github/revert-bodies/rust-release-detector.md`.
   rust_parity:
     needs: detect
     if: >-
@@ -1080,6 +1093,8 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.ref }}
+          # The merge commit AND its parents: the grace window reads the base.
+          fetch-depth: 2
       - id: own_sha
         name: the actions commit this job runs (ADR-0981)
         env:
@@ -1105,6 +1120,8 @@ jobs:
         env:
           UNDER_REVIEW: ${{ github.repository }}
           RUST: ${{ needs.detect.outputs.rust_toolchain }}
+          PREVIOUS: ${{ needs.detect.outputs.rust_toolchain_previous }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           src=scripts/rust_version.py
@@ -1113,7 +1130,15 @@ jobs:
           fi
           cp "$src" "$RUNNER_TEMP/rust_version.py"
           rm -rf .ci-actions
-          python3 "$RUNNER_TEMP/rust_version.py" check --version "$RUST" --mode fail
+          # The base only when HEAD is the merge of THIS pull request's head
+          # (as config_only.py proves it): anything else gets no grace.
+          base=""
+          read -r -a parents <<< "$(git rev-list --parents -n 1 HEAD)"
+          if [ -n "$PREVIOUS" ] && [ "${#parents[@]}" -eq 3 ] && [ "${parents[2]}" = "$HEAD_SHA" ]; then
+            base="${parents[1]}"
+          fi
+          python3 "$RUNNER_TEMP/rust_version.py" check --version "$RUST" --mode fail \
+            --previous "$PREVIOUS" --base "$base"
 
   # A REAL ENGINE, not a mock. D69's capability probe establishes what an engine
   # can do by executing against it, so a test suite with no engine cannot

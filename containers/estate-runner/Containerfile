@@ -53,8 +53,9 @@ RUN apt-get update \
 
 USER 1001
 
-# 1.99.1 IS `rust-toolchain` IN versions.yaml (ADR-1118) AND `rust-toolchain.toml`
-# IN yadgarhq/estate, and the two must agree.
+# THE RUSTUP DEFAULT TOOLCHAIN BELOW IS `rust-toolchain` IN versions.yaml (ADR-1118)
+# AND `rust-toolchain.toml` IN yadgarhq/estate, and the two must agree. The Rust
+# release bot (ADR-1120) moves that one line; no comment names the version.
 # A mismatch is not an error: rustup silently fetches the pinned channel on
 # first use and recompiles everything with it, so the only symptom is every job
 # paying a full toolchain download and a cold build.

