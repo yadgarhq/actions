@@ -380,6 +380,8 @@ def fake_trivy(version="0.74.0", config_stdout='{"Results": []}', config_stderr=
     """
 
     def fake_run(args, capture_output, text):
+        if args[0] == "helm":
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
         if seen is not None:
             seen["args"] = args
         if args[1] == "version":
@@ -629,6 +631,8 @@ def fake_trivy_passes(by_values, version="0.74.0", calls=None):
     import json as _json
 
     def fake_run(args, capture_output, text):
+        if args[0] == "helm":
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
         if args[1] == "version":
             return subprocess.CompletedProcess(args, 0, stdout=f'{{"Version": "{version}"}}', stderr="")
         if calls is not None:
@@ -964,3 +968,243 @@ def test_an_extra_pass_with_zero_helm_results_refuses_even_without_chart_yaml(tm
     )
     with pytest.raises(trivy_gate.Refused, match=r"(?s)--helm-values scan reported zero.*estate-values\.yaml"):
         trivy_gate.run_trivy(chart_dir)
+
+
+# ------------------------- helm.sh/hook templates (yaadgaar #526)
+#
+# Measured, trivy 0.74.0: the helm scanner reports NO result for an object
+# annotated `helm.sh/hook`, under any values file. The hook pass renders with
+# `helm template` and scans this chart's own hook objects as kubernetes files.
+
+HOOK_JOB = """---
+# Source: platform/templates/preflight.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: preflight
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+spec: {}
+"""
+PLAIN_CM = """---
+# Source: platform/templates/config.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: plain
+"""
+UPSTREAM_HOOK = """---
+# Source: platform/charts/gateway-helm/templates/certgen.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: certgen
+  annotations:
+    "helm.sh/hook": pre-install
+spec: {}
+"""
+
+
+def test_hook_manifests_keeps_only_this_charts_own_hook_objects():
+    got = trivy_gate.hook_manifests(HOOK_JOB + PLAIN_CM + UPSTREAM_HOOK)
+    assert list(got) == ["chart/templates/preflight.yaml"]
+    assert "kind: Job" in got["chart/templates/preflight.yaml"][0]
+    assert "ConfigMap" not in "".join(got["chart/templates/preflight.yaml"])
+
+
+def test_hook_manifests_groups_every_hook_object_of_one_template():
+    rbac = (
+        "---\n# Source: platform/templates/rbac.yaml\nkind: ServiceAccount\nmetadata:\n  name: a\n"
+        "  annotations:\n    helm.sh/hook: pre-install\n"
+        "---\n# Source: platform/templates/rbac.yaml\nkind: Role\nmetadata:\n  name: a\n"
+        "  annotations:\n    helm.sh/hook: pre-install\n"
+    )
+    assert [len(v) for v in trivy_gate.hook_manifests(rbac).values()] == [2]
+
+
+def test_hook_manifests_refuses_a_hook_object_with_no_source_line():
+    with pytest.raises(trivy_gate.Refused, match="Source"):
+        trivy_gate.hook_manifests("---\nkind: Job\nmetadata:\n  annotations:\n    helm.sh/hook: pre-install\n")
+
+
+def _k8s_result(target, *ids, message="m"):
+    return {
+        "Type": "kubernetes",
+        "Target": target,
+        "Misconfigurations": [{"ID": i, "Message": message, "CauseMetadata": {}} for i in ids],
+    }
+
+
+def fake_trivy_with_hooks(by_values, helm_by_values, hook_findings=None, helm_rc=0, drop=0, calls=None):
+    """`fake_trivy_passes` plus `helm template` (keyed by the `-f` basename,
+    `None` for no `-f`) and the hook scan, which answers one kubernetes result
+    per file actually written under its scan directory -- minus `drop` of
+    them -- carrying `hook_findings[target]` IDs."""
+    import json as _json
+
+    hook_findings = hook_findings or {}
+
+    def fake_run(args, capture_output, text):
+        if calls is not None:
+            calls.append(list(args))
+        if args[0] == "helm":
+            key = pathlib.Path(args[args.index("-f") + 1]).name if "-f" in args else None
+            return subprocess.CompletedProcess(args, helm_rc, stdout=helm_by_values.get(key, ""), stderr="boom")
+        if args[1] == "version":
+            return subprocess.CompletedProcess(args, 0, stdout='{"Version": "0.74.0"}', stderr="")
+        if "--misconfig-scanners" in args:
+            root = pathlib.Path(args[-1])
+            files = sorted(p.relative_to(root).as_posix() for p in root.rglob("*.yaml"))
+            results = [_k8s_result(t, *hook_findings.get(t, ())) for t in files[drop:]]
+            return subprocess.CompletedProcess(args, 0, stdout=_json.dumps({"Results": results}), stderr="")
+        key = pathlib.Path(args[args.index("--helm-values") + 1]).name if "--helm-values" in args else None
+        results, stderr = by_values[key]
+        return subprocess.CompletedProcess(args, 0, stdout=_json.dumps({"Results": results}), stderr=stderr)
+
+    return fake_run
+
+
+def test_a_hook_templates_finding_reaches_the_verdict(tmp_path, monkeypatch):
+    """THE RED CASE #526 NAMED: a finding on a hook object -- which trivy's
+    helm scanner never reports -- joins the merged report at its `chart/`
+    path and fails the gate as estate-authored."""
+    monkeypatch.chdir(tmp_path)
+    chart_dir = estate_chart(tmp_path)
+    ok = ([_helm_result("chart/templates/a.yaml")], "")
+    monkeypatch.setattr(
+        trivy_gate.subprocess,
+        "run",
+        fake_trivy_with_hooks(
+            {"values.yaml": ok, "estate-values.yaml": ok},
+            {"estate-values.yaml": HOOK_JOB + PLAIN_CM + UPSTREAM_HOOK},
+            hook_findings={"chart/templates/preflight.yaml": ["KSV-0014"]},
+        ),
+    )
+    findings = trivy_gate.findings_from_report(trivy_gate.run_trivy(chart_dir))
+    assert ("chart/templates/preflight.yaml", "KSV-0014") in {(f.target, f.id) for f in findings}
+    verdict = trivy_gate.evaluate(findings, [], TODAY, chart_dir)
+    assert [f.target for f in verdict.estate_findings] == ["chart/templates/preflight.yaml"]
+
+
+def test_the_hook_render_uses_each_passs_own_values_and_api_versions(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    chart_dir = estate_chart(tmp_path)
+    (chart_dir / "ci" / "api-versions.txt").write_text("cert-manager.io/v1\n")
+    ok = ([_helm_result("chart/templates/a.yaml")], "")
+    calls = []
+    monkeypatch.setattr(
+        trivy_gate.subprocess,
+        "run",
+        fake_trivy_with_hooks({"values.yaml": ok, "estate-values.yaml": ok}, {}, calls=calls),
+    )
+    trivy_gate.run_trivy(chart_dir)
+    helm = [a for a in calls if a[0] == "helm"]
+    assert [a[a.index("-f") + 1] for a in helm] == [
+        str(chart_dir / "ci" / "values.yaml"),
+        str(chart_dir / "ci" / "estate-values.yaml"),
+    ]
+    for a in helm:
+        assert a[:3] == ["helm", "template", str(chart_dir)]
+        assert a[a.index("--api-versions") + 1] == "cert-manager.io/v1"
+
+
+def test_the_hook_scan_is_unfiltered_and_kubernetes_only(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    chart_dir = estate_chart(tmp_path, primary=False)
+    ok = ([_helm_result("chart/templates/a.yaml")], "")
+    calls = []
+    monkeypatch.setattr(
+        trivy_gate.subprocess,
+        "run",
+        fake_trivy_with_hooks({None: ok, "estate-values.yaml": ok}, {None: HOOK_JOB}, calls=calls),
+    )
+    trivy_gate.run_trivy(chart_dir)
+    (scan,) = [a for a in calls if "--misconfig-scanners" in a]
+    assert scan[scan.index("--misconfig-scanners") + 1] == "kubernetes"
+    assert scan[scan.index("--config") + 1] == "/dev/null"
+    assert scan[scan.index("--ignorefile") + 1] == "/dev/null"
+    assert scan[scan.index("--severity") + 1] == "HIGH,CRITICAL"
+    assert "--quiet" not in scan and "--helm-values" not in scan
+
+
+def test_a_failed_hook_render_refuses_naming_the_pass(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    chart_dir = estate_chart(tmp_path)
+    ok = ([_helm_result("chart/templates/a.yaml")], "")
+    monkeypatch.setattr(
+        trivy_gate.subprocess,
+        "run",
+        fake_trivy_with_hooks({"values.yaml": ok, "estate-values.yaml": ok}, {}, helm_rc=1),
+    )
+    with pytest.raises(trivy_gate.Refused, match=r"(?s)helm template.*values\.yaml"):
+        trivy_gate.run_trivy(chart_dir)
+
+
+def test_a_hook_scan_that_reports_fewer_files_than_written_refuses(tmp_path, monkeypatch):
+    """ADR-0578 for the hook pass: every hook file written must come back as
+    a kubernetes result, or the scan proves nothing about the missing one."""
+    monkeypatch.chdir(tmp_path)
+    chart_dir = estate_chart(tmp_path)
+    ok = ([_helm_result("chart/templates/a.yaml")], "")
+    monkeypatch.setattr(
+        trivy_gate.subprocess,
+        "run",
+        fake_trivy_with_hooks({"values.yaml": ok, "estate-values.yaml": ok}, {"estate-values.yaml": HOOK_JOB}, drop=1),
+    )
+    with pytest.raises(trivy_gate.Refused, match=r"(?s)hook.*0 of 1.*estate-values\.yaml"):
+        trivy_gate.run_trivy(chart_dir)
+
+
+def test_a_hook_object_both_passes_render_counts_once(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    chart_dir = estate_chart(tmp_path)
+    ok = ([_helm_result("chart/templates/a.yaml")], "")
+    monkeypatch.setattr(
+        trivy_gate.subprocess,
+        "run",
+        fake_trivy_with_hooks(
+            {"values.yaml": ok, "estate-values.yaml": ok},
+            {"values.yaml": HOOK_JOB, "estate-values.yaml": HOOK_JOB},
+            hook_findings={"chart/templates/preflight.yaml": ["KSV-0014"]},
+        ),
+    )
+    findings = trivy_gate.findings_from_report(trivy_gate.run_trivy(chart_dir))
+    assert [(f.target, f.id) for f in findings].count(("chart/templates/preflight.yaml", "KSV-0014")) == 1
+
+
+def test_hook_results_never_stand_in_for_a_dead_helm_render(tmp_path, monkeypatch):
+    """ADR-0645: the per-pass helm-count refusals see only the helm scan. A
+    hook pass that rendered must not mask a pass whose chart did not."""
+    monkeypatch.chdir(tmp_path)
+    chart_dir = estate_chart(tmp_path)
+    monkeypatch.setattr(
+        trivy_gate.subprocess,
+        "run",
+        fake_trivy_with_hooks(
+            {"values.yaml": ([_helm_result("chart/templates/a.yaml")], ""), "estate-values.yaml": ([], "")},
+            {"values.yaml": HOOK_JOB, "estate-values.yaml": HOOK_JOB},
+        ),
+    )
+    with pytest.raises(trivy_gate.Refused, match=r"(?s)zero.*estate-values\.yaml"):
+        trivy_gate.run_trivy(chart_dir)
+
+
+def test_no_chart_yaml_never_runs_helm(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    calls = []
+    monkeypatch.setattr(trivy_gate.subprocess, "run", fake_trivy_with_hooks({None: ([], "")}, {}, calls=calls))
+    trivy_gate.run_trivy(tmp_path / "chart")
+    assert not [a for a in calls if a[0] == "helm"]
+
+
+def test_the_hook_pass_prints_its_own_count(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    chart_dir = estate_chart(tmp_path)
+    ok = ([_helm_result("chart/templates/a.yaml")], "")
+    monkeypatch.setattr(
+        trivy_gate.subprocess,
+        "run",
+        fake_trivy_with_hooks({"values.yaml": ok, "estate-values.yaml": ok}, {"estate-values.yaml": HOOK_JOB}),
+    )
+    trivy_gate.run_trivy(chart_dir)
+    assert "estate-values.yaml, helm.sh/hook objects: 1 file(s)" in capsys.readouterr().out

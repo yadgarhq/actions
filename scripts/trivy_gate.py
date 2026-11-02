@@ -36,6 +36,26 @@ listed before extra passes existed (`merge_pass_results`).
 Only this gate reads the extra files; `helm-lint`, `d80_portability.py` and
 `service_immutable.py` keep the primary file alone.
 
+A HOOK PASS PER VALUES FILE (yaadgaar #526). trivy 0.74.0's helm scanner
+reports NO result for an object annotated `helm.sh/hook`, under any values
+(measured: it reads the release manifest, which helm keeps hooks out of; no
+trivy flag changes this). So for each pass above, `hook_pass` runs `helm
+template` with the same values file and api versions, keeps every rendered
+object carrying a `helm.sh/hook` annotation whose `# Source:` is THIS chart's
+own `templates/`, writes them to a scratch tree at their `chart/templates/...`
+path, and scans that tree with `--misconfig-scanners kubernetes` and the same
+unfiltered flags. A `Target` is therefore the same `chart/` path the helm
+scanner would have reported, so `.trivyignore.yaml` paths match unchanged.
+Measured on platform: the kubernetes scan of a rendered hook object reports
+exactly the IDs the helm scan reports for the same template with its hook
+annotations deleted. The hook results join the merge as one more pass each;
+they never reach the per-pass `helm` count refusals above, which still see
+only the helm scan. The hook pass refuses on its own: a `helm template` that
+exits non-zero, or a scan that returns fewer kubernetes results than files
+written. Hook objects of VENDORED subcharts (`# Source: <chart>/charts/...`)
+are NOT scanned yet -- they would add upstream findings that need reviewed
+ignore entries first (yaadgaar #526 follow-up).
+
 WHY THE SCAN ITSELF STAYS UNFILTERED, AND WHY `--config` AND `--ignorefile`
 BOTH POINT AT `/dev/null`. `.trivyignore.yaml` is not auto-detected, but trivy
 auto-loads TWO OTHER FILES from the working directory whether asked to or
@@ -146,6 +166,7 @@ import re
 import subprocess
 import sys
 import tarfile
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -160,6 +181,8 @@ TRIVYIGNORE = Path(".trivyignore.yaml")
 LEGACY_TRIVYIGNORE = Path(".trivyignore")
 CHART = Path("chart")
 SKIPPING_CHART = "[helm scanner] Skipping chart"
+HOOK_ANNOTATION = "helm.sh/hook"
+OWN_TEMPLATES = f"{CHART.as_posix()}/templates/"
 # The one version this gate's own tests, and its real-repository proof, were
 # measured against. `trivy-action` installs its OWN default version (0.70.0,
 # measured) and puts it on `PATH` ahead of anything installed before it ran
@@ -673,10 +696,16 @@ def run_trivy(chart_dir: Path = CHART) -> dict:
     """
     version = installed_trivy_version()
     require_trivy_version(version)
+    plan = scan_passes(chart_dir)
     passes = [
         _run_pass(version, label, flags, chart_dir, extra=i > 0).get("Results") or []
-        for i, (label, flags) in enumerate(scan_passes(chart_dir))
+        for i, (label, flags) in enumerate(plan)
     ]
+    # yaadgaar #526: hook objects are invisible to the helm scan above. Each
+    # hook pass is one more pass to merge; the helm count refusals above have
+    # already run, on the helm scan alone.
+    if (chart_dir / "Chart.yaml").is_file():
+        passes += [hook_pass(version, label, flags, chart_dir) for label, flags in plan]
     return {"Results": merge_pass_results(passes)}
 
 
@@ -774,6 +803,108 @@ def _run_pass(version: str, label: str, flags: list[str], chart_dir: Path, extra
         f"{finding_count(report)} HIGH/CRITICAL misconfiguration(s)."
     )
     return report
+
+
+def hook_manifests(rendered: str) -> dict[str, list[str]]:
+    """`helm template` output -> `{chart/templates/<file>: [document, ...]}`
+    for every object annotated `helm.sh/hook` that THIS chart's own
+    `templates/` produced. A rendered `# Source: <name>/templates/x.yaml`
+    maps to `chart/templates/x.yaml`, the `Target` trivy's helm scanner uses
+    for that file. A hook object with no `# Source:` line refuses rather than
+    being dropped: it cannot be mapped back to a reviewed path.
+    """
+    out: dict[str, list[str]] = {}
+    for doc in re.split(r"(?m)^---[ \t]*$", rendered):
+        try:
+            obj = yaml.safe_load(doc)
+        except yaml.YAMLError as exc:
+            raise Refused(f"`helm template` output is not valid YAML: {exc}") from exc
+        if not isinstance(obj, dict):
+            continue
+        metadata = obj.get("metadata") or {}
+        annotations = metadata.get("annotations") if isinstance(metadata, dict) else None
+        if not isinstance(annotations, dict) or HOOK_ANNOTATION not in annotations:
+            continue
+        source = re.search(r"(?m)^# Source: (\S+)", doc)
+        if source is None:
+            raise Refused(f"a `{HOOK_ANNOTATION}` object in `helm template` output has no `# Source:` line.")
+        target = f"{CHART.as_posix()}/{source.group(1).split('/', 1)[-1]}"
+        if target.startswith(OWN_TEMPLATES):
+            out.setdefault(target, []).append(doc.strip())
+    return out
+
+
+def _helm_template_args(chart_dir: Path, flags: list[str]) -> list[str]:
+    """The `helm template` argv rendering exactly what one trivy pass renders:
+    its `--helm-values` as `-f`, its `--helm-api-versions` as `--api-versions`."""
+    args = ["helm", "template", str(chart_dir)]
+    renamed = {"--helm-values": "-f", "--helm-api-versions": "--api-versions"}
+    for i in range(0, len(flags), 2):
+        args += [renamed[flags[i]], flags[i + 1]]
+    return args
+
+
+def hook_pass(version: str, label: str, flags: list[str], chart_dir: Path) -> list[dict]:
+    """The `Results` of scanning this chart's own `helm.sh/hook` objects under
+    one values file (see the module docstring, HOOK PASS). `[]` when that
+    values file renders no hook object."""
+    render = subprocess.run(_helm_template_args(chart_dir, flags), capture_output=True, text=True)
+    if render.returncode != 0:
+        raise Refused(
+            f"`helm template` exited {render.returncode} rendering the hook objects "
+            f"(pass: {label}): {render.stderr.strip()}"
+        )
+    manifests = hook_manifests(render.stdout)
+    if not manifests:
+        return []
+    with tempfile.TemporaryDirectory() as scratch:
+        root = Path(scratch)
+        for target, docs in manifests.items():
+            path = root / target
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("---\n" + "\n---\n".join(docs) + "\n")
+        args = [
+            "trivy",
+            "config",
+            "--format",
+            "json",
+            "--exit-code",
+            "0",
+            "--severity",
+            SEVERITY,
+            # Same reasons as `_run_pass`: nothing trivy auto-loads may filter
+            # this scan, and the checks are the pinned binary's own.
+            "--config",
+            "/dev/null",
+            "--ignorefile",
+            "/dev/null",
+            "--skip-check-update",
+            "--skip-version-check",
+            "--misconfig-scanners",
+            "kubernetes",
+            str(root),
+        ]
+        print("+ " + " ".join(args))
+        proc = subprocess.run(args, capture_output=True, text=True)
+    print(proc.stderr, file=sys.stderr, end="")
+    if proc.returncode != 0:
+        raise Refused(f"trivy exited {proc.returncode} on the hook objects (pass: {label}): {proc.stderr.strip()}")
+    try:
+        results = json.loads(proc.stdout).get("Results") or []
+    except (json.JSONDecodeError, AttributeError) as exc:
+        raise Refused(f"trivy's output on the hook objects was not JSON (pass: {label}): {exc}") from exc
+    scanned = {r.get("Target") for r in results if r.get("Type") == "kubernetes"} & set(manifests)
+    if len(scanned) != len(manifests):
+        raise Refused(
+            f"the {HOOK_ANNOTATION} scan returned a kubernetes result for {len(scanned)} of "
+            f"{len(manifests)} hook file(s); missing: {sorted(set(manifests) - scanned)}. "
+            f"(pass: {label})"
+        )
+    print(
+        f"trivy {version}, {label}, {HOOK_ANNOTATION} objects: {len(manifests)} file(s), "
+        f"{finding_count({'Results': results})} HIGH/CRITICAL misconfiguration(s)."
+    )
+    return results
 
 
 def render_report(v: Verdict) -> str:
