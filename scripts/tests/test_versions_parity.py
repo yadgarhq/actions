@@ -108,6 +108,8 @@ def test_every_tool_the_task_lists_is_in_versions_yaml():
 #   hadolint   https://github.com/hadolint/hadolint/releases/download/v2.14.0/hadolint-linux-x86_64.sha256
 #   actionlint https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_checksums.txt
 #   cargo-deny https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz.sha256
+#   trivy      https://github.com/aquasecurity/trivy/releases/download/v0.74.0/trivy_0.74.0_checksums.txt
+#              (the `trivy_0.74.0_Linux-64bit.tar.gz` line; yaadgaar 565)
 def test_every_downloaded_tool_carries_its_upstream_sha256():
     tools = yaml.safe_load((REPO / "versions.yaml").read_text())["tools"]
     assert {name: tools[name].get("sha256") for name in versions_parity.SHA256_REQUIRED} == {
@@ -115,6 +117,7 @@ def test_every_downloaded_tool_carries_its_upstream_sha256():
         "hadolint": "6bf226944684f56c84dd014e8b979d27425c0148f61b3bd99bcc6f39e9dc5a47",
         "actionlint": "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8",
         "cargo-deny": "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f",
+        "trivy": "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a",
     }
 
 
@@ -220,7 +223,7 @@ def test_an_unpinned_allowance_in_versions_yaml_is_refused(tree):
     assert any("trivy" in p and "unpinned" in p for p in versions_parity.check(tree))
 
 
-@pytest.mark.parametrize("tool", ["gitleaks", "hadolint", "actionlint", "cargo-deny"])
+@pytest.mark.parametrize("tool", ["gitleaks", "hadolint", "actionlint", "cargo-deny", "trivy"])
 def test_a_downloaded_tool_with_no_sha256_is_refused(tree, tool):
     data = yaml.safe_load((tree / "versions.yaml").read_text())
     del data["tools"][tool]["sha256"]

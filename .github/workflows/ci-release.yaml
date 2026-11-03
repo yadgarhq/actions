@@ -66,6 +66,7 @@ jobs:
       # jobs install, read once from `versions.yaml` at this workflow's commit.
       helm: ${{ steps.versions.outputs.helm }}
       trivy: ${{ steps.versions.outputs.trivy }}
+      trivy_sha256: ${{ steps.versions.outputs.trivy_sha256 }}
     steps:
       # ADR-0981 / ADR-0984: `detect` reads and checks the commit THIS workflow
       # file runs at, records it once per run, fails the whole release closed if
@@ -300,6 +301,25 @@ jobs:
           echo "::error::The image push reported no usable digest. See the job summary."
           exit 1
 
+      # yaadgaar 565: trivy-action's own `setup-trivy` runs trivy `main`'s
+      # `install.sh`, which exits 6 on a cache miss. This installs the release
+      # tarball instead, checked against the sha256 in `versions.yaml` BEFORE
+      # anything is unpacked as root, and every trivy-action step below sets
+      # `skip-setup-trivy: true`. `scripts/tests/test_trivy_action_skips_setup.py`
+      # holds both halves.
+      - name: install trivy
+        env:
+          TRIVY_VERSION: ${{ needs.detect.outputs.trivy }}
+          TRIVY_SHA256: ${{ needs.detect.outputs.trivy_sha256 }}
+        run: |
+          set -euo pipefail
+          SHA256="$TRIVY_SHA256"
+          [[ "$SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::trivy sha256 from versions.yaml is not 64 lowercase hex: '${SHA256}'"; exit 1; }
+          file="$RUNNER_TEMP/trivy.tar.gz"
+          curl -sSfL -o "$file" "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${SHA256}  ${file}" | sha256sum -c -
+          sudo tar -xzf "$file" -C /usr/local/bin trivy
+
       # Scan the ARTIFACT, not the source tree. ci-validation scans the
       # filesystem before anything is built; this is the thing an adopter
       # actually runs, including whatever the base image contributed.
@@ -310,6 +330,7 @@ jobs:
       - name: scan the published image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          skip-setup-trivy: true
           scan-type: image
           image-ref: "${{ env.REGISTRY }}/${{ github.repository }}@${{ steps.push.outputs.digest }}"
           severity: CRITICAL,HIGH

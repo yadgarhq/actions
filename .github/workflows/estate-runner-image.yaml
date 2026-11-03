@@ -78,6 +78,25 @@ jobs:
         id: versions
         run: python3 scripts/tool_versions.py versions.yaml >> "$GITHUB_OUTPUT"
 
+      # yaadgaar 565: trivy-action's own `setup-trivy` runs trivy `main`'s
+      # `install.sh`, which exits 6 on a cache miss. This installs the release
+      # tarball instead, checked against the sha256 in `versions.yaml` BEFORE
+      # anything is unpacked as root, and every trivy-action step below sets
+      # `skip-setup-trivy: true`. `scripts/tests/test_trivy_action_skips_setup.py`
+      # holds both halves.
+      - name: install trivy
+        env:
+          TRIVY_VERSION: ${{ steps.versions.outputs.trivy }}
+          TRIVY_SHA256: ${{ steps.versions.outputs.trivy_sha256 }}
+        run: |
+          set -euo pipefail
+          SHA256="$TRIVY_SHA256"
+          [[ "$SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::trivy sha256 from versions.yaml is not 64 lowercase hex: '${SHA256}'"; exit 1; }
+          file="$RUNNER_TEMP/trivy.tar.gz"
+          curl -sSfL -o "$file" "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${SHA256}  ${file}" | sha256sum -c -
+          sudo tar -xzf "$file" -C /usr/local/bin trivy
+
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
@@ -98,6 +117,7 @@ jobs:
       - name: scan the base
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          skip-setup-trivy: true
           scan-type: image
           image-ref: ${{ steps.base.outputs.ref }}
           severity: CRITICAL,HIGH
@@ -129,6 +149,7 @@ jobs:
       - name: scan the candidate
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          skip-setup-trivy: true
           scan-type: image
           image-ref: estate-runner:candidate
           severity: CRITICAL,HIGH

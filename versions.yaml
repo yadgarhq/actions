@@ -15,6 +15,12 @@
 # copy outside the workflows in the same pull request. That is the whole rule for
 # every tool EXCEPT the four the hooks assert.
 #
+# TRIVY IS DOWNLOADED BY US, NOT BY `trivy-action` (yaadgaar 565). The action's
+# `setup-trivy` step checks out trivy `main` and runs its `install.sh`, which
+# exits 6 on a cache miss. Every trivy-action step sets `skip-setup-trivy: true`
+# and follows an `install trivy` step that checks `sha256` first. The action's
+# `version:` input stays, as the parity site; the skipped setup ignores it.
+#
 # GITLEAKS, HADOLINT, ACTIONLINT AND CARGO-DENY MOVE IN TWO STEPS (ledger 1756 S3,
 # ADR-0983). `hooks/tool_version.py` refuses a local binary unless it is `version`
 # or listed in `accept`, read from this file at the `rev` a repository pins. CI
@@ -62,7 +68,7 @@ tools:
   cargo-deny: { version: "0.20.2", sites: 1, sha256: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f" }
   zizmor: { version: "1.29.0", sites: 1 }
   helm: { version: "3.18.4", sites: 6 }
-  trivy: { version: "0.74.0", sites: 6 }
+  trivy: { version: "0.74.0", sites: 6, sha256: "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a" }
   rust-toolchain: { version: "1.99.1", sites: 5 }
   python: { version: "3.14", sites: 12 }
   prettier: { version: "3.9.6", sites: 2 }
