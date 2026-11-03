@@ -87,7 +87,7 @@ READ_IN_WORKFLOWS = {
     "shellcheck-py",
 }
 # These are downloaded as artefacts; `versions.yaml` carries their sha256.
-SHA256_REQUIRED = ("gitleaks", "hadolint", "actionlint", "cargo-deny")
+SHA256_REQUIRED = ("gitleaks", "hadolint", "actionlint", "cargo-deny", "trivy")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 # `hooks/tool_version.py` asserts these, and reads their `accept` list
 # (ledger 1756 S3, ADR-0983). `accept` on any other tool is a promise nothing keeps.

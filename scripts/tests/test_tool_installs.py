@@ -37,6 +37,7 @@ INSTALLS = {
     "HADOLINT_VERSION": ("hadolint", "HADOLINT_SHA256"),
     "ACTIONLINT_VERSION": ("actionlint", "ACTIONLINT_SHA256"),
     "CARGO_DENY_VERSION": ("cargo-deny", "CARGO_DENY_SHA256"),
+    "TRIVY_VERSION": ("trivy", "TRIVY_SHA256"),
 }
 
 # The workflows that download each tool today. A step that drops out of the
@@ -47,6 +48,12 @@ EXPECTED = {
     ("ci-pr.yaml", "HADOLINT_VERSION"),
     ("ci-pr.yaml", "ACTIONLINT_VERSION"),
     ("ci-pr.yaml", "CARGO_DENY_VERSION"),
+    # yaadgaar 565: trivy-action's own setup-trivy step is skipped, so these
+    # are the only ways trivy reaches a runner.
+    ("ci-pr.yaml", "TRIVY_VERSION"),
+    ("ci-release.yaml", "TRIVY_VERSION"),
+    ("base-images.yaml", "TRIVY_VERSION"),
+    ("estate-runner-image.yaml", "TRIVY_VERSION"),
 }
 
 READ = re.compile(r"^\$\{\{\s*(?:needs\.[\w-]+|steps\.[\w-]+)\.outputs\.([\w-]+)\s*\}\}$")
