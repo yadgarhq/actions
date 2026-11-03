@@ -152,6 +152,8 @@ jobs:
       rust_toolchain_previous: ${{ steps.versions.outputs.rust_toolchain_previous }}
       python: ${{ steps.versions.outputs.python }}
       pyyaml: ${{ steps.versions.outputs.pyyaml }}
+      pytest: ${{ steps.versions.outputs.pytest }}
+      shellcheck_py: ${{ steps.versions.outputs.shellcheck_py }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2254,6 +2256,15 @@ jobs:
         env:
           PYYAML_VERSION: ${{ needs.detect.outputs.pyyaml }}
         run: pip install --disable-pip-version-check "pyyaml==${PYYAML_VERSION}"
+      # The tools yadgarhq/chart's own CI installs before `pytest scripts/tests/`
+      # (its `ci.yaml`: pytest, pyyaml, shellcheck-py -- no nix there), pinned
+      # from `versions.yaml` here. `pre_pin_parent.py` runs that suite with the
+      # candidate chart vendored (yaadgaar 536).
+      - name: install the parent chart's test tools
+        env:
+          PYTEST_VERSION: ${{ needs.detect.outputs.pytest }}
+          SHELLCHECK_PY_VERSION: ${{ needs.detect.outputs.shellcheck_py }}
+        run: pip install --disable-pip-version-check "pytest==${PYTEST_VERSION}" "shellcheck-py==${SHELLCHECK_PY_VERSION}"
 
       # ADR-0981 / ADR-0984: the checkout of `yadgarhq/actions` in this job reads
       # the commit THIS workflow file runs at, never `main`. Read through

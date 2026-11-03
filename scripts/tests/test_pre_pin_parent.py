@@ -113,10 +113,39 @@ def chart(directory: Path, name: str, version: str = "9.9.9") -> Path:
     return directory
 
 
-def parent(directory: Path, dependencies: dict[str, str]) -> Path:
+# (LITERAL_COUNT_TESTS, PUBLISHED_PIN_TESTS): moved by hand, with the list.
+EXPECTED_LIST_SIZES = (14, 7)
+
+PASSING_PARENT_TEST = "def test_the_parent_is_fine():\n    assert True\n"
+
+
+def listed_tests(body: str = "    pass\n", skip: tuple[str, ...] = ()) -> str:
+    """A `test_parent_chart.py` defining every test the gate deselects, each
+    with `body`: the fixture parent mirrors the real parent's listed ids, so
+    the gate's stale-list refusal sees them collected."""
+    names = [nodeid.split("::", 1)[1] for nodeid in pre_pin_parent.DESELECTED if nodeid not in skip]
+    return "".join(f"def {name}():\n{body}\n" for name in names)
+
+
+def parent(
+    directory: Path,
+    dependencies: dict[str, str],
+    tests: str | None = PASSING_PARENT_TEST,
+    listed: str | None = None,
+) -> Path:
     """`<directory>` as a parent chart whose `dependencies:` carry the given
-    `{name: version}` pins -- textually, the shape `parent_pin.pins()` reads."""
+    `{name: version}` pins -- textually, the shape `parent_pin.pins()` reads.
+
+    The parent checkout's root (the chart's parent directory) also carries
+    `scripts/tests/test_parent.py` holding `tests` (yaadgaar 536), and
+    `scripts/tests/test_parent_chart.py` holding `listed` (default: every
+    deselected test, passing); `tests=None` writes no `scripts/tests/` at all."""
     directory.mkdir(parents=True, exist_ok=True)
+    if tests is not None:
+        suite = directory.parent / "scripts" / "tests"
+        suite.mkdir(parents=True, exist_ok=True)
+        (suite / "test_parent.py").write_text(tests)
+        (suite / "test_parent_chart.py").write_text(listed_tests() if listed is None else listed)
     lines = ["apiVersion: v2", "name: yadgar", "version: 0.1.0"]
     if dependencies:
         lines.append("dependencies:")
@@ -503,6 +532,455 @@ def test_the_placeholder_free_example_content_is_passed_through_unchanged(tmp_pa
     with_example(onboarded(root))
     result, _ = run(root)
     assert result.returncode == 0, result.stdout
+
+
+# --------------------------------------------- the parent's own pytest (yaadgaar 536)
+#
+# A render that passes is not the whole of what yadgarhq/chart's CI asks of a
+# pin: `python3 -m pytest scripts/tests/` is the other half, and a pin PR that
+# reddens it merges anyway when only the render is checked. The tests below
+# are real pytest runs over a fixture parent (the helm stub stays a stub).
+
+# True only while the candidate is vendored: the stub `helm package` writes
+# b"stub-tarball", and the gate restores parent main's own file (or its
+# absence) before the parent-main run.
+VENDORED = (
+    "import pathlib\n\n"
+    "def vendored():\n"
+    "    return any(p.read_bytes() == b'stub-tarball' for p in pathlib.Path('chart/charts').glob('*.tgz'))\n\n"
+)
+
+
+# Red only with the candidate vendored, so parent main's own run does not
+# excuse it (attribution, below).
+FAILING_PARENT_TEST = (
+    VENDORED
+    + "def test_the_gateway_route_still_renders():\n"
+    "    assert not vendored(), 'route missing'\n"
+    "\n"
+    "def test_an_unrelated_check_passes():\n"
+    "    assert True\n"
+)
+
+
+def onboarded_with(
+    root: Path, tests: str | None, listed: str | None = None, published: bytes | None = b"published"
+) -> Path:
+    """`published` is the bytes of the parent's own `charts/widget-1.2.3.tgz`
+    (what `helm dependency update` fetched); None means the file is absent."""
+    chart(root / "chart", "widget")
+    directory = parent(root / ".pre-pin-parent" / "chart", dependencies={"widget": "1.2.3"}, tests=tests, listed=listed)
+    if published is not None:
+        (directory / "charts").mkdir(exist_ok=True)
+        (directory / "charts" / "widget-1.2.3.tgz").write_bytes(published)
+    return directory
+
+
+def test_a_failing_parent_test_refuses_and_names_the_test(tmp_path):
+    """RED HALF of the mutation pair (the green half is every passing test
+    above, which now run a passing parent suite)."""
+    root = repository(tmp_path)
+    onboarded_with(root, FAILING_PARENT_TEST)
+    result, calls = run(root)
+    assert result.returncode != 0
+    assert "::error::" in result.stdout
+    assert "Failing tests:\n  scripts/tests/test_parent.py::test_the_gateway_route_still_renders\n" in result.stdout
+    assert "yadgarhq/chart's own tests fail with 'widget' vendored at 1.2.3" in result.stdout
+    assert "route missing" in result.stdout
+    assert [c[0] for c in calls] == ["lint", "template", "package", "lint", "template"]  # renders ran first
+
+
+def test_only_the_failing_tests_are_named_in_the_list(tmp_path):
+    root = repository(tmp_path)
+    onboarded_with(root, FAILING_PARENT_TEST)
+    result, _ = run(root)
+    message = pre_pin_parent.parent_tests_message("widget", "1.2.3", subprocess.CompletedProcess(
+        args=[], returncode=1,
+        stdout="FAILED scripts/tests/test_a.py::test_one - boom\nERROR scripts/tests/test_b.py::test_two\n1 failed\n",
+        stderr="",
+    ))
+    assert "scripts/tests/test_a.py::test_one" in message
+    assert "scripts/tests/test_b.py::test_two" in message
+    assert result.returncode != 0
+
+
+def test_a_passing_parent_suite_leaves_the_pass_path_as_it_was(tmp_path):
+    root = repository(tmp_path)
+    onboarded_with(root, PASSING_PARENT_TEST)
+    result, calls = run(root)
+    assert result.returncode == 0, result.stdout
+    assert "::error::" not in result.stdout
+    assert "yadgarhq/chart's own tests" in result.stdout and "add no failure" in result.stdout
+    assert [c[0] for c in calls] == ["lint", "template", "package", "lint", "template"]
+
+
+def test_a_parent_test_that_cannot_be_collected_fails_closed(tmp_path):
+    root = repository(tmp_path)
+    onboarded_with(root, "def test_x(:\n")
+    result, _ = run(root)
+    assert result.returncode != 0
+    assert "::error::" in result.stdout
+    assert "yadgarhq/chart's own tests" in result.stdout
+
+
+def test_a_parent_with_no_scripts_tests_fails_closed(tmp_path):
+    root = repository(tmp_path)
+    onboarded_with(root, None)
+    result, _ = run(root)
+    assert result.returncode != 0
+    assert "::error::" in result.stdout
+    assert "scripts/tests is missing" in result.stdout
+
+
+def test_a_suite_that_collects_nothing_fails_closed(tmp_path):
+    """pytest exits 5 for no tests; a green exit over nothing is no evidence."""
+    root = repository(tmp_path)
+    onboarded_with(root, "VALUE = 1\n")
+    result, _ = run(root)
+    assert result.returncode != 0
+    assert "::error::" in result.stdout
+
+
+def test_a_missing_pytest_fails_closed(tmp_path):
+    root = repository(tmp_path)
+    onboarded_with(root, PASSING_PARENT_TEST)
+    interpreter = tmp_path / "no-pytest-python"
+    interpreter.write_text("#!/bin/sh\necho 'No module named pytest' >&2\nexit 1\n")
+    interpreter.chmod(0o755)
+    result, _ = run(root, PRE_PIN_PARENT_PYTHON=interpreter)
+    assert result.returncode != 0
+    assert "::error::" in result.stdout
+    assert "No module named pytest" in result.stdout
+
+
+def test_an_interpreter_that_does_not_exist_fails_closed(tmp_path):
+    root = repository(tmp_path)
+    onboarded_with(root, PASSING_PARENT_TEST)
+    result, _ = run(root, PRE_PIN_PARENT_PYTHON=tmp_path / "absent")
+    assert result.returncode != 0
+    assert "::error::" in result.stdout
+
+
+def test_a_suite_that_outlives_its_ceiling_fails_closed(tmp_path):
+    root = repository(tmp_path)
+    onboarded_with(root, "import time\n\ndef test_slow():\n    time.sleep(30)\n")
+    result, _ = run(root, PRE_PIN_PARENT_TESTS_TIMEOUT="2")
+    assert result.returncode != 0
+    assert "::error::" in result.stdout
+    assert "did not finish within 2 seconds" in result.stdout
+
+
+def test_the_parent_suite_is_not_run_when_a_render_already_refused(tmp_path):
+    root = repository(tmp_path)
+    onboarded_with(root, FAILING_PARENT_TEST)
+    result, _ = run(root, STUB_LINT_EXIT="1")
+    assert result.returncode == 1
+    assert "K-8 order" in result.stdout
+    assert "test_the_gateway_route_still_renders" not in result.stdout
+
+
+def test_the_parent_suite_does_not_inherit_the_gates_pythonpath(tmp_path):
+    """The workflow sets PYTHONPATH to the directory holding the staged gate
+    (`pre_pin_parent.py`, `repin.py`, ...); a parent test module of the same
+    name must not be shadowed by it."""
+    root = repository(tmp_path)
+    onboarded_with(root, "import os\n\ndef test_no_pythonpath():\n    assert not os.environ.get('PYTHONPATH')\n")
+    result, _ = run(root)
+    assert result.returncode == 0, result.stdout
+
+
+def test_the_parent_suite_runs_from_the_checkouts_root(tmp_path):
+    root = repository(tmp_path)
+    onboarded_with(
+        root,
+        "import os\n\ndef test_cwd():\n    assert os.path.isdir('scripts/tests') and os.path.isdir('chart')\n",
+    )
+    result, _ = run(root)
+    assert result.returncode == 0, result.stdout
+
+
+def test_the_no_op_paths_do_not_run_the_parent_suite(tmp_path):
+    root = repository(tmp_path)
+    chart(root / "chart", "widget")
+    parent(root / ".pre-pin-parent" / "chart", dependencies={"other": "1.0.0"}, tests=FAILING_PARENT_TEST)
+    result, calls = run(root)
+    assert result.returncode == 0
+    assert calls == []
+
+
+# --------------------------------------------- the deselect list (Max's ruling 2026-11-03, option (a))
+
+
+def test_a_red_literal_count_test_does_not_block_the_pin(tmp_path):
+    """GREEN HALF: every listed test fails (a module that adds one object), the
+    rest of the parent passes -> the gate passes."""
+    root = repository(tmp_path)
+    onboarded_with(root, PASSING_PARENT_TEST, listed=listed_tests("    assert False, 'count moved'\n"))
+    result, _ = run(root)
+    assert result.returncode == 0, result.stdout
+    assert "::error::" not in result.stdout
+
+
+def test_a_red_unlisted_test_beside_red_listed_ones_still_blocks_and_is_named(tmp_path):
+    """RED HALF: the same red listed tests, plus one real parent failure."""
+    root = repository(tmp_path)
+    onboarded_with(root, FAILING_PARENT_TEST, listed=listed_tests("    assert False, 'count moved'\n"))
+    result, _ = run(root)
+    assert result.returncode == 1
+    assert "Failing tests:\n  scripts/tests/test_parent.py::test_the_gateway_route_still_renders\n\n" in result.stdout
+    for nodeid in pre_pin_parent.DESELECTED:
+        assert f"\n  {nodeid}\n" not in result.stdout
+
+
+def test_a_listed_test_the_parent_no_longer_collects_refuses_by_name(tmp_path):
+    """STALE LIST = RED: a renamed parent test is not silently deselected-nothing."""
+    gone = sorted(pre_pin_parent.DESELECTED)[0]
+    root = repository(tmp_path)
+    onboarded_with(root, PASSING_PARENT_TEST, listed=listed_tests(skip=(gone,)))
+    result, _ = run(root)
+    assert result.returncode == 1
+    assert "no longer collects" in result.stdout
+    assert f"\n  {gone}" in result.stdout
+
+
+def test_a_deselect_that_would_also_drop_an_unlisted_test_refuses(tmp_path):
+    """pytest's `--deselect` is a prefix match; `test_x` would swallow `test_x_y`."""
+    swallowed = sorted(pre_pin_parent.DESELECTED)[0].split("::", 1)[1] + "_too"
+    root = repository(tmp_path)
+    onboarded_with(root, PASSING_PARENT_TEST, listed=listed_tests() + f"def {swallowed}():\n    assert False\n")
+    result, _ = run(root)
+    assert result.returncode == 1
+    assert "would also drop" in result.stdout and swallowed in result.stdout
+
+
+def test_selection_matches_exactly_or_with_params_only():
+    listed = ["f.py::test_a"]
+    collected = ["f.py::test_a", "f.py::test_a[1]", "f.py::test_ab", "f.py::test_b"]
+    deselect, stale, overreach = pre_pin_parent.selection(collected, listed)
+    assert deselect == ["f.py::test_a", "f.py::test_a[1]"]
+    assert stale == []
+    assert overreach == [("f.py::test_a", "f.py::test_ab")]
+    assert pre_pin_parent.selection(["f.py::test_b"], listed)[1] == ["f.py::test_a"]
+
+
+def test_the_deselect_list_is_named_exact_and_reasoned():
+    """The list cannot silently grow: every entry is one named function in the
+    parent's test file (no bare file, no class, no params), every one carries
+    its reason, and the count is a literal here, moved by hand with the list."""
+    literal, published = pre_pin_parent.LITERAL_COUNT_TESTS, pre_pin_parent.PUBLISHED_PIN_TESTS
+    assert set(pre_pin_parent.DESELECTED) == set(literal) | set(published)
+    assert not set(literal) & set(published)
+    for nodeid, reason in pre_pin_parent.DESELECTED.items():
+        assert re.fullmatch(re.escape(pre_pin_parent.PARENT_TEST_FILE) + r"::test_\w+", nodeid), nodeid
+        assert reason.strip(), nodeid
+    assert (len(literal), len(published)) == EXPECTED_LIST_SIZES
+
+
+def test_an_exit_1_that_names_no_failing_test_fails_closed(tmp_path):
+    """A run that says 'failed' but names nothing cannot be attributed, so it
+    is never excused against parent main."""
+    root = repository(tmp_path)
+    onboarded_with(root, PASSING_PARENT_TEST)
+    interpreter = tmp_path / "silent-python"
+    interpreter.write_text(
+        "#!/bin/sh\n"
+        "case \"$*\" in *--collect-only*) echo 'scripts/tests/test_parent.py::test_x';"
+        " for t in " + " ".join(pre_pin_parent.DESELECTED) + "; do echo \"$t\"; done; exit 0;; esac\n"
+        "exit 1\n"
+    )
+    interpreter.chmod(0o755)
+    result, _ = run(root, PRE_PIN_PARENT_PYTHON=interpreter)
+    assert result.returncode == 1
+    assert "did not run to a verdict (exit 1)" in result.stdout
+
+
+def fake_pytest(tmp_path: Path, run_body: str, collect_body: str = "") -> Path:
+    """An interpreter standing in for `python3 -m pytest`: `--collect-only`
+    prints one unlisted id plus every listed one, any other call runs `run_body`."""
+    interpreter = tmp_path / "fake-python"
+    interpreter.write_text(
+        "#!/bin/sh\n"
+        "case \"$*\" in *--collect-only*) " + collect_body + "echo 'scripts/tests/test_parent.py::test_x';"
+        " for t in " + " ".join(pre_pin_parent.DESELECTED) + "; do echo \"$t\"; done; exit 0;; esac\n"
+        + run_body
+    )
+    interpreter.chmod(0o755)
+    return interpreter
+
+
+def test_an_exit_other_than_0_or_1_is_never_excused_against_parent_main(tmp_path):
+    """Exit 2 (interrupted, a collection error mid-run) on BOTH runs, naming the
+    same test: the subtraction would excuse it, so it must refuse first."""
+    root = repository(tmp_path)
+    onboarded_with(root, PASSING_PARENT_TEST)
+    interpreter = fake_pytest(tmp_path, "echo 'FAILED scripts/tests/test_parent.py::test_x'\nexit 2\n")
+    result, _ = run(root, PRE_PIN_PARENT_PYTHON=interpreter)
+    assert result.returncode == 1
+    assert "did not run to a verdict (exit 2)" in result.stdout
+
+
+def test_the_ceiling_is_one_budget_across_every_parent_pytest_run(tmp_path):
+    """Collect and run each fit the ceiling alone, but not together."""
+    root = repository(tmp_path)
+    onboarded_with(root, PASSING_PARENT_TEST)
+    sleep = shutil.which("sleep")
+    interpreter = fake_pytest(tmp_path, f"{sleep} 1.5\nexit 0\n", collect_body=f"{sleep} 1.5; ")
+    result, _ = run(root, PRE_PIN_PARENT_PYTHON=interpreter, PRE_PIN_PARENT_TESTS_TIMEOUT="2")
+    assert result.returncode == 1, result.stdout
+    assert "did not finish within 2 seconds" in result.stdout
+
+
+# --------------------------------------------- the pull request's own root cannot steer the parent's pytest
+
+
+def test_a_pytest_ini_at_the_pull_requests_root_cannot_turn_the_run_into_a_no_op(tmp_path):
+    """Its `addopts` reach the run without `-c /dev/null`: `--collect-only`
+    runs nothing and exits 0."""
+    root = repository(tmp_path)
+    onboarded_with(root, FAILING_PARENT_TEST)
+    (root / "pytest.ini").write_text("[pytest]\naddopts = --collect-only\n")
+    result, _ = run(root)
+    assert result.returncode == 1, result.stdout
+    assert "test_the_gateway_route_still_renders" in result.stdout
+
+
+def test_a_conftest_at_the_pull_requests_root_cannot_force_the_run_green(tmp_path):
+    root = repository(tmp_path)
+    onboarded_with(root, FAILING_PARENT_TEST)
+    # The ini makes the pull request's root the rootdir, and so the conftest
+    # search reaches it: the pair is the measured attack.
+    (root / "pytest.ini").write_text("[pytest]\n")
+    (root / "conftest.py").write_text(
+        "import pytest\n\n"
+        "@pytest.hookimpl(hookwrapper=True)\n"
+        "def pytest_runtest_makereport(item, call):\n"
+        "    outcome = yield\n"
+        "    report = outcome.get_result()\n"
+        "    report.outcome = 'passed'\n"
+        "    report.longrepr = None\n"
+    )
+    result, _ = run(root)
+    assert result.returncode == 1, result.stdout
+    assert "test_the_gateway_route_still_renders" in result.stdout
+
+
+def test_pytest_addopts_from_the_job_does_not_reach_the_parents_run(tmp_path):
+    root = repository(tmp_path)
+    onboarded_with(root, FAILING_PARENT_TEST)
+    result, _ = run(root, PYTEST_ADDOPTS="--deselect scripts/tests/test_parent.py::test_the_gateway_route_still_renders")
+    assert result.returncode == 1, result.stdout
+
+
+def test_the_parent_suite_runs_isolated_from_any_ini_and_cache():
+    assert pre_pin_parent.PYTEST_ISOLATION == ["-p", "no:cacheprovider", "--rootdir=.", "--confcutdir=.", "-c", os.devnull]
+
+
+# --------------------------------------------- attribution against parent main (fix 4)
+
+def test_a_failure_only_after_vendoring_is_this_pull_requests(tmp_path):
+    root = repository(tmp_path)
+    onboarded_with(root, VENDORED + "def test_new_red():\n    assert not vendored()\n")
+    result, _ = run(root)
+    assert result.returncode == 1
+    assert "Failing tests:\n  scripts/tests/test_parent.py::test_new_red\n" in result.stdout
+    assert "already fail" not in result.stdout
+
+
+def test_a_failure_parent_main_already_has_is_named_as_mains_and_does_not_block(tmp_path):
+    root = repository(tmp_path)
+    onboarded_with(root, "def test_old_red():\n    assert False\n")
+    result, _ = run(root, PARENT_SHA="abc1234")
+    assert result.returncode == 0, result.stdout
+    assert "::warning::yadgarhq/chart main's own tests already fail at abc1234" in result.stdout
+    assert "\n  scripts/tests/test_parent.py::test_old_red" in result.stdout
+    assert "::error::" not in result.stdout
+
+
+def test_a_new_failure_beside_an_old_one_blocks_and_names_only_the_new(tmp_path):
+    root = repository(tmp_path)
+    onboarded_with(
+        root,
+        VENDORED + "def test_old_red():\n    assert False\n\ndef test_new_red():\n    assert not vendored()\n",
+    )
+    result, _ = run(root)
+    assert result.returncode == 1
+    assert "Failing tests:\n  scripts/tests/test_parent.py::test_new_red\n\n" in result.stdout
+    assert "already fail" in result.stdout and "\n  scripts/tests/test_parent.py::test_old_red" in result.stdout
+
+
+def test_a_parent_main_that_cannot_be_tested_excuses_nothing(tmp_path):
+    """Fail closed: a baseline that proves nothing subtracts nothing."""
+    root = repository(tmp_path)
+    onboarded_with(
+        root,
+        VENDORED + "if not vendored():\n    raise ImportError('main cannot import')\n\n"
+        "def test_red():\n    assert False\n",
+    )
+    result, _ = run(root)
+    assert result.returncode == 1
+    assert "could not be run as a baseline" in result.stdout
+    assert "Failing tests:\n  scripts/tests/test_parent.py::test_red\n" in result.stdout
+
+
+def test_no_published_tarball_means_no_baseline_and_nothing_excused(tmp_path):
+    """FAIL-OPEN FOUND IN REVIEW: with no published `charts/widget-1.2.3.tgz`,
+    a parent-main run would render without the dependency at all, so it is no
+    baseline for this chart; every vendored failure stays this PR's."""
+    root = repository(tmp_path)
+    onboarded_with(
+        root,
+        "import pathlib\n\n"
+        "def test_needs_the_dependency():\n"
+        "    assert pathlib.Path('chart/charts/widget-1.2.3.tgz').read_bytes() == b'published'\n",
+        published=None,
+    )
+    result, _ = run(root)
+    assert result.returncode == 1, result.stdout
+    assert "no published" in result.stdout
+    assert "Failing tests:\n  scripts/tests/test_parent.py::test_needs_the_dependency\n" in result.stdout
+    assert "already fail" not in result.stdout
+
+
+def test_parent_main_is_not_rerun_when_the_vendored_run_is_green(tmp_path):
+    """The green path is one suite run: a test that would fail on main never runs there."""
+    root = repository(tmp_path)
+    onboarded_with(root, VENDORED + "def test_green_when_vendored():\n    assert vendored()\n")
+    result, _ = run(root)
+    assert result.returncode == 0, result.stdout
+    assert "already fail" not in result.stdout
+
+
+def test_the_published_tarball_is_restored_byte_for_byte_for_the_baseline(tmp_path):
+    """Red vendored, green on the restored published bytes: a new failure, and
+    the published file is what is left in `charts/`."""
+    root = repository(tmp_path)
+    parent_dir = onboarded_with(
+        root,
+        "import pathlib\n\n"
+        "def test_sees_main():\n"
+        "    assert pathlib.Path('chart/charts/widget-1.2.3.tgz').read_bytes() == b'published'\n",
+    )
+    result, _ = run(root)
+    assert result.returncode == 1, result.stdout
+    assert "Failing tests:\n  scripts/tests/test_parent.py::test_sees_main\n" in result.stdout
+    assert (parent_dir / "charts" / "widget-1.2.3.tgz").read_bytes() == b"published"
+
+
+def test_the_job_installs_the_parents_test_tools_from_versions_yaml_before_the_gate():
+    steps = workflow_jobs()["pre_pin_parent"]["steps"]
+    names = [s.get("name", "") for s in steps]
+    install = next(s for s in steps if "install the parent chart's test tools" in s.get("name", ""))
+    assert names.index(install["name"]) < next(i for i, s in enumerate(steps) if "pre_pin_parent.py" in str(s.get("run", "")) and "python3" in s["run"])
+    assert install["env"]["PYTEST_VERSION"] == "${{ needs.detect.outputs.pytest }}"
+    assert install["env"]["SHELLCHECK_PY_VERSION"] == "${{ needs.detect.outputs.shellcheck_py }}"
+    assert "pytest==${PYTEST_VERSION}" in install["run"]
+    assert "shellcheck-py==${SHELLCHECK_PY_VERSION}" in install["run"]
+
+
+def test_the_job_keeps_its_timeout_and_the_ceiling_fits_inside_it():
+    job = workflow_jobs()["pre_pin_parent"]
+    assert job["timeout-minutes"] == 30
+    assert pre_pin_parent.PARENT_TESTS_TIMEOUT_SECONDS <= 20 * 60
 
 
 # --------------------------------------------- the pure failure_message helper
