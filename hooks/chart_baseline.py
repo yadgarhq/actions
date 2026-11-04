@@ -278,6 +278,15 @@ YAML_FALSE_WORDS = frozenset(
     {"n", "N", "no", "No", "NO", "false", "False", "FALSE", "off", "Off", "OFF"}
 )
 YAML_NULL_WORDS = frozenset({"~", "null", "Null", "NULL"})
+# WHITESPACE AS HELM READS IT (yaadgaar 616). Measured 2026-11-04 on helm v4.3.0 and
+# v3.18.4, identical, for every character `str.isspace()` accepts; the table is in
+# `scripts/tests/test_chart_baseline.py`. YAML strips only its two blanks. It breaks a
+# line on U+0085, U+2028 and U+2029, as `splitlines()` does. It refuses a whole file
+# holding one of the controls. Every other `isspace()` character (`unicode_space`) is
+# kept IN the scalar: `x: 0<NBSP>` is the string "0\u00a0", not 0.
+YAML_BLANKS = " \t"
+YAML_LINE_BREAKS = "\n\r\x85\u2028\u2029"
+HELM_REFUSED_CONTROLS = "\x0b\x0c\x1c\x1d\x1e\x1f"
 YAML_INTEGER_ZERO = re.compile(r"[-+]?0(?:[xXoObB]0+|0*)")
 YAML_FLOAT = re.compile(r"[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?")
 GO_FLOAT_UNDERSCORE = re.compile(r"(?<![0-9])_|_(?![0-9])")
@@ -378,21 +387,42 @@ def end_of_quoted_scalar(text: str, start: int) -> int:
     return end
 
 
+def unicode_space(char: str) -> bool:
+    """Whether `str.isspace()` calls `char` whitespace and YAML keeps it in a scalar.
+
+    Derived from `str.isspace()` rather than listed, so no character can fall
+    between the groups (yaadgaar 616). The other three groups are YAML's two
+    blanks, the line breaks `splitlines()` and Helm's YAML parser both break on,
+    and the controls Helm refuses a whole values file for.
+    """
+    return char.isspace() and char not in YAML_BLANKS + YAML_LINE_BREAKS + HELM_REFUSED_CONTROLS
+
+
 def strip_inline_comment(raw: str) -> str:
-    """Drop a YAML inline comment, respecting a quoted scalar that contains `#`."""
-    text = raw.strip()
+    """Drop a YAML inline comment, respecting a quoted scalar that contains `#`.
+
+    Only YAML's blanks are stripped. `str.strip()` also removed U+00A0, U+3000 and
+    the other Unicode spaces, which YAML keeps in the scalar (yaadgaar 616). Text
+    after a closing quote that is neither blank nor a comment is KEPT, so the
+    caller sees a value that does not end at its quote and refuses it: Helm
+    refuses `"0"x` and `"0"<NBSP>`, and `'it''s'` is an escape not modelled here.
+    """
+    text = raw.strip(YAML_BLANKS)
     if not text:
         return ""
     if text[0] in "\"'":
         end = end_of_quoted_scalar(text, 0)
-        return text if end == -1 else text[: end + 1]
+        if end == -1:
+            return text
+        tail = text[end + 1:].lstrip(YAML_BLANKS)
+        return text[: end + 1] if tail == "" or tail.startswith("#") else text
     if text.startswith("#"):
         return ""
     cut = min(
         (i for i in (text.find(" #"), text.find("\t#")) if i != -1),
         default=-1,
     )
-    return text.strip() if cut == -1 else text[:cut].strip()
+    return text.strip(YAML_BLANKS) if cut == -1 else text[:cut].strip(YAML_BLANKS)
 
 
 @dataclass(frozen=True)
@@ -468,8 +498,15 @@ def scan_values(text: str) -> Values:
     opened: set = set()
     parents: set = set()
 
+    for char in HELM_REFUSED_CONTROLS:
+        if char in text:
+            return Values(
+                {}, False, f"the control character U+{ord(char):04X}, which Helm refuses"
+            )
+    # `splitlines()` is RIGHT here: it breaks on U+0085, U+2028 and U+2029, and so
+    # does Helm (measured). The controls it also breaks on are refused above.
     for line in text.splitlines():
-        if not line.strip():
+        if not line.strip(YAML_BLANKS):
             continue
         body = line.lstrip(" ")
         indent = len(line) - len(body)
@@ -515,6 +552,18 @@ def scan_values(text: str) -> Values:
         if value == "":
             stack.append((indent, key))
             opened.add(path)
+            continue
+        if (
+            unicode_space(value[0])
+            or unicode_space(value[-1])
+            or (value[0] in "\"'" and end_of_quoted_scalar(value, 0) != len(value) - 1)
+        ):
+            # A Unicode space at an edge: Helm reads the string "0\u00a0", which is on.
+            # Refused rather than read as on, because reading it as on would accept an
+            # if/else pair the gate refused before (yaadgaar 616). And a quoted scalar
+            # with text after its quote, or none: Helm refuses most of those outright.
+            scalars[path] = NOT_MODELLED
+            parents.update(ancestors(path))
             continue
         if value[0] in "{[|>&*!":
             # A flow collection, a block scalar, an anchor, an alias or a tag.
@@ -629,10 +678,12 @@ def is_truthy(raw) -> bool:
     wrong "on" fails open under `not`, in an if/else pair and in a toggle, and a
     wrong "off" drops the preStop sleep from the floor. The safety comes from
     agreeing with Helm, so a new shape is measured and added to the table.
+
+    Only YAML's blanks are stripped (yaadgaar 616): `0<NBSP>` is a string to Helm.
     """
     if raw is None:
         return False
-    text = raw.strip()
+    text = raw.strip(YAML_BLANKS)
     if text in ("", "''", '""'):
         return False
     if text[0] in "\"'":
@@ -836,7 +887,8 @@ def scan_template(text: str) -> Template:
         guards = tuple(guard for _, guard in stack)
         occurrence = KeyOccurrence(
             lineno,
-            rest.strip(),
+            # YAML's blanks only, so `resolve` sees a literal `35<NBSP>` (yaadgaar 616).
+            rest.strip(YAML_BLANKS),
             guards,
             dot,
             match.group("key"),
@@ -906,6 +958,25 @@ def cast_int64(raw: str):
 
 
 def resolve(occurrence: KeyOccurrence, values: Values):
+    """`resolve_scalar`, refusing a value that carries a Unicode space (yaadgaar 616).
+
+    ONE CHOKE POINT FOR EVERY READER. `as_integer`, `as_boolean`, `cast_int64` and the
+    spread checks each call `str.strip()`, which removes U+00A0 and its kin, so a
+    literal `35<NBSP>` read as 35 while Helm renders the string "35\u00a0". Every one
+    of them reads a resolved value, so the refusal sits here rather than in each.
+    """
+    state, text = resolve_scalar(occurrence, values)
+    found = next((char for char in text if unicode_space(char)), None)
+    if state == "ok" and found is not None:
+        return (
+            "unresolvable",
+            f"`{text!r}` carries U+{ord(found):04X}, a Unicode space YAML keeps in the "
+            f"scalar, so Helm renders a string, not the value this gate would read",
+        )
+    return state, text
+
+
+def resolve_scalar(occurrence: KeyOccurrence, values: Values):
     """The value a key renders to: ('ok', text) or ('unresolvable', why).
 
     Three outcomes collapse to two names on purpose: a literal in the template
@@ -955,8 +1026,9 @@ def resolve(occurrence: KeyOccurrence, values: Values):
         return (
             "unresolvable",
             f"values.yaml sets `{path}` to a construct this gate does not model — an "
-            f"anchor, an alias, a sequence, a flow collection or a template "
-            f"expression. This is NOT a claim that `{path}` is unset",
+            f"anchor, an alias, a sequence, a flow collection, a template "
+            f"expression, a Unicode space at the value's edge or text after its "
+            f"closing quote. This is NOT a claim that `{path}` is unset",
         )
     raw = values.raw(path)
     if raw is None:
@@ -1076,7 +1148,8 @@ def guard_message(blocking, field: str, where: str, tail: str = "") -> str:
         return (
             f"{prefix}{named} is on, and values.yaml sets {named} to a construct this "
             f"gate does not model — an anchor, an alias, a sequence, a flow "
-            f"collection or a template expression. The chart is refused because this "
+            f"collection, a template expression, a Unicode space at the value's edge "
+            f"or text after its closing quote. The chart is refused because this "
             f"gate cannot tell whether the field renders. It is NOT a claim that "
             f"{named} is unset.{tail}"
         )

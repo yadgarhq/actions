@@ -2234,6 +2234,59 @@ HELM_TRUTH = [
     ("-.5", True), ("01", True), ("no", False), ("off", False),
 ]
 
+# ------------------------------- whitespace Python reads and YAML does not (yaadgaar 616)
+#
+# `str.strip()` and `str.splitlines()` know more whitespace than YAML does. MEASURED
+# 2026-11-04 on helm v4.3.0 and v3.18.4, identical on every row, for every character
+# `str.isspace()` accepts other than space, tab, LF and CR. They fall in three groups:
+#
+# - UNICODE SPACES (U+00A0, U+1680, U+2000-U+200A, U+202F, U+205F, U+3000). YAML keeps
+#   them IN the scalar: `x: 0<NBSP>` is the string "0\u00a0", which is on. The gate's
+#   `str.strip()` removed them and read 0, off — a FAIL-OPEN in an if/else pair.
+# - LINE BREAKS (U+0085, U+2028, U+2029). Helm's YAML parser breaks a line on them,
+#   exactly as `splitlines()` does: `a: 1<LS>x: 0` sets both keys. The brief that
+#   filed this task said YAML does not; the measurement says it does, so the scan keeps
+#   `splitlines()`, and a `split("\n")` would be the fail-open.
+# - CONTROLS (U+000B, U+000C, U+001C-U+001F). Helm refuses the whole values file:
+#   "control characters are not allowed". The gate read U+001F as part of a scalar.
+#
+# Every literal below is a `\u` escape, never the character: an editor or the
+# trailing-whitespace hook can change a character it cannot see.
+
+UNICODE_SPACES = "\u00a0\u1680" + "".join(map(chr, range(0x2000, 0x200B))) + "\u202f\u205f\u3000"
+YAML_EXTRA_BREAKS = "\x85\u2028\u2029"
+HELM_REFUSED_CONTROLS = "\x0b\x0c\x1c\x1d\x1e\x1f"
+
+# The rows Helm reads AND the gate models: a Unicode space inside a quoted or a plain
+# scalar (a string, on), one inside an inline comment (ignored), the three line breaks
+# ending the line (the scalar before them), and the tab YAML does strip.
+HELM_TRUTH += [row for c in UNICODE_SPACES for row in (
+    (f'"{c}"', True), (f"a{c}b", True), (f"0 # a{c}b", False),
+)] + [row for c in YAML_EXTRA_BREAKS for row in (
+    (f"0{c}", False), (f"false{c}", False), (f"{c}", False), (f'"0"{c}', True),
+    (f"0{c} # c", False),
+)] + [
+    ("0\t", False), ("\t0", False), ("false\t", False), ("0\t# c", False),
+    ('"0"\t# c', True), ('"0"#c', True),
+]
+
+# The rows Helm reads and the gate REFUSES. A Unicode space at the edge of a plain
+# scalar is a string to Helm (on, measured), and the gate does not model it: reading it
+# as on would ACCEPT an if/else pair the shipped gate refused (yaadgaar 616 step 5, no
+# weakening), so it is refused — fail-closed — with its path unmodelled. `"0"<NBSP>`
+# and `"0"x` are a Helm error ("did not find expected key"), and `'it''s'` is a quote
+# escape the scan does not model; all three are text after a closing quote.
+HELM_SPACE_REFUSED = [row for c in UNICODE_SPACES for row in (
+    f"0{c}", f"false{c}", f"{c}0", f"{c}", f"0{c} # c", f'"0"{c}',
+)] + ['"0"x', "'it''s'", '"abc']
+
+# Whole values files Helm refuses, which the gate must refuse too.
+HELM_REFUSED_FILES = [row for c in UNICODE_SPACES for row in (
+    f"a: 1\n{c}\nx: 0\n", f"x:{c}0\n", f"{c}x: 0\n",
+)] + [row for c in HELM_REFUSED_CONTROLS for row in (
+    f"x: 0{c}\n", f"x: {c}0\n", f"a: 1{c}x: 0\n", f"# a{c}b\nx: 0\n", f'x: "{c}"\n',
+)]
+
 
 def gate_module():
     sys.path.insert(0, str(GATE.parent))
@@ -2315,3 +2368,109 @@ def test_a_with_over_a_yaml_zero_spelling_renders_nothing(tmp_path):
         )
         result = run(root)
         assert result.returncode == 0, (spelling, result.stdout)
+
+
+def test_every_python_whitespace_character_is_in_one_measured_group():
+    """The groups above are the whole of `str.isspace()`, and the gate derives its
+    Unicode-space predicate from it rather than from a list it could fall behind.
+    A Python whose Unicode tables grow a space fails here, which is the cue to
+    measure the new character before the gate reads it."""
+    gate = gate_module()
+    python = {chr(code) for code in range(0x110000) if chr(code).isspace()}
+    groups = [" \t", "\n\r" + YAML_EXTRA_BREAKS, HELM_REFUSED_CONTROLS, UNICODE_SPACES]
+    assert sorted(python) == sorted("".join(groups)), sorted(python)
+    assert {c for c in python if gate.unicode_space(c)} == set(UNICODE_SPACES)
+    assert set(gate.HELM_REFUSED_CONTROLS) == set(HELM_REFUSED_CONTROLS)
+    assert set(gate.YAML_BLANKS) == set(" \t")
+
+
+def test_a_unicode_space_at_a_scalar_edge_leaves_the_path_unmodelled():
+    gate = gate_module()
+    wrong = []
+    for raw in HELM_SPACE_REFUSED:
+        values = gate.scan_values(f"a: 1\nx: {raw}\n")
+        if not values.modelled or values.truth("x") != gate.GUARD_UNMODELLED:
+            wrong.append((raw, values.modelled, values.truth("x")))
+        elif values.truth("a") != gate.GUARD_ON:
+            wrong.append((raw, "the rest of the file was dropped"))
+    assert not wrong, wrong
+
+
+def test_a_values_file_helm_refuses_is_refused_whole():
+    gate = gate_module()
+    wrong = [text for text in HELM_REFUSED_FILES if gate.scan_values(text).modelled]
+    assert not wrong, wrong
+    reason = gate.scan_values("x: 0\x1f\n").reason
+    assert "U+001F" in reason and "control character" in reason, reason
+
+
+def test_the_three_yaml_line_breaks_split_a_line_as_helm_does():
+    """`a: 1<LS>x: 0` is two keys to Helm (measured). A scan that split on `\\n`
+    alone would read `a` as the string "1\\u2028x: 0" and never see `x`."""
+    gate = gate_module()
+    for c in YAML_EXTRA_BREAKS:
+        values = gate.scan_values(f"a: 1{c}x: 0\n")
+        assert values.modelled, repr(c)
+        assert (values.raw("a"), values.raw("x")) == ("1", "0"), (repr(c), values.scalars)
+
+
+def test_is_truthy_and_the_comment_strip_keep_a_unicode_space():
+    """The two helpers the scan builds on strip only what YAML strips. The scan
+    refuses an edge space before `is_truthy` sees it; this pins the helpers on
+    their own, so neither can drift back to `str.strip()` unseen."""
+    gate = gate_module()
+    for c in UNICODE_SPACES:
+        assert gate.is_truthy(f"0{c}") is True, repr(c)
+        assert gate.is_truthy(f"{c}false") is True, repr(c)
+        assert gate.strip_inline_comment(f" 0{c}") == f"0{c}", repr(c)
+        assert gate.strip_inline_comment(f"{c}0 # c") == f"{c}0", repr(c)
+    assert gate.is_truthy(" \t0\t ") is False
+    assert gate.strip_inline_comment('"0"\t# c') == '"0"'
+    assert gate.strip_inline_comment('"0"#c') == '"0"'
+    assert gate.strip_inline_comment('"0"x') == '"0"x'
+
+
+def test_a_unicode_space_guard_is_refused_in_either_branch(tmp_path):
+    """RED on the shipped gate (yaadgaar 616): Helm reads `0<NBSP>` as the string
+    "0\\u00a0" and renders the if branch; the gate stripped the space, read 0 and
+    judged the else branch, so a 29s if branch behind a 35s else branch passed.
+    The other direction is refused too: the shipped gate refused it, and accepting
+    it now would be a weakening (step 5)."""
+    for index, c in enumerate(UNICODE_SPACES):
+        for shape, toggle in enumerate((f"0{c}", f"false{c}", f"{c}0")):
+            for if_branch, else_branch in ((29, 35), (35, 29)):
+                root = tmp_path / f"u{index}-{shape}-{if_branch}"
+                root.mkdir()
+                write_chart(root, **toggle_if_else(toggle, if_branch, else_branch))
+                result = run(root)
+                assert result.returncode == 1, (repr(toggle), if_branch, result.stdout)
+                assert "does not model" in findings_of(result), (repr(toggle), result.stdout)
+
+
+def test_a_control_character_in_values_refuses_the_chart(tmp_path):
+    for index, c in enumerate(HELM_REFUSED_CONTROLS):
+        root = tmp_path / f"c{index}"
+        root.mkdir()
+        write_chart(root, values_yaml=swap(VALUES, "replicaCount: 2", f"replicaCount: 2{c}"))
+        result = run(root)
+        assert result.returncode == 1, (repr(c), result.stdout)
+        assert f"U+{ord(c):04X}" in result.stdout, (repr(c), result.stdout)
+
+
+def test_a_resolved_value_carrying_a_unicode_space_is_refused(tmp_path):
+    """A template literal `35<NBSP>` renders the string "35\\u00a0", and a values
+    `topologyKey` with a space inside renders a key no node carries. The shipped
+    gate read 35 and a non-empty key, and passed both."""
+    cases = {
+        "literal": toggle_if_else("true", "35\u00a0", 29),
+        "inner": dict(values_yaml=swap(
+            VALUES, "kubernetes.io/hostname", "kubernetes.io/host\u3000name"
+        )),
+    }
+    for name, replace in cases.items():
+        root = tmp_path / name
+        root.mkdir()
+        write_chart(root, **replace)
+        result = run(root)
+        assert result.returncode == 1, (name, result.stdout)
+        assert "U+" in findings_of(result), (name, result.stdout)
