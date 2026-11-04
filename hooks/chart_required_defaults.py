@@ -34,8 +34,17 @@ WHAT "A DEFAULT" MEANS, measured on helm 4.3.0. `required` refuses nil AND "",
 and passes 0 and false. So "" is no default for a key a template `required`s
 (whether or not arm (a) gates it: that is helm, not the list), and is a default for a key only (b) or (c) gates: "" satisfies a schema
 `required` and renders into the manifest. A key written with nothing after the
-colon, `null` or `~` is unset. A mapping is a default when any leaf under it is
-one. A sequence, a flow collection or a block scalar at a gated path is a default.
+colon, `null` or `~` is unset. A MAPPING AT A GATED PATH IS A DEFAULT, whatever
+its leaves hold (yaadgaar 574): measured on helm 4.3.0 and 3.18.4, a present map
+satisfies both `required` and a schema `required` even when every leaf is null.
+A sequence, a flow collection or a block scalar at a gated path is a default.
+
+A SEQUENCE AT A `tls` KEY (`ingress.tls: [...]`, or a block `- secretName: ...`
+list) is gated by arm (c) at the `tls` path itself and is a default, so a chart
+with a standard ingress lists `ingress.tls` in its baseline with a reason. Its
+elements have no dotted path. Any other value the scan does not read at a `tls`
+key (a flow mapping, an anchor, an alias, a tag, a block scalar) stays
+UNMODELLED_VALUES: the keys under it cannot be judged.
 
 THE RATCHET. Today's violations are listed, one dotted key per line, in
 `chart/ci/required-defaults-baseline.txt`:
@@ -65,9 +74,15 @@ its class in `classes.json`; an id a repository adds to its own
 `.pre-commit-config.yaml` is dropped as `extra:` on the next release, and an
 override cannot add a hook its class lacks. So the order is: each repository's
 baseline lands first, and NOTHING CHECKS IT until its class names this hook; then
-one change adds the id to the class. Growth is judged only when the BASE's
-`.pre-commit-config.yaml` already references `chart-required-defaults`, so the
-change that adopts writes each baseline whole, and the success line names that case.
+one change adds the id to the class. Growth is judged when the BASE's
+`.pre-commit-config.yaml` references `chart-required-defaults` in any form (a block
+`- id:`, a flow `{id: ...}`, a JSON list: any mention outside a `#` comment line
+counts, so an unrecognised form is judged rather than skipped), AND, for one chart,
+whenever the base already carries that chart's baseline file, adopted or not. So
+only a change that writes a baseline where the base had none writes it whole, and
+the success line names that case. A hook no class names does not run in a
+consumer at all: growth in that window is seen at the first run whose base has
+the file, never before.
 
 THE TEMPLATE PARSER IS A TOKENISER, NOT A GREP (ADR-1136). `actions()` and
 `stages()`' quoting rules are ported from yadgarhq/platform's
@@ -126,7 +141,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from chart_baseline import NOT_MODELLED, Values, find_charts, scan_values  # noqa: E402
+from chart_baseline import KEY_LINE, NOT_MODELLED, Values, find_charts, scan_values, strip_inline_comment  # noqa: E402
 
 HOOK = "chart-required-defaults"
 BASELINE = Path("ci") / "required-defaults-baseline.txt"
@@ -160,7 +175,10 @@ BASELINE_LINE = re.compile(
 )
 DOTTED_KEY = re.compile(r"^[A-Za-z0-9_\-]+(\.[A-Za-z0-9_\-]+)*$")
 SEGMENT = re.compile(r"^[A-Za-z0-9_\-]+$")
-ADOPTED = re.compile(r"^\s*-\s*id:\s*[\"']?" + re.escape(HOOK) + r"[\"']?\s*(#.*)?$", re.M)
+# Any mention of the id outside a whole-line `#` comment: a block `- id:`, a flow
+# `{id: ...}` and a JSON config all count (yaadgaar 574). Over-matching only judges
+# growth where it need not, which is red, never green.
+ADOPTED = re.compile(r"(?<![\w-])" + re.escape(HOOK) + r"(?![\w-])")
 ASSIGNMENT = re.compile(r"^\$(?P<name>\w+)\s*:?=\s*(?P<rhs>.+)$", re.S)
 BINDING = re.compile(r"^(?:range|with)\s+(?P<names>\$\w+(?:\s*,\s*\$\w+)?)\s*:?=", re.S)
 CONTROL = re.compile(r"^(?:else\s+if|else\s+with|if|with|range|else|end|define|block|template|break|continue)\b")
@@ -672,11 +690,23 @@ def ancestors(path: str):
     return [".".join(parts[:index]) for index in range(1, len(parts))]
 
 
-def is_default(values: Values, path: str, template_required: bool) -> bool:
+def is_mapping(values: Values, path: str) -> bool:
+    """Whether `path` holds a block mapping: the scan lists it as a mapping, OR as a
+    null that some deeper key proves is a parent (a mapping whose leaves are all null)."""
+    if path in values.mappings:
+        return True
+    prefix = path + "."
+    return path in values.nulls and any(other.startswith(prefix) for other in (*values.scalars, *values.nulls))
+
+
+def is_default(values: Values, path: str, template_required: bool, sequences: set = frozenset()) -> bool:
     """Whether `values.yaml` supplies a value at `path`. Raises Refusal when it cannot tell.
 
     `template_required`: a template passes `path` to `required`, which refuses "".
+    `sequences`: the paths `sequence_paths` reads as a sequence, which is a default.
     """
+    if path in sequences:
+        return True
     if path in values.scalars:
         raw = values.scalars[path]
         if raw is NOT_MODELLED:
@@ -686,14 +716,14 @@ def is_default(values: Values, path: str, template_required: bool) -> bool:
         if raw in EMPTY_STRINGS:
             return not template_required
         return True
-    if path in values.mappings:
-        prefix = path + "."
-        leaves = [leaf for leaf in (*values.scalars, *values.nulls) if leaf.startswith(prefix)]
-        return any(is_default(values, leaf, template_required) for leaf in leaves)
+    if is_mapping(values, path):
+        # A present map passes `required` and a schema `required`, null leaves or
+        # not (yaadgaar 574, measured on helm 4.3.0 and 3.18.4).
+        return True
     if path in values.nulls:
         return False
     for ancestor in ancestors(path):
-        if values.scalars.get(ancestor) is NOT_MODELLED:
+        if values.scalars.get(ancestor) is NOT_MODELLED or ancestor in sequences:
             raise Refusal(f"`{path}` sits below `{ancestor}`, a value the values.yaml scan does not read")
         if ancestor in values.scalars:
             return False
@@ -715,12 +745,66 @@ def tpl_refusals(values: Values, tpl_paths: list) -> list:
     return refused
 
 
-def tls_gated(values: Values) -> tuple:
-    """(leaf paths under a `tls` segment, refusals for a `tls` block the scan cannot read)."""
+def sequence_paths(text: str) -> set:
+    """Dotted paths whose value is a sequence: a flow `[...]` or a block `- ` list.
+
+    Mirrors `chart_baseline.scan_values`' walk (the same key line, comment strip and
+    suppression). Every path it returns is one the scan records as NOT_MODELLED or
+    as null; it only says which of those is a sequence.
+    """
+    # `pending`: (path, indent) of the last key written with nothing after its colon.
+    # A `- ` line at that indent or deeper makes it a sequence, so `tls:` followed by
+    # `- x` at the SAME indent is read as the sequence YAML says it is (the scan
+    # itself records that shape as a null `tls` under an unread parent).
+    found, stack, suppress_from, pending = set(), [], None, None
+    for line in text.splitlines():
+        body = line.lstrip(" ")
+        if not body.strip() or body.startswith("#"):
+            continue
+        indent = len(line) - len(body)
+        if suppress_from is not None:
+            if indent >= suppress_from:
+                continue
+            suppress_from = None
+        if body.startswith(("---", "...")):
+            # A document marker, not a sequence item (`scan_values` skips it too).
+            continue
+        if body.startswith("-"):
+            if pending is not None and indent >= pending[1]:
+                found.add(pending[0])
+            pending = None
+            suppress_from = indent
+            continue
+        pending = None
+        match = KEY_LINE.match(line)
+        if match is None:
+            continue
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        value = strip_inline_comment(match.group("rest"))
+        path = ".".join([key for _, key in stack] + [match.group("key")])
+        if value == "":
+            stack.append((indent, match.group("key")))
+            pending = (path, indent)
+        elif value[0] in "{[|>&*!":
+            if value[0] == "[":
+                found.add(path)
+            suppress_from = indent + 1
+    return found
+
+
+def tls_gated(values: Values, sequences: set = frozenset()) -> tuple:
+    """(paths gated under or at a `tls` segment, refusals for a `tls` value the scan cannot read)."""
     found, refused = set(), []
     for path in list(values.scalars) + list(values.nulls):
         parts = path.split(".")
+        if "tls" in parts[:-1] and is_mapping(values, path):
+            # A mapping under tls is judged by its leaves, as before yaadgaar 574.
+            continue
         if "tls" in parts[:-1]:
+            found.add(path)
+        elif parts[-1] == "tls" and path in sequences:
+            # `ingress.tls: [...]`: the sequence itself is the default (yaadgaar 574).
             found.add(path)
         elif parts[-1] == "tls" and values.scalars.get(path) is NOT_MODELLED:
             refused.append(f"`{path}` is a value the values.yaml scan does not read, so the keys under it cannot be judged")
@@ -927,12 +1011,14 @@ def judge(chart: Path, root: Path, knobs: dict) -> Verdict:
         verdict.errors += [f"UNMODELLED_SCHEMA: {where}/values.schema.json: {problem}" for problem in refused]
 
     values_file = chart / "values.yaml"
-    values = read_values(values_file.read_text(encoding="utf-8") if values_file.is_file() else "")
+    values_text = values_file.read_text(encoding="utf-8") if values_file.is_file() else ""
+    values = read_values(values_text)
     if not values.modelled:
         verdict.errors.append(f"UNMODELLED_VALUES: {where}/values.yaml: {values.reason}")
         return verdict
     verdict.errors += [f"UNRESOLVED_REQUIRED: {problem}" for problem in tpl_refusals(values, tpl_paths)]
-    found, refused = tls_gated(values)
+    sequences = sequence_paths(values_text)
+    found, refused = tls_gated(values, sequences)
     for key in found:
         gated.setdefault(key, set()).add("c")
     verdict.errors += [f"UNMODELLED_VALUES: {where}/values.yaml: {problem}" for problem in refused]
@@ -940,7 +1026,7 @@ def judge(chart: Path, root: Path, knobs: dict) -> Verdict:
     verdict.gated = gated
     for key in sorted(gated):
         try:
-            if is_default(values, key, key in templated):
+            if is_default(values, key, key in templated, sequences):
                 verdict.violations[key] = describe(values, key)
         except Refusal as error:
             verdict.errors.append(f"UNMODELLED_VALUES: {where}/values.yaml: {error}")
@@ -949,10 +1035,10 @@ def judge(chart: Path, root: Path, knobs: dict) -> Verdict:
 
 def describe(values: Values, key: str) -> str:
     raw = values.scalars.get(key)
-    if raw is NOT_MODELLED:
+    if raw is NOT_MODELLED or (raw is None and not is_mapping(values, key)):
         return "a collection"
     if raw is None:
-        return "a mapping with a default under it"
+        return "a mapping"
     return raw
 
 
@@ -978,8 +1064,11 @@ def ratchet(verdict: Verdict, chart: Path, root: Path, base: Base) -> list:
             )
     for key in sorted(set(entries) - set(verdict.violations)):
         errors.append(f"STALE_BASELINE: {relative.as_posix()} lists `{key}`, which is no longer a gated key with a default. Delete the line")
-    if base.rev is not None and adopted_at(root, base.rev):
-        before = show(root, base.rev, relative)
+    before = show(root, base.rev, relative) if base.rev is not None else None
+    # Growth is judged against an adopted base, and against ANY base that already
+    # carries this chart's baseline (yaadgaar 574): only a baseline the base did not
+    # have may be written whole.
+    if base.rev is not None and (before is not None or adopted_at(root, base.rev)):
         grown = sorted(set(entries) - baseline_keys(before or ""))
         errors += [f"BASELINE_GREW: {relative.as_posix()} adds `{key}`, which {base.why} does not list. The baseline only shrinks" for key in grown]
     return errors
@@ -987,7 +1076,10 @@ def ratchet(verdict: Verdict, chart: Path, root: Path, base: Base) -> list:
 
 def adopted_at(root: Path, rev: str) -> bool:
     config = show(root, rev, Path(".pre-commit-config.yaml"))
-    return bool(config and ADOPTED.search(config))
+    if not config:
+        return False
+    lines = [line for line in config.splitlines() if not line.lstrip().startswith("#")]
+    return bool(ADOPTED.search("\n".join(lines)))
 
 
 # ------------------------------------------------------------------ main
@@ -1033,7 +1125,7 @@ def main(argv=None) -> int:
     by_arm = {arm: sum(1 for v in verdicts for a in v.gated.values() if arm in a) for arm in "abc"}
     exempt = sum(len(v.exempt) for v in verdicts)
     growth = (
-        f"this change adopts the gate (the base's .pre-commit-config.yaml does not reference {HOOK}), so the baseline may be written whole"
+        f"this change adopts the gate (the base's .pre-commit-config.yaml does not reference {HOOK}), so a baseline the base does not have may be written whole; one it has is judged against {base.why}"
         if adopting
         else (f"growth judged against {base.why}" if base.rev else f"growth {base.why}")
     )
