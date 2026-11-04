@@ -1,7 +1,8 @@
-"""YAADGAAR 332 (ADR-0705, ADR-1140). A gated chart key carries no default.
+"""YAADGAAR 332 (ADR-0705, ADR-1143). A gated chart key carries no default.
 
 `hooks/chart_required_defaults.py` derives the GATED keys of a chart (ruling 1 of
-yaadgaar 327): (a) every key a template passes to `required`, (b) every key a
+yaadgaar 327, narrowed by ADR-1143): (a) every key a template passes to `required`
+that the REQUIRED list does not classify DEFAULT-OK, (b) every key a
 `values.schema.json` block lists in `required`, (c) every key under a path segment
 named `tls`. A gated key must be absent from `chart/values.yaml`, or null. Today's
 violations live in `chart/ci/required-defaults-baseline.txt`, and that file only
@@ -38,10 +39,13 @@ sys.path.pop(0)
 # ------------------------------------------------------------------ fixtures
 
 
-def chart(root: Path, values: str, schema=None, templates=None, baseline=None) -> Path:
+def chart(root: Path, values: str, schema=None, templates=None, baseline=None, name="c") -> Path:
+    # `name: c` is in no REQUIRED list, so arm (a) fails closed there: every
+    # template-required key is gated, as before ADR-1143. A test of the narrowed arm
+    # names a real chart.
     directory = root / "chart"
     (directory / "templates").mkdir(parents=True, exist_ok=True)
-    (directory / "Chart.yaml").write_text("apiVersion: v2\nname: c\nversion: 0.1.0\n")
+    (directory / "Chart.yaml").write_text(f"apiVersion: v2\nname: {name}\nversion: 0.1.0\n")
     (directory / "values.yaml").write_text(values)
     if schema is not None:
         (directory / "values.schema.json").write_text(json.dumps(schema))
@@ -725,3 +729,199 @@ def test_tpl_of_a_values_string_is_judged_against_values_yaml(tmp_path, values, 
     assert (result.returncode == 1) is red, result.stdout
     if red:
         assert "UNRESOLVED_REQUIRED" in result.stdout and "`t`" in result.stdout
+
+
+# ------------------------- ADR-1143 (yaadgaar 571): arm (a) reads the REQUIRED list
+#
+# Arm (a) refuses a default only when the key is on the ADR-0705 REQUIRED list in
+# `hooks/data/required-knobs.json`. A template `required` on a key the list
+# classifies DEFAULT-OK is the refuse-empty idiom, and its default is allowed. Every
+# key the list does not classify DEFAULT-OK by exact match counts as REQUIRED: an
+# unknown chart, an unclassified key, a malformed or missing list (fail closed).
+# Arms (b) and (c) do not read the list.
+
+
+def required_on(key: str) -> str:
+    return '{{ required "m" .Values.' + key + " }}\n"
+
+
+def test_a_template_required_default_ok_key_keeps_its_default(tmp_path):
+    # gateway `nats.user` is DEFAULT-OK in the list.
+    chart(tmp_path, "nats:\n  user: gateway\n", templates={"t.yaml": required_on("nats.user")}, name="gateway")
+    result = run(tmp_path)
+    assert result.returncode == 0, result.stdout
+    assert "1 template-required key exempt as DEFAULT-OK" in result.stdout
+
+
+def test_a_template_required_key_on_the_required_list_with_a_default_is_red(tmp_path):
+    # gateway `projectValidation.mode` is R-a.
+    chart(tmp_path, "projectValidation:\n  mode: counting\n", templates={"t.yaml": required_on("projectValidation.mode")}, name="gateway")
+    result = run(tmp_path)
+    assert result.returncode == 1, result.stdout
+    assert "NEW_DEFAULT: `projectValidation.mode` (a)" in result.stdout
+
+
+def test_a_template_required_key_the_list_does_not_classify_counts_as_required(tmp_path):
+    chart(tmp_path, "brandNew:\n  knob: x\n", templates={"t.yaml": required_on("brandNew.knob")}, name="gateway")
+    result = run(tmp_path)
+    assert result.returncode == 1, result.stdout
+    assert "NEW_DEFAULT: `brandNew.knob` (a)" in result.stdout
+
+
+@pytest.mark.parametrize("key, values", [("nats", "nats:\n  user: gateway\n"), ("nats.user.x", "nats:\n  user:\n    x: 1\n")])
+def test_an_ancestor_or_descendant_of_a_default_ok_row_counts_as_required(tmp_path, key, values):
+    chart(tmp_path, values, templates={"t.yaml": required_on(key)}, name="gateway")
+    result = run(tmp_path)
+    assert result.returncode == 1, result.stdout
+    assert f"`{key}` (a)" in result.stdout
+
+
+def test_a_chart_the_list_does_not_name_counts_every_key_as_required(tmp_path):
+    chart(tmp_path, "nats:\n  user: gateway\n", templates={"t.yaml": required_on("nats.user")}, name="not-in-the-list")
+    result = run(tmp_path)
+    assert result.returncode == 1 and "`nats.user` (a)" in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize("operand", ['(index .Values "nats.user")', '(index .Values "nats" "user.x")', '(get .Values "nats.user")'])
+def test_an_index_literal_that_is_not_a_plain_name_is_never_exempt(tmp_path, operand):
+    # `index .Values "nats.user"` reads a top-level key literally named `nats.user`,
+    # not the DEFAULT-OK knob `nats` -> `user`. The joined path cannot be matched to
+    # the list, so it counts as REQUIRED.
+    key = "nats.user" if operand.endswith('"nats.user")') else "nats.user.x"
+    values = "nats:\n  user: gateway\n" if key == "nats.user" else "nats:\n  user:\n    x: 1\n"
+    chart(tmp_path, values, templates={"t.yaml": '{{ required "m" ' + operand + " }}\n"}, name="gateway")
+    result = run(tmp_path)
+    assert result.returncode == 1, result.stdout
+    assert f"`{key}` (a)" in result.stdout, result.stdout
+
+
+def test_an_index_of_plain_names_matches_the_list(tmp_path):
+    chart(tmp_path, "nats:\n  user: gateway\n", templates={"t.yaml": '{{ required "m" (index .Values "nats" "user") }}\n'}, name="gateway")
+    assert run(tmp_path).returncode == 0
+
+
+def test_a_quoted_chart_name_is_read(tmp_path):
+    directory = chart(tmp_path, "nats:\n  user: gateway\n", templates={"t.yaml": required_on("nats.user")})
+    (directory / "Chart.yaml").write_text('apiVersion: v2\nname: "gateway"  # the gateway\nversion: 0.1.0\n')
+    assert run(tmp_path).returncode == 0
+
+
+def test_a_chart_yaml_with_two_top_level_names_is_an_unknown_chart(tmp_path):
+    # Two `name:` lines are not one chart identity: neither borrows its exemptions.
+    directory = chart(tmp_path, "nats:\n  user: gateway\n", templates={"t.yaml": required_on("nats.user")})
+    (directory / "Chart.yaml").write_text("apiVersion: v2\nname: gateway\nversion: 0.1.0\nname: config\n")
+    result = run(tmp_path)
+    assert result.returncode == 1, result.stdout
+    assert "NEW_DEFAULT: `nats.user` (a)" in result.stdout
+
+
+def test_a_chart_name_differing_only_in_case_is_an_unknown_chart(tmp_path):
+    chart(tmp_path, "nats:\n  user: gateway\n", templates={"t.yaml": required_on("nats.user")}, name="Gateway")
+    result = run(tmp_path)
+    assert result.returncode == 1, result.stdout
+    assert "NEW_DEFAULT: `nats.user` (a)" in result.stdout
+
+
+def test_a_default_ok_key_under_tls_is_still_refused_by_arm_c(tmp_path):
+    # gateway `task.tls.caSecretKey` is DEFAULT-OK, template-required and under tls.
+    chart(tmp_path, "task:\n  tls:\n    caSecretKey: ca.crt\n", templates={"t.yaml": required_on("task.tls.caSecretKey")}, name="gateway")
+    result = run(tmp_path)
+    assert result.returncode == 1, result.stdout
+    assert "NEW_DEFAULT: `task.tls.caSecretKey` (c)" in result.stdout
+
+
+def test_a_default_ok_key_the_schema_requires_is_still_refused_by_arm_b(tmp_path):
+    schema = {"properties": {"task": {"required": ["requestTimeoutSeconds"]}}}
+    chart(tmp_path, "task:\n  requestTimeoutSeconds: 16\n", schema=schema, templates={"t.yaml": required_on("task.requestTimeoutSeconds")}, name="gateway")
+    result = run(tmp_path)
+    assert result.returncode == 1, result.stdout
+    assert "NEW_DEFAULT: `task.requestTimeoutSeconds` (b)" in result.stdout
+
+
+def test_an_empty_string_on_a_template_required_key_stays_no_default_under_tls(tmp_path):
+    # `required` refuses "": that is a fact about helm, not about the list. The shipped
+    # gate held such a key green, and narrowing arm (a) must not turn it red under (c).
+    chart(tmp_path, 'task:\n  tls:\n    caSecretKey: ""\n', templates={"t.yaml": required_on("task.tls.caSecretKey")}, name="gateway")
+    result = run(tmp_path)
+    assert result.returncode == 0, result.stdout
+
+
+def in_process(tmp_path, monkeypatch, capsys, knobs_text):
+    path = tmp_path / "knobs.json"
+    if knobs_text is not None:
+        path.write_text(knobs_text)
+    monkeypatch.setattr(gate, "KNOBS", path)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    status = gate.main(["--root", str(tmp_path / "tree")])
+    return status, capsys.readouterr().out
+
+
+GOOD_KNOBS = {"source": {}, "charts": {"gateway": {"required": ["a.b"], "default_ok": ["nats.user"]}}}
+
+
+@pytest.mark.parametrize(
+    "text, why",
+    [
+        (None, "cannot be read"),
+        ("{not json", "not JSON"),
+        ("[]", "`charts`"),
+        (json.dumps({"charts": []}), "`charts`"),
+        (json.dumps({"charts": {"gateway": ["nats.user"]}}), "gateway"),
+        (json.dumps({"charts": {"gateway": {"required": [], "default_ok": "nats.user"}}}), "default_ok"),
+        (json.dumps({"charts": {"gateway": {"required": [], "default_ok": [1]}}}), "default_ok"),
+        (json.dumps({"charts": {"gateway": {"required": [], "default_ok": ["nats.*"]}}}), "nats.*"),
+        (json.dumps({"charts": {"gateway": {"required": [], "default_ok": ["a[0]"]}}}), "a[0]"),
+        (json.dumps({"charts": {"gateway": {"required": [], "default_ok": ["a", "a"]}}}), "twice"),
+        (json.dumps({"charts": {"gateway": {"required": ["a"], "default_ok": ["a"]}}}), "both"),
+        (json.dumps({"charts": {"gateway": {"required": []}}}), "default_ok"),
+        (json.dumps({"charts": {"gateway": {"required": [], "default_ok": [], "x": []}}}), "x"),
+    ],
+)
+def test_a_malformed_list_is_refused_by_name_and_fails_closed(tmp_path, monkeypatch, capsys, text, why):
+    chart(tmp_path / "tree", "nats:\n  user: gateway\n", templates={"t.yaml": required_on("nats.user")}, name="gateway")
+    status, out = in_process(tmp_path, monkeypatch, capsys, text)
+    assert status == 1, out
+    assert "REQUIRED_LIST_MALFORMED" in out and why in out, out
+    assert "NEW_DEFAULT: `nats.user` (a)" in out, out
+
+
+def test_a_malformed_list_is_red_even_with_nothing_template_required(tmp_path, monkeypatch, capsys):
+    chart(tmp_path / "tree", "a: 1\n", name="gateway")
+    status, out = in_process(tmp_path, monkeypatch, capsys, "{not json")
+    assert status == 1 and "REQUIRED_LIST_MALFORMED" in out, out
+
+
+def test_one_malformed_chart_entry_voids_the_whole_list(tmp_path, monkeypatch, capsys):
+    # The gateway entry alone is well formed; the list is not, so nothing is exempt.
+    knobs = {"charts": {"gateway": {"required": [], "default_ok": ["nats.user"]}, "iam": {"required": ["x.*"], "default_ok": []}}}
+    chart(tmp_path / "tree", "nats:\n  user: gateway\n", templates={"t.yaml": required_on("nats.user")}, name="gateway")
+    status, out = in_process(tmp_path, monkeypatch, capsys, json.dumps(knobs))
+    assert status == 1 and "REQUIRED_LIST_MALFORMED" in out, out
+    assert "NEW_DEFAULT: `nats.user` (a)" in out, out
+
+
+def test_a_well_formed_list_is_read(tmp_path, monkeypatch, capsys):
+    chart(tmp_path / "tree", "nats:\n  user: gateway\n", templates={"t.yaml": required_on("nats.user")}, name="gateway")
+    status, out = in_process(tmp_path, monkeypatch, capsys, json.dumps(GOOD_KNOBS))
+    assert status == 0, out
+
+
+def test_report_marks_a_malformed_list(tmp_path, monkeypatch, capsys):
+    chart(tmp_path / "tree", "a: 1\n", name="gateway")
+    path = tmp_path / "knobs.json"
+    path.write_text("{not json")
+    monkeypatch.setattr(gate, "KNOBS", path)
+    status = gate.main(["--root", str(tmp_path / "tree"), "--report"])
+    out = capsys.readouterr().out
+    assert status == 0 and "! REQUIRED_LIST_MALFORMED" in out, out
+
+
+def test_the_list_has_no_command_line_override():
+    # A consumer must not be able to aim the gate at a permissive list.
+    source = GATE.read_text()
+    assert "--required-list" not in source and "os.environ" not in source.split("def load_knobs", 1)[1].split("\ndef ", 1)[0]
+
+
+def test_the_shipped_list_is_well_formed():
+    knobs, errors = gate.load_knobs(gate.KNOBS)
+    assert errors == [] and "gateway" in knobs
