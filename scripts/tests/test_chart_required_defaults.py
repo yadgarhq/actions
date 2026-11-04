@@ -318,9 +318,13 @@ def test_a_gated_mapping_is_a_default_when_a_leaf_under_it_is(tmp_path):
     assert result.returncode == 1 and "server" in result.stdout
 
 
-def test_a_gated_mapping_of_null_leaves_is_no_default(tmp_path):
+def test_a_gated_mapping_of_null_leaves_is_a_default(tmp_path):
+    # yaadgaar 574. Measured on helm 4.3.0 and 3.18.4: a present mapping satisfies a
+    # schema `required` and a template `required` even when every leaf under it is
+    # null (it renders `{"limits":{}}`), so the mapping itself is the default.
     chart(tmp_path, "server:\n  limits:\n    a:\n", schema={"required": ["server"]})
-    assert run(tmp_path).returncode == 0
+    result = run(tmp_path)
+    assert result.returncode == 1 and "NEW_DEFAULT: `server` (b)" in result.stdout, result.stdout
 
 
 def test_a_gated_sequence_is_a_default(tmp_path):
@@ -925,3 +929,135 @@ def test_the_list_has_no_command_line_override():
 def test_the_shipped_list_is_well_formed():
     knobs, errors = gate.load_knobs(gate.KNOBS)
     assert errors == [] and "gateway" in knobs
+
+
+# ------------------- yaadgaar 574: fail-open spots closed before any class adopts
+
+
+@pytest.mark.parametrize("values", ["server:\n  limits:\n    a:\n", 'server:\n  limits:\n    a: ""\n', "server:\n  a: null\n  b: ~\n"])
+def test_a_template_required_mapping_of_null_or_empty_leaves_is_a_default(tmp_path, values):
+    # helm's `required` refuses only nil and "": a mapping present is neither.
+    chart(tmp_path, values, templates={"t.yaml": required_on("server")})
+    result = run(tmp_path)
+    assert result.returncode == 1 and "NEW_DEFAULT: `server` (a)" in result.stdout, result.stdout
+    assert "gives it `a mapping`" in result.stdout
+
+
+def test_a_gated_key_written_null_is_still_no_default(tmp_path):
+    # The mapping rule does not touch a key written with nothing under it.
+    chart(tmp_path, "server:\n", schema={"required": ["server"]}, templates={"t.yaml": required_on("server")})
+    assert run(tmp_path).returncode == 0, run(tmp_path).stdout
+
+
+INGRESS_TLS = [
+    "ingress:\n  tls:\n    - secretName: s\n      hosts:\n        - a.example\n",
+    "ingress:\n  tls:\n  - secretName: s\n",
+    "ingress:\n  tls: []\n",
+    "ingress:\n  tls: [{secretName: s}]  # flow\n",
+    "tls:\n  - secretName: s\n",
+]
+
+
+@pytest.mark.parametrize("values", INGRESS_TLS)
+def test_a_sequence_at_a_tls_key_is_a_gated_default_not_unmodelled(tmp_path, values):
+    # A standard ingress `tls:` list. It is a default at the `tls` path itself (arm
+    # (c)), so it can be baselined with a reason; it is never silently green.
+    chart(tmp_path, values)
+    key = "tls" if values.startswith("tls") else "ingress.tls"
+    result = run(tmp_path)
+    assert result.returncode == 1, result.stdout
+    assert f"NEW_DEFAULT: `{key}` (c)" in result.stdout and "UNMODELLED_VALUES" not in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize("values", INGRESS_TLS)
+def test_a_baselined_sequence_at_a_tls_key_is_green(tmp_path, values):
+    key = "tls" if values.startswith("tls") else "ingress.tls"
+    chart(tmp_path, values, baseline=f"{key}  # ADR-1140 OK: the ingress terminates no TLS by default\n")
+    result = run(tmp_path)
+    assert result.returncode == 0, result.stdout
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        "ingress:\n  tls: {secretName: s}\n",
+        "ingress:\n  tls: &t x\n",
+        "ingress:\n  tls: *t\n",
+        "ingress:\n  tls: !!map {}\n",
+        "ingress:\n  tls: |\n    x\n",
+    ],
+)
+def test_any_other_unread_value_at_a_tls_key_stays_refused(tmp_path, values):
+    chart(tmp_path, values)
+    result = run(tmp_path)
+    assert result.returncode == 1 and "UNMODELLED_VALUES" in result.stdout, result.stdout
+
+
+FLOW_CONFIGS = [
+    "repos:\n  - repo: https://github.com/yadgarhq/actions\n    rev: v9.9.9\n    hooks: [{id: chart-required-defaults}]\n",
+    "repos:\n  - repo: https://github.com/yadgarhq/actions\n    rev: v9.9.9\n    hooks:\n      - {id: helm-lint}\n      - {id: 'chart-required-defaults', exclude: x}\n",
+    '{"repos": [{"repo": "x", "rev": "v1", "hooks": [{"id": "chart-required-defaults"}]}]}\n',
+]
+
+
+@pytest.mark.parametrize("config", FLOW_CONFIGS)
+def test_a_flow_style_adoption_still_judges_growth(tmp_path, config):
+    # The base has NO baseline, so only its adoption makes growth judged here.
+    git(tmp_path, "init", "-q", "-b", "main")
+    (tmp_path / ".pre-commit-config.yaml").write_text(config)
+    chart(tmp_path, TLS_VALUES)
+    base = commit(tmp_path, "base")
+    chart(tmp_path, TLS_VALUES, baseline=TLS_BASELINE)
+    commit(tmp_path, "head")
+    result = run(tmp_path, "--base", base)
+    assert result.returncode == 1 and "BASELINE_GREW" in result.stdout and "tls.enabled" in result.stdout, result.stdout
+
+
+def test_a_comment_naming_the_hook_is_not_adoption(tmp_path):
+    git(tmp_path, "init", "-q", "-b", "main")
+    (tmp_path / ".pre-commit-config.yaml").write_text("# chart-required-defaults lands later\n" + UNADOPTED_CONFIG)
+    chart(tmp_path, TLS_VALUES)
+    base = commit(tmp_path, "base")
+    (tmp_path / ".pre-commit-config.yaml").write_text(ADOPTED_CONFIG)
+    chart(tmp_path, TLS_VALUES, baseline=TLS_BASELINE)
+    commit(tmp_path, "adopt")
+    result = run(tmp_path, "--base", base)
+    assert result.returncode == 0 and "adopts" in result.stdout, result.stdout
+
+
+def test_a_baseline_that_grows_before_adoption_is_red_once_the_base_has_one(tmp_path):
+    # The base has not adopted the hook but already carries a baseline: growth is
+    # judged against it, so the window between a baseline landing and its class
+    # naming the hook cannot grow the list unseen by any run of the gate.
+    base = adopted_repo(tmp_path, "tls.caSecret  # ADR-1140 R-a: x\n", config=UNADOPTED_CONFIG)
+    (tmp_path / "chart" / "ci" / "required-defaults-baseline.txt").write_text(TLS_BASELINE)
+    commit(tmp_path, "head")
+    result = run(tmp_path, "--base", base)
+    assert result.returncode == 1 and "BASELINE_GREW" in result.stdout and "tls.enabled" in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize("arm, extra", [("b", {"schema": {"properties": {"a": {"required": ["b"]}}}}), ("a", {"templates": {"t.yaml": '{{ required "m" .Values.a.b }}\n'}})])
+def test_a_gated_sequence_at_the_same_indent_as_its_key_is_a_default(tmp_path, arm, extra):
+    # `b:` then `- x` at b's own indent is a YAML sequence. The values scan reads it
+    # as a null `b`, which the shipped gate took for "no default" (yaadgaar 574).
+    chart(tmp_path, "a:\n  b:\n  - x\n", **extra)
+    result = run(tmp_path)
+    assert result.returncode == 1 and f"NEW_DEFAULT: `a.b` ({arm})" in result.stdout, result.stdout
+
+
+def test_a_dash_shallower_than_a_null_key_does_not_make_it_a_sequence(tmp_path):
+    # `b:` is null; the `- x` belongs to `list`, two levels out.
+    values = "list:\n  - y\nother:\n  a:\n    b:\n  c: 1\n"
+    assert gate.sequence_paths(values) == {"list"}
+    assert gate.sequence_paths("a:\n  b:\n- x\n") == set()
+
+
+def test_a_mapping_of_null_leaves_under_tls_is_judged_by_its_leaves(tmp_path):
+    chart(tmp_path, "tls:\n  a:\n    b:\n")
+    assert run(tmp_path).returncode == 0, run(tmp_path).stdout
+
+
+def test_a_gated_key_below_a_same_indent_sequence_is_refused(tmp_path):
+    chart(tmp_path, "a:\n- b: 1\n", schema={"properties": {"a": {"required": ["b"]}}})
+    result = run(tmp_path)
+    assert result.returncode == 1 and "UNMODELLED_VALUES" in result.stdout and "`a.b`" in result.stdout, result.stdout
