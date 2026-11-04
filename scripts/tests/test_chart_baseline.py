@@ -1800,3 +1800,190 @@ def test_the_scan_refuses_to_answer_rather_than_answering_wrongly():
     assert values.raw("networkPolicy.enabled") == "false"
     assert values.raw("nested.deeper.maxSkew") == "3"
     assert values.raw("topologySpread.topologyKey") == "kubernetes.io/hostname"
+
+
+# ---------------------------------------------------------- `| int64` (yaadgaar 550)
+#
+# HELM'S `| int64` IS `cast.ToInt64`, and it hides bad values rather than refusing
+# them. MEASURED 2026-11-04 on helm v4.3.0 and v3.18.4 (identical), a values file
+# rendered through `{{ $v | int64 }}`:
+#
+#     35 -> 35      35.7 -> 35      -35.7 -> -35    "35" -> 35     "35.0" -> 35
+#     "35.5" -> 0   "035" -> 29     035 -> 29       "0x23" -> 35   "+35" -> 35
+#     "3_5" -> 35   " 35" -> 0      "abc" -> 0      true -> 1      null -> 0
+#     1e6 -> 1000000                9300000000000000000 -> -9223372036854775808
+#     9007199254740993 -> 9007199254740992
+#
+# So the cast is modelled ONLY over a value that is already a plain whole number the
+# cast keeps exactly; every other spelling is refused BEFORE the cast, the same
+# whole-number check `{{ . }}` gets. That is stricter than Helm on purpose: a
+# number the chart never wrote is not one this gate may judge.
+
+CAST_KNOBS = [
+    # (label, template old, template new, values old, good value, floor-breaking value, refusal)
+    (
+        "grace",
+        "terminationGracePeriodSeconds: {{ . }}",
+        "terminationGracePeriodSeconds: {{ . | int64 }}",
+        "terminationGracePeriodSeconds: 35",
+        "terminationGracePeriodSeconds: 35",
+        "terminationGracePeriodSeconds: 29",
+        "below the floor of 35s",
+    ),
+    (
+        "preStop sleep",
+        "                seconds: {{ . }}",
+        "                seconds: {{ . | int64 }}",
+        "preStopSleepSeconds: 5",
+        "preStopSleepSeconds: 5",
+        "preStopSleepSeconds: 10",
+        "below the floor of 40s",
+    ),
+    (
+        "maxSkew",
+        "maxSkew: {{ .Values.topologySpread.maxSkew }}",
+        "maxSkew: {{ .Values.topologySpread.maxSkew | int64 }}",
+        "  maxSkew: 1",
+        "  maxSkew: 1",
+        "  maxSkew: -1",
+        "`maxSkew` resolves to `-1`",
+    ),
+]
+
+
+def cast_chart(root: Path, knob, value_line: str, template_new: str | None = None) -> None:
+    _, template_old, cast_template, values_old, _, _, _ = knob
+    write_chart(
+        root,
+        templates__deployment_yaml=swap(DEPLOYMENT, template_old, template_new or cast_template),
+        values_yaml=swap(VALUES, values_old, value_line),
+    )
+
+
+def test_each_cast_knob_resolves_and_its_bound_still_holds(tmp_path):
+    """GREEN AND RED on one tree per knob: the cast value passes, a value under the
+    bound is still refused by the bound and not by "does not model"."""
+    for knob in CAST_KNOBS:
+        label, _, _, _, good, bad, refusal = knob
+        for value_line, expected in ((good, 0), (bad, 1)):
+            root = tmp_path / f"{label}-{expected}".replace(" ", "-")
+            root.mkdir()
+            cast_chart(root, knob, value_line)
+            result = run(root)
+            assert result.returncode == expected, (label, value_line, result.stdout)
+            assert "does not model" not in result.stdout, (label, result.stdout)
+            if expected:
+                assert refusal in findings_of(result), (label, result.stdout)
+
+
+CAST_WRAPPERS = [
+    "{{ . | int64 }}",
+    "{{ . | int64 | quote }}",
+    '{{ required "grace must be set" . | int64 }}',
+    '{{ required "grace must be set; see .Values.x" . | int64 | quote }}',
+    "{{ $.Values.terminationGracePeriodSeconds | int64 }}",
+    "{{.|int64}}",
+]
+
+
+def test_every_cast_spelling_the_estate_writes_resolves(tmp_path):
+    """`| int64` alone, under `| quote`, behind `required "…"`, and rooted."""
+    for index, wrapper in enumerate(CAST_WRAPPERS):
+        for grace, expected in ((35, 0), (29, 1)):
+            root = tmp_path / f"cast{index}-{grace}"
+            root.mkdir()
+            cast_chart(
+                root,
+                CAST_KNOBS[0],
+                f"terminationGracePeriodSeconds: {grace}",
+                template_new=f"terminationGracePeriodSeconds: {wrapper}",
+            )
+            result = run(root)
+            assert result.returncode == expected, (wrapper, grace, result.stdout)
+            if expected:
+                assert "below the floor of 35s" in findings_of(result)
+
+
+def test_a_quoted_whole_number_is_cast_rather_than_falsely_refused(tmp_path):
+    """Helm casts the string "35" to 35 (measured above), so refusing it would be a
+    false refusal; the quotes are stripped once before the whole-number check."""
+    for index, value in enumerate(('"35"', "'35'")):
+        for grace, expected in ((value, 0), (value.replace("35", "29"), 1)):
+            root = tmp_path / f"quoted{index}-{expected}"
+            root.mkdir()
+            cast_chart(root, CAST_KNOBS[0], f"terminationGracePeriodSeconds: {grace}")
+            result = run(root)
+            assert result.returncode == expected, (grace, result.stdout)
+            if expected:
+                assert "below the floor of 35s" in findings_of(result)
+
+
+# Each a value Helm's cast turns into a number the chart never wrote (measured above).
+NOT_A_WHOLE_NUMBER = [
+    "35.7", "-35.7", "35.0", '"35.5"', '"35.0"', '"035"', "035", '"0x23"', '"+35"',
+    '"3_5"', '" 35"', '"abc"', "true", "1e6", "9300000000000000000", "9007199254740993",
+]
+
+
+def test_the_whole_number_check_runs_before_the_cast(tmp_path):
+    """RED, one per form: every value the cast would bend is refused, by name."""
+    for knob in CAST_KNOBS:
+        label, _, _, values_old, _, _, _ = knob
+        key = values_old.split(":")[0]
+        for index, value in enumerate(NOT_A_WHOLE_NUMBER):
+            root = tmp_path / f"{label}-{index}".replace(" ", "-")
+            root.mkdir()
+            cast_chart(root, knob, f"{key}: {value}")
+            result = run(root)
+            assert result.returncode == 1, (label, value, result.stdout)
+            assert "not a whole number `| int64` keeps exactly" in findings_of(result), (label, value, result.stdout)
+
+
+def test_int_and_other_cast_spellings_are_still_refused(tmp_path):
+    """`| int` is not `| int64`; a cast after `| quote` casts the quotes (0); a call
+    form and a double cast are not written by the estate. All stay unmodelled."""
+    for index, wrapper in enumerate((
+        "{{ . | int }}",
+        "{{ . | quote | int64 }}",
+        "{{ int64 . }}",
+        "{{ . | int64 | int64 }}",
+        "{{ . | toString | int64 }}",
+    )):
+        root = tmp_path / f"refused{index}"
+        root.mkdir()
+        cast_chart(root, CAST_KNOBS[0], "terminationGracePeriodSeconds: 35",
+                   template_new=f"terminationGracePeriodSeconds: {wrapper}")
+        result = run(root)
+        assert result.returncode == 1, (wrapper, result.stdout)
+        assert "an expression this gate does not model" in result.stdout, (wrapper, result.stdout)
+
+
+# THE CORPUS FOR "NOTHING IS WEAKENED": every value the plain `{{ . }}` spelling is
+# judged on, good and bad, plus every form above.
+WEAKENING_CORPUS = NOT_A_WHOLE_NUMBER + [
+    "35", "29", "40", "0", "-5", "5", "1", "2", "10", "-1", '"35"', "'35'", "1000000",
+    "9007199254740992", '""', "null", "~", "{{ .Values.x }}", "[35]", "{a: 1}", "&a 35",
+]
+
+
+def test_nothing_the_plain_spelling_refuses_is_accepted_through_the_cast(tmp_path):
+    """PROOF OF NO WEAKENING: for every knob and every value in the corpus, if the
+    gate refuses the plain spelling the shipped charts write, it refuses the cast."""
+    accepted = []
+    for knob in CAST_KNOBS:
+        label, template_old, cast_template, values_old, _, _, _ = knob
+        key = values_old.split(":")[0]
+        for index, value in enumerate(WEAKENING_CORPUS):
+            verdicts = []
+            for spelling in (template_old.split(": ", 1)[1], cast_template.split(": ", 1)[1]):
+                root = tmp_path / f"{label}-{index}-{len(verdicts)}".replace(" ", "-")
+                root.mkdir()
+                cast_chart(root, knob, f"{key}: {value}",
+                           template_new=template_old.split(": ", 1)[0] + ": " + spelling)
+                verdicts.append(run(root).returncode)
+            plain, cast = verdicts
+            assert not (plain != 0 and cast == 0), (label, value)
+            if cast == 0:
+                accepted.append((label, value))
+    # Non-vacuous: the cast does accept the whole numbers the bounds allow.
+    assert ("grace", "35") in accepted and ("maxSkew", "1") in accepted and ("preStop sleep", "5") in accepted
