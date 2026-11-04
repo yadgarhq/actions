@@ -765,6 +765,46 @@
   pass_filenames: false
   verbose: true
 
+# YAADGAAR 332 (ADR-0705, ADR-1140) — A GATED CHART KEY CARRIES NO DEFAULT. A key is
+# gated when (a) a template `required`s it, (b) a `values.schema.json` block lists it
+# in `required`, or (c) it sits under a path segment named `tls`. Helm merges
+# `values.yaml` before the schema check and before `required` runs, so a default on a
+# gated key makes it optional in effect. The hook's docstring carries the rule, what
+# counts as a default (measured on helm), the parser's resolved and refused forms, and
+# the base resolution.
+#
+# A SHRINK-ONLY RATCHET, NOT A BIG BANG. Today's violations sit in each chart's
+# `chart/ci/required-defaults-baseline.txt`, one `<key>  # ADR-1140 <row>: <reason>`
+# line each. A new default, a stale entry and a baseline that grows against the base
+# are each red. The PER-REPOSITORY file was chosen over a central list here: the
+# entry moves in the same pull request as the default it excuses, so the two cannot
+# drift, and the conversion PRs ADR-1140 orders (consumers first) each delete their
+# own lines.
+#
+# THE RULE IS DERIVED, NOT THE ADR-1140 LIST. Nothing here reads the ratified list
+# (ADR-1140 decision 1); decision 6 names this gate, but the two disagree on DEFAULT-OK
+# rows that a template or schema requires or that sit under `tls` (117 keys at main on
+# 2026-11-04). yaadgaar #571 asks for that ruling.
+#
+# NOT IN ANY CLASS IN `classes.json`, ON PURPOSE, and adoption is PER CLASS. Fan-out
+# renders each repository's hooks from its class: an id a repository adds to its own
+# `.pre-commit-config.yaml` is dropped as `extra:` on the next release, and an override
+# cannot add a hook the class lacks. So each repository's baseline lands first, and
+# nothing checks it until its class names this id; then one change adds the id to the
+# class. Growth is judged only once the BASE references the hook, so that adopting
+# change may write each baseline whole. `scripts/tests/test_chart_required_defaults.py`
+# pins that no class names it yet.
+#
+# `always_run` with `pass_filenames: false`, the `chart-baseline` reason: the subject
+# is every chart in the tree, and the ratchet reads history, not the touched file.
+- id: chart-required-defaults
+  name: ADR-0705 — a gated chart key (required, schema-required or under tls) carries no default
+  language: script
+  entry: hooks/chart_required_defaults.py
+  always_run: true
+  pass_filenames: false
+  verbose: true
+
 # ADR-0705 — THE TWO HALVES OF MERGE-TIME FEEDBACK ON AN ORGANISATION'S OWN SEED
 # DECLARATION. These are the only entries in this manifest whose intended consumer is
 # NOT a repository in this organisation. An adopting organisation's GitOps repository
