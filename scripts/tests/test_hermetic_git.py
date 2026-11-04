@@ -25,6 +25,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 GATE = Path(__file__).resolve().parents[2] / "hooks" / "hermetic_git.py"
 
 _spec = importlib.util.spec_from_file_location("hermetic_git", GATE)
@@ -263,6 +265,67 @@ def test_production_code_shelling_to_git_is_not_in_scope():
     assert hermetic_git.is_test_file(Path("scripts/tests/test_repin.py"))
     assert hermetic_git.is_test_file(Path("scripts/tests/fixtures/helper.py"))
 
+
+
+# ---------------------------------------------------------------------------
+# yaadgaar 573 — a dict comprehension over `os.environ` must drop `GIT_*`.
+# ---------------------------------------------------------------------------
+
+
+def _comprehension(expression: str) -> list[str]:
+    # A HELPER that builds the env, called at the site: the shape that leaked in
+    # actions#175's first draft. The call site alone (`env=clean_env()`) proves
+    # nothing; the comprehension inside the helper is what is judged.
+    return _violations(
+        "import subprocess, os\n"
+        "def clean_env():\n"
+        f"    return {expression}\n"
+        "def git(cwd, *a):\n"
+        "    subprocess.run(['git', *a], cwd=cwd, env=clean_env())\n"
+    )
+
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        # The actions#175 first draft: GITHUB_ stripped, GIT_INDEX_FILE kept.
+        '{k: v for k, v in os.environ.items() if not k.startswith("GITHUB_")}',
+        "{k: v for k, v in os.environ.items()}",
+        '{k: v for k, v in os.environ.items() if not k.startswith("GIT_") or True}',
+        '{k: v for k, v in os.environ.items() if not v.startswith("GIT_")}',
+        '{k: v for k, v in os.environ.items() if k.startswith("GIT_")}',
+        '{k: v for k, v in os.environ.items() if not k.startswith("GIT_DIR")}',
+        '{k: os.environ[k] for k in os.environ if k != "GIT_DIR"}',
+        "{k: os.environ[k] for k in os.environ.keys()}",
+        "dict((k, v) for k, v in os.environ.items())",
+        'dict((k, v) for k, v in os.environ.items() if not k.startswith("GITHUB_"))',
+    ],
+)
+def test_a_comprehension_over_os_environ_that_keeps_git_vars_is_refused(expression):
+    found = _comprehension(expression)
+    assert len(found) == 1, found
+    assert "test_fixture.py:3" in found[0] and "GIT_" in found[0]
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        '{k: v for k, v in os.environ.items() if not k.startswith("GIT_")}',
+        # `clean_env` in test_chart_required_defaults.py: two conjuncts.
+        '{k: v for k, v in os.environ.items() if not k.startswith("GIT_") and not k.startswith("GITHUB_")}',
+        '{k: v for k, v in os.environ.items() if k != "GH_TOKEN" if not k.startswith("GIT_")}',
+        '{k: v for k, v in os.environ.items() if not k.startswith(("GITHUB_", "GIT_"))}',
+        '{k: os.environ[k] for k in os.environ if not k.startswith("GIT")}',
+        'dict((k, v) for k, v in os.environ.items() if not k.startswith("GIT_"))',
+    ],
+)
+def test_a_comprehension_that_drops_every_git_var_is_accepted(expression):
+    assert _comprehension(expression) == []
+
+
+def test_a_comprehension_over_something_else_is_not_judged():
+    assert _comprehension("{k: v for k, v in other.items()}") == []
 
 # ---------------------------------------------------------------------------
 # Layer 2 — the real CLI, a real repository, `git ls-files` scoping included.

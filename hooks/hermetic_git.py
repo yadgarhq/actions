@@ -43,7 +43,13 @@ keyword.
 written out loud, or wrapped in just enough code to look deliberate -- are
 each refused the same way a missing `env=` is; passing it through any OTHER
 expression -- a call to a helper, a dict comprehension that filters
-`os.environ.items()` -- is accepted. THIS IS NOT A PROOF the helper actually
+`os.environ.items()` -- is accepted at the call site. SEPARATELY, every dict
+comprehension over `os.environ` (`{k: v for k, v in os.environ.items() ...}`,
+`dict((k, v) for ...)`), wherever the test file writes it, must carry
+`not <key>.startswith("GIT_")` as an `if` clause or an `and` conjunct, or it is
+refused (yaadgaar 573: a `GITHUB_`-only filter in a helper passed this gate and
+let a fixture `git add -A` rewrite the real index) -- see
+`environ_comprehensions()`. THIS IS STILL NOT A PROOF a helper actually
 filters `GIT_*`: it is the same shape of check `boot_reads_watched.py` makes
 about its own markers, a MARKER'S PRESENCE rather than a semantic
 verification of what it does, matched against the one convention this
@@ -194,11 +200,11 @@ def is_ambient_environ(node: ast.AST) -> bool:
     `os.environ | {...}` (PEP 584), the same merge through the `|` operator
     instead of `**`. `env=None` is caught too: to `subprocess` itself, `None`
     means "inherit the ambient environment", the identical leak to omitting
-    `env=` spelled a different way. NOT caught: a dict COMPREHENSION over
-    `os.environ.items()` -- `{k: v for k, v in os.environ.items() if not
-    k.startswith("GIT_")}`, the `_git_env()` convention this gate exists to
-    require -- a `ast.DictComp`, a different node entirely from the
-    `ast.Dict` literal checked here.
+    `env=` spelled a different way. NOT judged HERE: a dict COMPREHENSION over
+    `os.environ.items()` -- an `ast.DictComp`, a different node from the
+    `ast.Dict` literal checked here. `environ_comprehensions()` judges every
+    one of those in the file, at the call site or not, and refuses one whose
+    filter does not drop `GIT_*` on the key.
     """
     if node is None or (isinstance(node, ast.Constant) and node.value is None):
         return True
@@ -235,6 +241,89 @@ def is_ambient_environ(node: ast.AST) -> bool:
         if is_ambient_environ(node.left) or is_ambient_environ(node.right):
             return True
     return False
+
+
+def _environ_iteration(node: ast.AST) -> bool:
+    """Whether `node` iterates `os.environ`: itself, `.items()` or `.keys()`."""
+    if _is_os_environ(node):
+        return True
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in ("items", "keys")
+        and _is_os_environ(node.func.value)
+        and not node.args
+    )
+
+
+def _key_name(target: ast.AST) -> str | None:
+    """The name a comprehension binds to each environment KEY."""
+    if isinstance(target, ast.Name):
+        return target.id
+    if isinstance(target, ast.Tuple) and target.elts and isinstance(target.elts[0], ast.Name):
+        return target.elts[0].id
+    return None
+
+
+def _drops_git(condition: ast.AST, key: str) -> bool:
+    """Whether `condition` is, or is ANDed with, `not <key>.startswith(P)` for a
+    prefix P that every `GIT_*` name starts with (`"GIT_"`, `"GIT"`, or a tuple
+    holding one). An `or` can let a GIT_ key through, so it never counts."""
+    if isinstance(condition, ast.BoolOp) and isinstance(condition.op, ast.And):
+        return any(_drops_git(value, key) for value in condition.values)
+    if not (isinstance(condition, ast.UnaryOp) and isinstance(condition.op, ast.Not)):
+        return False
+    call = condition.operand
+    if not (
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "startswith"
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == key
+        and len(call.args) == 1
+        and not call.keywords
+    ):
+        return False
+    prefix = call.args[0]
+    prefixes = prefix.elts if isinstance(prefix, ast.Tuple) else [prefix]
+    return any(
+        isinstance(p, ast.Constant) and isinstance(p.value, str) and p.value and "GIT_".startswith(p.value)
+        for p in prefixes
+    )
+
+
+def environ_comprehensions(tree: ast.AST) -> list[int]:
+    """Line numbers of every dict built from `os.environ` by a comprehension that
+    does not drop `GIT_*` (yaadgaar 573).
+
+    A `{k: v for k, v in os.environ.items() ...}` or `dict((k, v) for ...)` is
+    judged WHEREVER it is written in a test file, not only at an `env=` site: the
+    leak that cost actions#175 a clobbered index lived in a helper the call site
+    named, `env=clean_env()`. Its filter must include `not <key>.startswith("GIT_")`
+    as an `if` clause or an `and` conjunct, on the KEY. A `GITHUB_`-only filter, no
+    filter, an `or`, a filter on the value or a whitelist is refused: this reads a
+    marker, it cannot prove a whitelist leaves every GIT_ name out.
+    """
+    lines = []
+    for node in ast.walk(tree):
+        generators = None
+        if isinstance(node, ast.DictComp):
+            generators = node.generators
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "dict"
+            and len(node.args) == 1
+            and isinstance(node.args[0], ast.GeneratorExp)
+        ):
+            generators = node.args[0].generators
+        for generator in generators or []:
+            if not _environ_iteration(generator.iter):
+                continue
+            key = _key_name(generator.target)
+            if key is None or not any(_drops_git(condition, key) for condition in generator.ifs):
+                lines.append(node.lineno)
+    return lines
 
 
 def subprocess_bindings(tree: ast.AST) -> tuple[set[str], dict[str, str]]:
@@ -317,6 +406,14 @@ def violations(path: Path, tree: ast.AST) -> list[str]:
             f"`env=` built from a `GIT_*`-stripped copy of `os.environ` (the "
             f"`_git_env()` convention in `test_next_version.py` and "
             f"`test_service_immutable.py`)."
+        )
+    for line in environ_comprehensions(tree):
+        found.append(
+            f"{path}:{line}: a dict comprehension over `os.environ` does not drop "
+            f"`GIT_*`, so an env built from it still carries GIT_DIR and "
+            f"GIT_INDEX_FILE (yaadgaar 573: a `GITHUB_`-only filter let a fixture "
+            f"`git add -A` rewrite the real index). Filter it with `if not "
+            f"k.startswith(\"GIT_\")` on the key, as `_git_env()` does."
         )
     return found
 
