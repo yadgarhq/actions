@@ -2279,6 +2279,16 @@ HELM_SPACE_REFUSED = [row for c in UNICODE_SPACES for row in (
     f"0{c}", f"false{c}", f"{c}0", f"{c}", f"0{c} # c",
 )] + ["'it''s'", "''''"]
 
+# A single-quoted scalar whose `''` escape or `\\` keeps it open onto a line at
+# indent 0 (yaadgaar 634). Helm reads each as ONE string, so there is no `toggle`:
+# "it's toggle: 1", "'a toggle: 1" and "a\\' toggle: 1", measured 2026-11-04 on helm
+# v4.3.0 and v3.18.4, identical. The shipped gate stopped at the first `'` of `''`
+# (or skipped a `\\'`), read `toggle: 1'` as a key that is on, and judged the if
+# branch: a FAIL-OPEN of the ADR-0601 grace floor.
+SINGLE_QUOTED_OVER_TWO_LINES = [
+    "cfg: 'it''s\ntoggle: 1'\n", "cfg: '''a\ntoggle: 1'\n", "cfg: 'a\\''\ntoggle: 1'\n",
+]
+
 # Whole values files Helm refuses, which the gate must refuse too. Text after a
 # closing quote is a Helm error ("did not find expected key"), and so is a quote
 # that never closes.
@@ -2286,7 +2296,7 @@ HELM_REFUSED_FILES = [row for c in UNICODE_SPACES for row in (
     f"a: 1\n{c}\nx: 0\n", f"x:{c}0\n", f'x: "0"{c}\n',
 )] + [row for c in HELM_REFUSED_CONTROLS for row in (
     f"x: 0{c}\n", f"x: {c}0\n", f"a: 1{c}x: 0\n", f"# a{c}b\nx: 0\n", f'x: "{c}"\n',
-)] + ['x: "0"x\n', 'x: ""x\n', "x: 'a'x\n", "x: ''x\n", 'x: "abc\n']
+)] + ['x: "0"x\n', 'x: ""x\n', "x: 'a'x\n", "x: ''x\n", 'x: "abc\n', "x: 'it''s'x\n"]
 
 # Helm ACCEPTS these files; the gate does not model them and refuses the file.
 # `<c>x: 0`: the key is "<c>x", so `x` keeps its default (measured). A quoted
@@ -2294,7 +2304,7 @@ HELM_REFUSED_FILES = [row for c in UNICODE_SPACES for row in (
 # `toggle: 1"` is cfg = "a toggle: 1", and no `toggle` key at all (measured).
 HELM_ACCEPTS_UNMODELLED_FILES = [f"{c}x: 0\n" for c in UNICODE_SPACES] + [
     'cfg: "a\ntoggle: 1"\n', "cfg: 'a\ntoggle: 1'\n", 'p:\n  cfg: "a\n  toggle: 1"\n',
-]
+] + SINGLE_QUOTED_OVER_TWO_LINES + ["p:\n  cfg: 'it''s\n  toggle: 1'\n"]
 
 # Helm refuses each of these files ("did not find expected ',' or ']'" and kin). The
 # gate reads the key as unmodelled and must SUPPRESS the lines under it, or the
@@ -2491,13 +2501,51 @@ def test_a_quoted_scalar_over_two_lines_refuses_the_file(tmp_path):
     """RED on cc3c23a and on #193's first head, a FAIL-OPEN: Helm reads `cfg: "a`
     + `toggle: 1"` as cfg = "a toggle: 1" and renders the 29s else branch; the
     gate read `toggle: 1"` as a key that is on and judged the 35s if branch."""
-    for index, lines in enumerate(('cfg: "a\ntoggle: 1"\n', "cfg: 'a\ntoggle: 1'\n")):
+    shapes = ['cfg: "a\ntoggle: 1"\n', "cfg: 'a\ntoggle: 1'\n"] + SINGLE_QUOTED_OVER_TWO_LINES
+    for index, lines in enumerate(shapes):
         root = tmp_path / f"q{index}"
         root.mkdir()
         write_chart(root, **no_toggle_but(lines, 35, 29))
         result = run(root)
         assert result.returncode == 1, (repr(lines), result.stdout)
         assert "continues onto the next line" in result.stdout, result.stdout
+
+
+def test_a_single_quoted_scalar_ends_where_yaml_ends_it():
+    """YAML's single-quoted rules (yaadgaar 634): `''` is an escape and a backslash
+    is literal. Helm reads `'a\\'` as `a\\` (measured), and the shipped gate refused
+    the whole file, because it took `\\'` for an escaped quote. A `''` escape on one
+    line stays unmodelled, and the lines after it are still read."""
+    gate = gate_module()
+    for text in ("x: 'a\\'\n", "x: 'a\\' # c'\n", "x: 'a\\'  #c\n"):
+        values = gate.scan_values(text)
+        assert values.modelled, (text, values.reason)
+        assert values.raw("x") == "'a\\'", (text, values.scalars)
+        assert values.truth("x") == gate.GUARD_ON, text
+        assert scanned(text) == leaves(yaml.safe_load(text)), text
+    for text in ("x: 'it''s' # c\ntoggle: 1\n", "x: 'a'''\ntoggle: 1\n", "x: 'it''s'#c\ntoggle: 1\n"):
+        values = gate.scan_values(text)
+        assert values.modelled, (text, values.reason)
+        assert values.truth("x") == gate.GUARD_UNMODELLED, (text, values.scalars)
+        assert values.truth("toggle") == gate.GUARD_ON, (text, values.scalars)
+
+
+def test_a_closed_escape_does_not_hide_the_next_key(tmp_path):
+    """`cfg: 'a'''` closes on its own line (Helm reads "a'"), so `toggle: 1` IS a
+    key and Helm renders the if branch (measured). The gate must judge that branch:
+    a 29s if branch is refused, a 35s one passes. A fix that refused the file or
+    suppressed the lines after a closed escape fails here."""
+    root = tmp_path / "closed"
+    root.mkdir()
+    write_chart(root, **no_toggle_but("cfg: 'a'''\ntoggle: 1\n", 29, 35))
+    result = run(root)
+    assert result.returncode == 1, result.stdout
+    assert "below the floor of 35s" in findings_of(result), result.stdout
+    root = tmp_path / "closed-ok"
+    root.mkdir()
+    write_chart(root, **no_toggle_but("cfg: 'a'''\ntoggle: 1\n", 35, 29))
+    result = run(root)
+    assert result.returncode == 0, result.stdout
 
 
 def test_a_control_character_in_values_refuses_the_chart(tmp_path):
