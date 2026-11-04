@@ -637,18 +637,22 @@ def require_trivy_version(actual: str, expected: str = TRIVY_VERSION) -> None:
     `aquasecurity/trivy-action` with no `version:` input installs its OWN
     default (0.70.0) into its own bin directory and PREPENDS that onto
     `$GITHUB_PATH` for every later step in the job -- so a separate install of
-    the right version, run AFTER that step, is shadowed rather than used. The
-    version matters beyond cosmetics: 0.70.0 has no `Skipping chart` WARN at
+    the right version, run AFTER that step, is shadowed rather than used.
+    Since yaadgaar 565 every trivy-action step sets `skip-setup-trivy: true`
+    and its `version:` input does nothing: the binary on PATH is the one the
+    job's `install trivy` step downloads at `versions.yaml`'s `trivy` pin and
+    checks against its `sha256`. The version matters beyond cosmetics: 0.70.0 has no `Skipping chart` WARN at
     all (it writes `ERROR Failed to render Chart files` instead), so this
     gate's own render-check would silently stop checking what it claims to.
     """
     if actual != expected:
         raise Refused(
             f"trivy on PATH reports version {actual!r}, not the pinned "
-            f"{expected!r}. If this is CI: `aquasecurity/trivy-action` "
-            f"installs its own default version and puts it on PATH ahead of "
-            f"anything installed before it ran -- pin `version:` on that "
-            f"step itself, do not install a second copy after it."
+            f"{expected!r}. If this is CI: the job's `install trivy` step "
+            f"puts the binary on PATH, at the `trivy` version and `sha256` in "
+            f"`versions.yaml`. Check that it ran before this step, and that "
+            f"every `aquasecurity/trivy-action` step in the job sets "
+            f"`skip-setup-trivy: true` (its `version:` input does nothing)."
         )
 
 
