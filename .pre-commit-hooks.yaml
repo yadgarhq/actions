@@ -765,9 +765,10 @@
   pass_filenames: false
   verbose: true
 
-# YAADGAAR 332 (ADR-0705, ADR-1140) — A GATED CHART KEY CARRIES NO DEFAULT. A key is
-# gated when (a) a template `required`s it, (b) a `values.schema.json` block lists it
-# in `required`, or (c) it sits under a path segment named `tls`. Helm merges
+# YAADGAAR 332 (ADR-0705, ADR-1143) — A GATED CHART KEY CARRIES NO DEFAULT. A key is
+# gated when (a) a template `required`s it and the ADR-0705 REQUIRED list does not
+# classify it DEFAULT-OK, (b) a `values.schema.json` block lists it in `required`, or
+# (c) it sits under a path segment named `tls`. Helm merges
 # `values.yaml` before the schema check and before `required` runs, so a default on a
 # gated key makes it optional in effect. The hook's docstring carries the rule, what
 # counts as a default (measured on helm), the parser's resolved and refused forms, and
@@ -781,10 +782,14 @@
 # drift, and the conversion PRs ADR-1140 orders (consumers first) each delete their
 # own lines.
 #
-# THE RULE IS DERIVED, NOT THE ADR-1140 LIST. Nothing here reads the ratified list
-# (ADR-1140 decision 1); decision 6 names this gate, but the two disagree on DEFAULT-OK
-# rows that a template or schema requires or that sit under `tls` (117 keys at main on
-# 2026-11-04). yaadgaar #571 asks for that ruling.
+# ARM (a) READS THE RATIFIED LIST (ADR-1143, yaadgaar #571). A template `required` on
+# a DEFAULT-OK key is the refuse-empty idiom, and its default is allowed. The list is
+# `hooks/data/required-knobs.json`, generated from docs
+# `plans/adr-0705-knob-classification.md` by `scripts/required_knobs.py` and held equal
+# to a vendored copy of the plan's tables by `scripts/tests/test_required_knobs.py`; a
+# plan row change regenerates it in the same pull request. Fail closed: only an exact
+# DEFAULT-OK row exempts a key, and a missing or malformed list is red. Arms (b) and
+# (c) do not read the list.
 #
 # NOT IN ANY CLASS IN `classes.json`, ON PURPOSE, and adoption is PER CLASS. Fan-out
 # renders each repository's hooks from its class: an id a repository adds to its own
@@ -798,7 +803,7 @@
 # `always_run` with `pass_filenames: false`, the `chart-baseline` reason: the subject
 # is every chart in the tree, and the ratchet reads history, not the touched file.
 - id: chart-required-defaults
-  name: ADR-0705 — a gated chart key (required, schema-required or under tls) carries no default
+  name: ADR-0705 — a gated chart key (REQUIRED-list required, schema-required or under tls) carries no default
   language: script
   entry: hooks/chart_required_defaults.py
   always_run: true

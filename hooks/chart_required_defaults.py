@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""YAADGAAR 332 (ADR-0705, ADR-1140): a GATED chart key carries no default.
+"""YAADGAAR 332 (ADR-0705, ADR-1143): a GATED chart key carries no default.
 
 ADR-0705 says a consequential knob has no default, so an adopter's render fails
 until they state it. Ruling 1 of yaadgaar 327 chose WHICH keys this gate sees: the
 keys a chart already declares required, plus a prefix rule. So a key is GATED
-when any of these holds:
+when any of these holds (ADR-1143 decision 6):
 
-  (a) a template passes it to `required`;
+  (a) a template passes it to `required` AND the REQUIRED list does not classify it
+      DEFAULT-OK;
   (b) a `values.schema.json` block lists it in `required`;
   (c) it sits under a path segment named `tls`, at any depth (`tls.*`, `*.tls.*`).
 
@@ -15,16 +16,23 @@ mechanisms: helm merges `values.yaml` before it validates the schema and before
 `required` runs, so a defaulted key is required on paper and optional in effect.
 `#564` counted 52 schema-required leaves in that state.
 
-THE RULE IS DERIVED; IT DOES NOT READ THE ADR-1140 LIST. ADR-1140 ratified a
-per-chart REQUIRED list (decision 1) and names this gate (decision 6), but no line
-here keys on that list. The two disagree where a DEFAULT-OK row is gated anyway: a
-`*SecretKey` a template `required`s, a schema-required timeout, a `tls.domain: ""`.
-At main on 2026-11-04 that is 117 keys, and yaadgaar #571 asks for the ruling.
-Until then each is an exception through the baseline, carrying its DEFAULT-OK row.
+ARM (a) READS THE REQUIRED LIST (ADR-1143, yaadgaar 571). A template `required` on
+a key the ADR-0705 list classifies DEFAULT-OK is the refuse-empty idiom: the default
+serves most adopters, and `required` stops one from blanking the key. Arm (a)
+allows that default. The list is `data/required-knobs.json`, keyed by the `name:`
+in Chart.yaml, generated from the plan's per-chart tables by
+`scripts/required_knobs.py` and held equal to them by
+`scripts/tests/test_required_knobs.py`. FAIL CLOSED (decision 7): only an EXACT
+DEFAULT-OK row exempts a key. A chart the list does not name, a key it does not
+classify (an ancestor, a descendant, a new knob, an `index` segment the list cannot
+spell) and every key of a list that is missing or malformed count as REQUIRED, and
+a missing or malformed list is REQUIRED_LIST_MALFORMED, red. Arms (b) and (c) do not
+read the list: a DEFAULT-OK key the schema requires or that sits under `tls` stays
+gated, and such rows stay in the baselines until their status is resolved.
 
 WHAT "A DEFAULT" MEANS, measured on helm 4.3.0. `required` refuses nil AND "",
-and passes 0 and false. So "" is no default for a key a template `required`s,
-and is a default for a key only (b) or (c) gates: "" satisfies a schema
+and passes 0 and false. So "" is no default for a key a template `required`s
+(whether or not arm (a) gates it: that is helm, not the list), and is a default for a key only (b) or (c) gates: "" satisfies a schema
 `required` and renders into the manifest. A key written with nothing after the
 colon, `null` or `~` is unset. A mapping is a default when any leaf under it is
 one. A sequence, a flow collection or a block scalar at a gated path is a default.
@@ -102,7 +110,7 @@ Only the annotation and single-value validation keywords in ANNOTATION_KEYWORDS 
 equal to PyYAML over the estate's files; it is imported, not copied (ADR-0679).
 
 Run:   python3 hooks/chart_required_defaults.py [--root DIR] [--base REV] [--report]
-Tests: python3 -m pytest scripts/tests/test_chart_required_defaults.py -q
+Tests: python3 -m pytest scripts/tests/test_chart_required_defaults.py scripts/tests/test_required_knobs.py -q
 """
 
 from __future__ import annotations
@@ -122,6 +130,11 @@ from chart_baseline import NOT_MODELLED, Values, find_charts, scan_values  # noq
 
 HOOK = "chart-required-defaults"
 BASELINE = Path("ci") / "required-defaults-baseline.txt"
+# The ADR-0705 REQUIRED list (ADR-1143 decision 7). Shipped beside the hook, never
+# taken from the command line or the environment: a consumer cannot aim the gate at
+# a more permissive list.
+KNOBS = Path(__file__).resolve().parent / "data" / "required-knobs.json"
+CHART_NAME = re.compile(r"""^name:\s*(?P<q>["']?)(?P<name>[^"'#\s]+)(?P=q)\s*(#.*)?$""", re.M)
 NULL_WORDS = frozenset({"null", "Null", "NULL", "~"})
 EMPTY_STRINGS = frozenset({'""', "''"})
 ARRAY_KEYWORDS = frozenset({"items", "prefixItems", "contains", "additionalItems", "unevaluatedItems"})
@@ -146,6 +159,7 @@ BASELINE_LINE = re.compile(
     r"^(?P<key>\S+)\s+#\s*ADR-1140\s+(?P<row>[^:]+?)\s*:\s*(?P<reason>.*?)\s*$"
 )
 DOTTED_KEY = re.compile(r"^[A-Za-z0-9_\-]+(\.[A-Za-z0-9_\-]+)*$")
+SEGMENT = re.compile(r"^[A-Za-z0-9_\-]+$")
 ADOPTED = re.compile(r"^\s*-\s*id:\s*[\"']?" + re.escape(HOOK) + r"[\"']?\s*(#.*)?$", re.M)
 ASSIGNMENT = re.compile(r"^\$(?P<name>\w+)\s*:?=\s*(?P<rhs>.+)$", re.S)
 BINDING = re.compile(r"^(?:range|with)\s+(?P<names>\$\w+(?:\s*,\s*\$\w+)?)\s*:?=", re.S)
@@ -397,6 +411,10 @@ class Facts:
     # define's own argument (`.` not rebound, or `$`), judged at the define's callers.
     sites: list = field(default_factory=list)
     tpl_paths: list = field(default_factory=list)  # (at, dotted values path a `tpl` renders)
+    # Dotted paths from an `index`/`get` literal that is not a plain name (`"a.b"`,
+    # `"*"`): the joined path does not spell the key helm reads, so the REQUIRED
+    # list cannot exempt it (ADR-1143 decision 7).
+    unspelled: set = field(default_factory=set)
 
 
 OPENER = re.compile(r"^(define|block|with|range|if|end|else|template)\b")
@@ -446,6 +464,8 @@ def template_facts(source: str, where: str) -> Facts:
         for event in calls(pipeline, resolver):
             if event[0] == "path":
                 facts.found.setdefault(event[1], set()).add(define)
+                if not event[2]:
+                    facts.unspelled.add(event[1])
             elif event[0] == "refused":
                 facts.refused.append((f"{at}: {event[1]} in `{' '.join(body.split())}`", define))
             elif event[0] == "tpl":
@@ -546,7 +566,10 @@ def tpl_event(pipeline: list, index: int, arguments: list, resolver: Resolver):
 
 
 def calls(pipeline: list, resolver: Resolver):
-    """Yield ("path", p), ("refused", why) or ("site", helper, context) for a pipeline, nested ones included."""
+    """Yield ("path", p, plain), ("refused", why) or ("site", helper, context) for a pipeline, nested ones included.
+
+    `plain`: every segment of `p` is a plain name, so `p` spells the key helm reads.
+    """
     for index, command in enumerate(pipeline):
         for position, term in enumerate(command):
             if isinstance(term, Group):
@@ -582,7 +605,7 @@ def calls(pipeline: list, resolver: Resolver):
                 raise Refusal(f"`required` with {len(arguments)} argument{'s' if len(arguments) != 1 else ''}")
             if not path:
                 raise Refusal("an operand that is the whole values tree")
-            yield "path", ".".join(path)
+            yield "path", ".".join(path), all(SEGMENT.match(part) for part in path)
         except Refusal as error:
             yield "refused", str(error)
 
@@ -649,8 +672,11 @@ def ancestors(path: str):
     return [".".join(parts[:index]) for index in range(1, len(parts))]
 
 
-def is_default(values: Values, path: str, arms: set) -> bool:
-    """Whether `values.yaml` supplies a value at `path`. Raises Refusal when it cannot tell."""
+def is_default(values: Values, path: str, template_required: bool) -> bool:
+    """Whether `values.yaml` supplies a value at `path`. Raises Refusal when it cannot tell.
+
+    `template_required`: a template passes `path` to `required`, which refuses "".
+    """
     if path in values.scalars:
         raw = values.scalars[path]
         if raw is NOT_MODELLED:
@@ -658,12 +684,12 @@ def is_default(values: Values, path: str, arms: set) -> bool:
         if raw in NULL_WORDS:
             return False
         if raw in EMPTY_STRINGS:
-            return "a" not in arms
+            return not template_required
         return True
     if path in values.mappings:
         prefix = path + "."
         leaves = [leaf for leaf in (*values.scalars, *values.nulls) if leaf.startswith(prefix)]
-        return any(is_default(values, leaf, arms) for leaf in leaves)
+        return any(is_default(values, leaf, template_required) for leaf in leaves)
     if path in values.nulls:
         return False
     for ancestor in ancestors(path):
@@ -699,6 +725,54 @@ def tls_gated(values: Values) -> tuple:
         elif parts[-1] == "tls" and values.scalars.get(path) is NOT_MODELLED:
             refused.append(f"`{path}` is a value the values.yaml scan does not read, so the keys under it cannot be judged")
     return found, refused
+
+
+# ------------------------------------------------------------------ the REQUIRED list
+
+
+def load_knobs(path: Path) -> tuple:
+    """({chart name: {"required": keys, "default_ok": keys}}, problems). Any problem empties the map: fail closed."""
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        return {}, [f"REQUIRED_LIST_MALFORMED: {path} cannot be read ({error.__class__.__name__})"]
+    except ValueError as error:
+        return {}, [f"REQUIRED_LIST_MALFORMED: {path} is not JSON: {error}"]
+    problems, charts = [], {}
+    if not isinstance(document, dict) or not isinstance(document.get("charts"), dict):
+        problems.append("the top level is not an object with a `charts` object")
+    elif set(document) - {"source", "charts"}:
+        problems.append(f"unknown top-level key(s) {sorted(set(document) - {'source', 'charts'})}")
+    else:
+        for name, entry in document["charts"].items():
+            if not isinstance(entry, dict) or set(entry) != {"required", "default_ok"}:
+                problems.append(f"`{name}` is not an object of exactly `required` and `default_ok`")
+                continue
+            lists = {}
+            for kind in ("required", "default_ok"):
+                listed = entry[kind]
+                if not isinstance(listed, list) or not all(isinstance(key, str) for key in listed):
+                    problems.append(f"`{name}.{kind}` is not a list of strings")
+                    continue
+                bad = [key for key in listed if not DOTTED_KEY.match(key)]
+                problems += [f"`{name}.{kind}` lists `{key}`, which is not a dotted key" for key in bad]
+                twice = sorted({key for key in listed if listed.count(key) > 1})
+                problems += [f"`{name}.{kind}` lists `{key}` twice" for key in twice]
+                lists[kind] = set(listed)
+            if len(lists) == 2:
+                problems += [f"`{name}` lists `{key}` as both required and default_ok" for key in sorted(lists["required"] & lists["default_ok"])]
+                charts[name] = lists
+    if problems:
+        return {}, [f"REQUIRED_LIST_MALFORMED: {path}: {problem}" for problem in problems]
+    return charts, []
+
+
+def chart_name(chart: Path):
+    try:
+        match = CHART_NAME.search((chart / "Chart.yaml").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return None
+    return match.group("name") if match else None
 
 
 # ------------------------------------------------------------------ the baseline
@@ -801,12 +875,17 @@ class Verdict:
     violations: dict = field(default_factory=dict)
     baselined: int = 0
     errors: list = field(default_factory=list)
+    exempt: set = field(default_factory=set)  # template-required keys the list classifies DEFAULT-OK
 
 
-def judge(chart: Path, root: Path) -> Verdict:
+def judge(chart: Path, root: Path, knobs: dict) -> Verdict:
     where = chart.relative_to(root).as_posix() or "."
     verdict = Verdict(where)
     gated: dict = {}
+    templated: set = set()
+    # ADR-1143: only an exact DEFAULT-OK row exempts a key from arm (a). No entry
+    # for this chart (or no name) is an empty set: every key counts as REQUIRED.
+    default_ok = knobs.get(chart_name(chart), {}).get("default_ok", set())
 
     # EVERY FILE under templates/, whatever its suffix: helm parses them all, so a
     # `required` in a `.json` or a suffix-less file is as real as one in `.yaml`. A
@@ -825,7 +904,11 @@ def judge(chart: Path, root: Path) -> Verdict:
         facts = template_facts(source, relative)
         every.append(facts)
         for key in facts.found:
-            gated.setdefault(key, set()).add("a")
+            templated.add(key)
+            if key in default_ok and key not in facts.unspelled:
+                verdict.exempt.add(key)
+            else:
+                gated.setdefault(key, set()).add("a")
         verdict.errors += [f"UNRESOLVED_REQUIRED: {message}" for message, _ in facts.refused]
     verdict.errors += [f"UNRESOLVED_REQUIRED: {problem}" for problem in helper_refusals(every)]
     tpl_paths = [entry for facts in every for entry in facts.tpl_paths]
@@ -856,7 +939,7 @@ def judge(chart: Path, root: Path) -> Verdict:
     verdict.gated = gated
     for key in sorted(gated):
         try:
-            if is_default(values, key, gated[key]):
+            if is_default(values, key, key in templated):
                 verdict.violations[key] = describe(values, key)
         except Refusal as error:
             verdict.errors.append(f"UNMODELLED_VALUES: {where}/values.yaml: {error}")
@@ -923,11 +1006,14 @@ def main(argv=None) -> int:
     if not charts:
         print(f"{HOOK}: NO_CHART: no Chart.yaml under {root}. A tree with nothing to judge is red, not green")
         return 1
-    verdicts = [judge(chart, root) for chart in charts]
+    knobs, list_errors = load_knobs(KNOBS)
+    verdicts = [judge(chart, root, knobs) for chart in charts]
 
     if arguments.report:
+        for error in list_errors:
+            print(f"! {error}")
         for verdict in verdicts:
-            print(f"# {verdict.chart}: {len(verdict.gated)} gated, {len(verdict.violations)} with a default, {len(verdict.errors)} refused")
+            print(f"# {verdict.chart}: {len(verdict.gated)} gated, {len(verdict.violations)} with a default, {len(verdict.errors)} refused, {len(verdict.exempt)} template-required exempt as DEFAULT-OK")
             for key in sorted(verdict.violations):
                 print(f"{key}\t{arms(verdict.gated[key])}\t{verdict.violations[key]}")
             for error in verdict.errors:
@@ -935,7 +1021,7 @@ def main(argv=None) -> int:
         return 0
 
     base = resolve_base(root, arguments.base)
-    errors = [base.error] if base.error else []
+    errors = list_errors + ([base.error] if base.error else [])
     adopting = base.rev is not None and not adopted_at(root, base.rev)
     for chart, verdict in zip(charts, verdicts):
         errors += verdict.errors
@@ -944,6 +1030,7 @@ def main(argv=None) -> int:
         print(f"{HOOK}: {error}")
     gated = sum(len(v.gated) for v in verdicts)
     by_arm = {arm: sum(1 for v in verdicts for a in v.gated.values() if arm in a) for arm in "abc"}
+    exempt = sum(len(v.exempt) for v in verdicts)
     growth = (
         f"this change adopts the gate (the base's .pre-commit-config.yaml does not reference {HOOK}), so the baseline may be written whole"
         if adopting
@@ -951,7 +1038,8 @@ def main(argv=None) -> int:
     )
     print(
         f"{HOOK}: {len(charts)} chart(s), {gated} gated keys "
-        f"({by_arm['a']} template-required, {by_arm['b']} schema-required, {by_arm['c']} under tls), "
+        f"({by_arm['a']} template-required, {by_arm['b']} schema-required, {by_arm['c']} under tls; "
+        f"{exempt} template-required key{'s' if exempt != 1 else ''} exempt as DEFAULT-OK), "
         f"{sum(len(v.violations) for v in verdicts)} with a default, "
         f"{sum(v.baselined for v in verdicts)} baselined; {growth}. "
         f"{'RED' if errors else 'green'}."
