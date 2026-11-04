@@ -373,18 +373,39 @@ NO_LEADING_ZERO = (
 def end_of_quoted_scalar(text: str, start: int) -> int:
     """The index of the quote closing the string opened at `start`, or -1.
 
-    THE CANONICAL FORM IN THIS FILE, and the only one (ADR-0679: a predicate over a
+    THE CANONICAL FORM IN THIS FILE for a Go template string and a double-quoted
+    value, where a backslash escapes the quote (ADR-0679: a predicate over a
     shared syntax is copied from its hardened site and cited, never re-derived).
     It was the loop inside `strip_inline_comment`, which is now one of its two
     callers; the other is `unwrap_action`, which must skip the message argument of
     `required "…" .Values.x` without being fooled by a `.` or a `}}` inside it.
-    A second expression for this job is a finding on its own.
+    A second expression for this job is a finding on its own. A YAML SINGLE-quoted
+    value is a DIFFERENT syntax, not a second expression of this one: there `''` is
+    the escape and a backslash is literal, and `end_of_single_quoted_scalar` reads
+    it (yaadgaar 634).
     """
     quote = text[start]
     end = text.find(quote, start + 1)
     while end != -1 and text[end - 1] == "\\":
         end = text.find(quote, end + 1)
     return end
+
+
+def end_of_single_quoted_scalar(text: str) -> int:
+    """The index of the quote closing the single-quoted scalar at `text[0]`, or -1.
+
+    YAML's rules, not Go's (yaadgaar 634): inside single quotes `''` is an escaped
+    quote and a backslash is literal. `end_of_quoted_scalar` reads the Go rule, which
+    is right for a template string and wrong here: it stopped at the first `'` of
+    `'it''s`, so a value that continues onto the next line was never seen as open,
+    and it took the `\\'` of `'a\\'` for an escape, where Helm reads `a\\`.
+    """
+    index = 1
+    while True:
+        end = text.find("'", index)
+        if end == -1 or text[end + 1 : end + 2] != "'":
+            return end
+        index = end + 2
 
 
 def unicode_space(char: str) -> bool:
@@ -548,12 +569,28 @@ def scan_values(text: str) -> Values:
         key = match.group("key")
         value = strip_inline_comment(rest)
         path = dotted(stack + [(indent, key)])
+        if value[:1] == "'":
+            # The true end by YAML's rules, then the tail rule `strip_inline_comment`
+            # applies: blank, or a comment, or the file is refused.
+            quoted = rest.strip(YAML_BLANKS)
+            end = end_of_single_quoted_scalar(quoted)
+            if end == -1:
+                # Helm reads `cfg: 'it''s` + `toggle: 1'` as ONE string, "it's
+                # toggle: 1", and no `toggle` key (measured, yaadgaar 634).
+                return Values(
+                    {}, False, f"a quoted scalar that continues onto the next line: {line!r}"
+                )
+            tail = quoted[end + 1 :].lstrip(YAML_BLANKS)
+            if tail != "" and not tail.startswith("#"):
+                # `'a'x` and `'it''s'x`: Helm refuses the whole file.
+                return Values({}, False, f"text after a closing quote: {line!r}")
+            value = quoted[: end + 1]
 
         if value == "":
             stack.append((indent, key))
             opened.add(path)
             continue
-        if value[0] in "\"'":
+        if value[0] == '"':
             end = end_of_quoted_scalar(value, 0)
             if end == -1:
                 # Helm reads `cfg: "a` + `toggle: 1"` as ONE string, "a toggle: 1",
@@ -562,13 +599,13 @@ def scan_values(text: str) -> Values:
                 return Values(
                     {}, False, f"a quoted scalar that continues onto the next line: {line!r}"
                 )
-            if end != len(value) - 1 and not (value[0] == "'" and value[end + 1] == "'"):
+            if end != len(value) - 1:
                 # `"0"x`, `""x` and `"0"<NBSP>`: Helm refuses the whole file.
                 return Values({}, False, f"text after a closing quote: {line!r}")
         if (
             unicode_space(value[0])
             or unicode_space(value[-1])
-            or (value[0] in "\"'" and end_of_quoted_scalar(value, 0) != len(value) - 1)
+            or (value[0] == "'" and "''" in value[1:-1])
         ):
             # A Unicode space at an edge: Helm reads the string "0\u00a0", which is on.
             # Refused rather than read as on, because reading it as on would accept an
