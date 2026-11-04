@@ -31,6 +31,20 @@
   changes: the Rust version scripts, `classes.json` and the `rust-bump`
   workflow stay as they are. Edit the test that pins the job's mode
   (`scripts/tests/test_ci_pr_rust_parity_job.py`) to match.
+
+  TESTS THE HAND REVERT EDITS. Removing `rust_parity` from `passed.needs`
+  breaks every test that lists it among the jobs under `passed`, so edit each
+  of these as well and drop `rust_parity` from the list or the loop in it:
+    - `scripts/tests/test_ci_pr_rust_parity_job.py` (pins the mode, the
+      missing `continue-on-error` and the `passed.needs` entry);
+    - `scripts/tests/test_ci_verdict.py` (the `GATED` and `SHORT_CIRCUITED`
+      lists, and the `rust_parity` results set on the `needs` fixtures);
+    - `scripts/tests/test_config_only.py` (`SKIPPED_BY_CONFIG_ONLY` and the
+      skipped-job loop);
+    - `scripts/tests/test_hook_tools_adopted.py` (the skipped-job loop in the
+      merge-gate test).
+  Run `grep -rn rust_parity scripts/tests` before you open the pull request,
+  because a later test can pin it too.
 -->
 
 ## What
@@ -72,7 +86,7 @@ in the `rust_parity` job and a green `ci / passed`.
 ## Risk
 
 Low. The edit is confined to the `rust_parity` job of `ci-pr.yaml` and the
-test that pins its mode. No Rust version field changes, and the grace window
+tests that pin its mode or list it under `passed`. No Rust version field changes, and the grace window
 still works. D80: this renders no resource and names no cloud or ingress.
 The only effect is that the org stops enforcing Rust version parity at PR
 time, until the check is armed again.
