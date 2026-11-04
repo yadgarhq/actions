@@ -337,6 +337,15 @@ REQUIRED_CALL = re.compile(r"^required\s+(?=[\"'])")
 INT64_PIPE = re.compile(r"\|\s*int64\s*$")
 WHOLE_NUMBER = re.compile(r"-?(?:0|[1-9][0-9]*)")
 EXACT_INTEGER = 2**53
+# Every "not an integer" finding carries this, because `035` is refused there and
+# reads as an integer to anyone who has not met YAML 1.1 octal (yaadgaar 602).
+# The plain `{{ . }}` prints a values-file float64 of this size and up in exponent
+# form (`1e+06`), so `resolve` refuses an unquoted number there (yaadgaar 602).
+EXPONENT_FROM = 10**6
+NO_LEADING_ZERO = (
+    "A number is read as decimal only with no leading zero: Helm reads `035` as "
+    "YAML 1.1 octal and renders 29."
+)
 
 
 # ---------------------------------------------------------------- values.yaml
@@ -533,14 +542,38 @@ def ancestors(path: str):
     return [".".join(parts[:index]) for index in range(1, len(parts))]
 
 
-def as_integer(raw):
-    """`raw` as an int, or None. YAML's other integer spellings are not modelled."""
+def digits(raw):
+    """`raw` as an int if it is a run of digits, leading zeros read as decimal.
+
+    For a guard's truth only, which is zero-or-not: `00` is zero in YAML 1.1 octal
+    and in decimal alike, so the base cannot change a guard. A NUMBER is read with
+    `as_integer`, never with this.
+    """
     if raw is None:
         return None
     text = raw.strip().strip("'\"")
     if re.fullmatch(r"[+-]?[0-9]+", text) is None:
         return None
     return int(text)
+
+
+def as_integer(raw):
+    """`raw` as an int, or None. YAML's other integer spellings are not modelled.
+
+    A LEADING ZERO IS REFUSED (yaadgaar 602), the rule `WHOLE_NUMBER` gives the
+    cast. YAML 1.1 reads an unquoted `035` as octal: Helm renders a values-file
+    `035` through `{{ . }}` as 29, and reads the TEXT `035` (a quoted "035", or a
+    literal in the template) back as 29. Measured 2026-11-04, helm v4.3.0 and
+    v3.18.4 identical. Read as decimal, `terminationGracePeriodSeconds: 035` passed
+    the 35s floor and rendered 29. `08`, `09` and `00` render the number they look
+    like and are refused all the same: fail-closed, one rule.
+    """
+    number = digits(raw)
+    if number is None:
+        return None
+    if re.fullmatch(r"[+-]?(?:0|[1-9][0-9]*)", raw.strip().strip("'\"")) is None:
+        return None
+    return number
 
 
 def as_boolean(raw):
@@ -562,7 +595,7 @@ def is_truthy(raw) -> bool:
     decided = as_boolean(raw)
     if decided is not None:
         return decided
-    number = as_integer(raw)
+    number = digits(raw)
     if number is not None:
         return number != 0
     return raw.strip() not in ("", "''", '""')
@@ -889,6 +922,20 @@ def resolve(occurrence: KeyOccurrence, values: Values):
         return "unresolvable", f"values.yaml sets no plain scalar at `{path}`"
     if cast:
         return cast_int64(raw)
+    text = raw.strip()
+    if re.fullmatch(r"[+-]?[0-9]+", text) and abs(int(text)) >= EXPONENT_FROM:
+        # An UNQUOTED values number is float64 in the template, and the plain
+        # `{{ . }}` prints it in exponent form from a million up (yaadgaar 602):
+        # 1000000 -> `1e+06`, 1234567 -> `1.234567e+06`, measured on helm v4.3.0
+        # and v3.18.4. A quoted string and a literal in the template print as
+        # written, and never reach this line with a number.
+        return (
+            "unresolvable",
+            f"`{raw}` is a values-file number of a million or more, and Helm "
+            f"renders it through `{{{{ . }}}}` in exponent form (1000000 as "
+            f"`1e+06`), not as the integer the chart wrote. Write `| int64`, "
+            f"which renders it whole",
+        )
     return "ok", raw
 
 
@@ -1218,7 +1265,7 @@ def prestop_sleep(template: Template, values: Values):
                 "no",
                 f"the `preStop` sleep at line {occurrence.lineno} resolves to "
                 f"`{text}`, which is not an integer number of seconds, so the "
-                f"grace-period floor cannot be computed",
+                f"grace-period floor cannot be computed. {NO_LEADING_ZERO}",
             )
         longest = max(longest, seconds)
     return "ok", longest
@@ -1262,7 +1309,8 @@ def judge_grace(judge: Judge, template: Template, values: Values, where: str) ->
         if not judge.assert_that(
             grace is not None,
             f"{where}:{occurrence.lineno} — `{field}` resolves "
-            f"to `{text}`, which is not an integer number of seconds.",
+            f"to `{text}`, which is not an integer number of seconds. "
+            f"{NO_LEADING_ZERO}",
         ):
             continue
         judge.assert_that(
@@ -1364,7 +1412,7 @@ def judge_topology_spread(
             judge.assert_that(
                 number is not None and number >= 1,
                 f"{where}:{skew.lineno} — `maxSkew` resolves to `{text}`, which is "
-                f"not a positive integer.",
+                f"not a positive integer. {NO_LEADING_ZERO}",
             )
 
     for key in renders(
