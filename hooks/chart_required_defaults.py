@@ -83,12 +83,19 @@ counts only as the function a command calls, so `(list "off" "required")` and
 where `$v` is assigned exactly once in the file, to a plain values path. Any
 other operand is UNRESOLVED_REQUIRED, naming the file, the line and the form: a
 key the gate cannot name is a key it cannot judge, so it is red, not skipped. Also
-UNRESOLVED_REQUIRED: a `tpl` whose template is a literal calling `required`, a
-values string calling `required` or one the scan cannot read, or anything else
-(`printf`, a variable, a pipeline); and an `include`, `template` or `block` that
-hands a helper reaching `required` (directly, through another helper, or through
-any helper named dynamically) a context other than its caller's, since the
-helper's `.Values.x` then names a different key. The caller's context is `$`, or a
+UNRESOLVED_REQUIRED: a `tpl` whose template string, a literal or a values string,
+is not plain (yaadgaar 575: the string is parsed as a template, and any
+`required`, `include`, `template`, `block`, nested `tpl` or unparsable action in
+it is refused; a values string the scan cannot read is refused too); a `tpl` of
+anything else (`printf`, a computed pipeline such as `toYaml`, or a variable this
+gate cannot bind to a values path; a variable bound once to a values path is
+resolved and judged); and an `include`, `template` or `block` that hands a helper
+reaching `required` or a `tpl` (directly, through another helper, or through any
+helper named dynamically) a context other than its caller's, since the helper's
+`.Values.x` then names a different key. When NO helper in the chart reaches
+`required` or a `tpl`, a helper reached only through a dynamic name is still
+refused under another context, as UNRESOLVED_INCLUDE: the gate cannot follow the
+name (a subchart's helper, say), and says so rather than claim a `required`. The caller's context is `$`, or a
 `.` that no `with`, `range`, `else with` or `else range` has rebound. At top level
 that is the chart root. Inside a define it is the define's own argument, NEVER the
 root: such a site is not refused itself, it makes the define reaching, and the
@@ -233,6 +240,7 @@ class Word:
 @dataclass
 class Text:
     text: str
+    quote: str = '"'
 
 
 @dataclass
@@ -253,7 +261,7 @@ def tokens(expression: str) -> list:
                 end += 2 if expression[end] == "\\" and character != "`" else 1
             if end >= len(expression):
                 raise Refusal("an unclosed string literal")
-            found.append(("text", expression[index + 1 : end]))
+            found.append(("text", expression[index + 1 : end], character))
             index = end + 1
         elif character in "()|":
             found.append((character, character))
@@ -279,7 +287,7 @@ def parse(expression: str) -> list:
 def parse_pipeline(stream: list, position: int):
     pipeline, command = [], []
     while position < len(stream):
-        kind, value = stream[position]
+        kind, value = stream[position][:2]
         if kind == ")":
             break
         if kind == "|":
@@ -293,7 +301,7 @@ def parse_pipeline(stream: list, position: int):
             command.append(Group(inner))
             position += 1
         elif kind == "text":
-            command.append(Text(value))
+            command.append(Text(value, stream[position][2]))
             position += 1
         else:
             command.append(Word(value))
@@ -411,6 +419,9 @@ class Facts:
     # define's own argument (`.` not rebound, or `$`), judged at the define's callers.
     sites: list = field(default_factory=list)
     tpl_paths: list = field(default_factory=list)  # (at, dotted values path a `tpl` renders)
+    # Every define that holds a `tpl` site (yaadgaar 575): its `.Values.x` and the
+    # `tpl` context are the define's argument, so the define reaches like `required`.
+    tpl_defines: set = field(default_factory=set)
     # Dotted paths from an `index`/`get` literal that is not a plain name (`"a.b"`,
     # `"*"`): the joined path does not spell the key helm reads, so the REQUIRED
     # list cannot exempt it (ADR-1143 decision 7).
@@ -470,6 +481,8 @@ def template_facts(source: str, where: str) -> Facts:
                 facts.refused.append((f"{at}: {event[1]} in `{' '.join(body.split())}`", define))
             elif event[0] == "tpl":
                 facts.tpl_paths.append((at, event[1]))
+            if event[0] in ("tpl", "tpl-site"):
+                facts.tpl_defines.add(define)
             elif event[0] == "site":
                 _, name, context = event
                 root = isinstance(context, Word) and (context.text == "$" or (context.text == "." and dot_root))
@@ -516,35 +529,81 @@ def helper_refusals(every: list) -> list:
     hands on the define's own context (`.` or `$`) is therefore not refused itself:
     it rides on the caller's context.
     """
-    reaching = {define for facts in every for defines in facts.found.values() for define in defines}
-    reaching |= {define for facts in every for _, define in facts.refused}
-    reaching.discard(None)
-    while True:
-        grown = {site[4] for facts in every for site in facts.sites if site[1] in reaching or site[1] is None}
-        grown.discard(None)
-        if grown <= reaching:
-            break
-        reaching |= grown
+    seeds = {define for facts in every for defines in facts.found.values() for define in defines}
+    seeds |= {define for facts in every for _, define in facts.refused}
+    seeds |= {define for facts in every for define in facts.tpl_defines}
+    seeds.discard(None)
+
+    def closure(start: set, dynamic: bool) -> set:
+        reached = set(start)
+        while True:
+            grown = {site[4] for facts in every for site in facts.sites if site[1] in reached or (dynamic and site[1] is None)}
+            grown.discard(None)
+            if grown <= reached:
+                return reached
+            reached |= grown
+
+    # `named`: reaches `required` or a `tpl` through helpers named by a literal.
+    # `reaching`: also through any helper named dynamically, which could be any.
+    named, reaching = closure(seeds, False), closure(seeds, True)
     refused = []
     if not reaching:
         return refused
     for facts in every:
         for at, name, root, context, _ in facts.sites:
-            if name is None and not root:
+            if root or (name is not None and name not in reaching):
+                continue
+            if not seeds:
+                # Nothing in this chart reaches `required` or a `tpl`; the gate still
+                # cannot follow a dynamic name (a subchart's helper, say). Refused,
+                # under its own name, without claiming a `required` (yaadgaar 575).
+                what = "an `include` or `template` whose name is not a string literal" if name is None else f'`"{name}"`, which includes a helper by a name that is not a string literal,'
+                refused.append(f"UNRESOLVED_INCLUDE: {at}: {what} is called with {context}, not the root context. No template this gate scanned calls `required` or `tpl` in a helper, but it cannot follow a dynamic name, so it cannot tell which key that helper reads")
+            elif name is None:
                 # Any helper is safe under the root context, so only a dynamic name
                 # with another context is refused: it might be one that reaches `required`.
-                refused.append(f"{at}: an `include` or `template` whose name is not a string literal is called with {context}, not the root context, in a chart where a helper reaches `required`")
-            elif name in reaching and not root:
-                refused.append(f'{at}: `"{name}"` is called with {context}, not the root context, and it reaches `required`, so the key it names cannot be resolved')
+                refused.append(f"UNRESOLVED_REQUIRED: {at}: an `include` or `template` whose name is not a string literal is called with {context}, not the root context, in a chart where a helper reaches `required` or `tpl`")
+            elif name in named:
+                refused.append(f'UNRESOLVED_REQUIRED: {at}: `"{name}"` is called with {context}, not the root context, and it reaches `required` or `tpl`, so the key it names cannot be resolved')
+            else:
+                refused.append(f'UNRESOLVED_REQUIRED: {at}: `"{name}"` is called with {context}, not the root context, and it includes a helper by a name that is not a string literal, in a chart where a helper reaches `required` or `tpl`, so the key it names cannot be resolved')
     return refused
+
+
+def unescape(literal: Text) -> str:
+    """The string a Go template literal denotes. Raises Refusal on an escape it cannot read."""
+    if literal.quote == "`" or "\\" not in literal.text:
+        return literal.text
+    try:
+        return json.loads('"' + literal.text + '"')
+    except ValueError:
+        raise Refusal(f'the string "{literal.text}" carries an escape this gate cannot read') from None
+
+
+def template_text_problem(text: str, where: str):
+    """Why a template string a `tpl` renders cannot be accepted, or None (yaadgaar 575).
+
+    The string is PARSED as a template, not grepped: any `required`, `include`,
+    `template`, `block`, nested `tpl` or action the parser refuses is a problem. A
+    plain `{{ .Values.x }}` is not. The substring `required` anywhere stays a problem.
+    """
+    if "required" in text:
+        return "calls `required`"
+    facts = template_facts(text, where)
+    if facts.refused:
+        return "holds an action this gate cannot parse"
+    if facts.found or facts.sites or facts.tpl_defines:
+        return "calls `include`, `template`, `block` or `tpl`"
+    return None
 
 
 def tpl_event(pipeline: list, index: int, arguments: list, resolver: Resolver):
     """A `tpl` renders a template string: read it, or refuse it. Never skipped.
 
     The string is the first argument, or the piped value (`"..." | tpl .`). A
-    literal is read here; a values path is judged against `values.yaml` by the
-    caller; anything else (`printf`, a variable, a pipeline) cannot be read.
+    literal is parsed here as a template; a values path is judged against
+    `values.yaml` by the caller; anything else (`printf`, a computed pipeline, a
+    variable that is not bound once to a values path) cannot be read.
     """
     if len(arguments) == 2:
         template = arguments[0]
@@ -553,9 +612,21 @@ def tpl_event(pipeline: list, index: int, arguments: list, resolver: Resolver):
     else:
         return "refused", f"`tpl` with {len(arguments)} argument{'s' if len(arguments) != 1 else ''}, whose template this gate cannot read"
     if isinstance(template, Text):
-        if "required" in template.text:
-            return "refused", "`tpl` of a string literal that calls `required`, which this gate does not render"
-        return "ok", None
+        try:
+            problem = template_text_problem(unescape(template), "a `tpl` literal")
+        except Refusal as error:
+            return "refused", f"`tpl` of a string literal this gate cannot read ({error})"
+        if problem:
+            return "refused", f"`tpl` of a string literal that {problem}, which this gate does not render"
+        return "tpl-site", None
+    if isinstance(template, Group) and not (
+        len(template.pipeline) == 1
+        and template.pipeline[0]
+        and (len(template.pipeline[0]) == 1 or (isinstance(template.pipeline[0][0], Word) and template.pipeline[0][0].text in ("index", "get")))
+    ):
+        head = template.pipeline[0][0] if template.pipeline and template.pipeline[0] else None
+        name = head.text if isinstance(head, Word) else "a group"
+        return "refused", f"`tpl` of a computed template (`({name} ...)`), which this gate cannot read: it reads a string literal or a values path"
     try:
         path = resolver.term(template, 0)
     except Refusal as error:
@@ -712,7 +783,26 @@ def tpl_refusals(values: Values, tpl_paths: list) -> list:
             refused.append(f"{at}: `tpl` renders `{path}`, which values.yaml gives as a value the scan does not read")
         elif isinstance(raw, str) and "required" in raw:
             refused.append(f"{at}: `tpl` renders `{path}`, whose values.yaml string calls `required`")
+        elif isinstance(raw, str):
+            try:
+                problem = template_text_problem(yaml_string(raw), f"the values string `{path}`")
+            except Refusal as error:
+                problem = str(error)
+            if problem:
+                refused.append(f"{at}: `tpl` renders `{path}`, whose values.yaml string {problem}")
     return refused
+
+
+def yaml_string(raw: str) -> str:
+    """The string a scanned YAML scalar denotes. Raises Refusal on a double-quoted escape JSON does not share."""
+    if len(raw) >= 2 and raw[0] == raw[-1] == "'":
+        return raw[1:-1].replace("''", "'")
+    if len(raw) >= 2 and raw[0] == raw[-1] == '"':
+        try:
+            return json.loads(raw)
+        except ValueError:
+            raise Refusal("is a double-quoted string with an escape this gate cannot read") from None
+    return raw
 
 
 def tls_gated(values: Values) -> tuple:
@@ -911,7 +1001,7 @@ def judge(chart: Path, root: Path, knobs: dict) -> Verdict:
             else:
                 gated.setdefault(key, set()).add("a")
         verdict.errors += [f"UNRESOLVED_REQUIRED: {message}" for message, _ in facts.refused]
-    verdict.errors += [f"UNRESOLVED_REQUIRED: {problem}" for problem in helper_refusals(every)]
+    verdict.errors += helper_refusals(every)
     tpl_paths = [entry for facts in every for entry in facts.tpl_paths]
 
     schema_file = chart / "values.schema.json"
