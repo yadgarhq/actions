@@ -56,6 +56,14 @@
 # is current. `previous` is allowed on this tool only. No comment here names
 # the version: the bot changes the line and nothing else.
 #
+# `trivy`'s `sha256` comes from `trivy_<v>_checksums.txt`. Before taking it, verify
+# that file's sigstore signature, on every pin bump (yaadgaar 569):
+#   cosign verify-blob --bundle trivy_<v>_checksums.txt.sigstore.json \
+#     --certificate-identity-regexp '^https://github.com/aquasecurity/trivy/' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+#     trivy_<v>_checksums.txt
+# It must print "Verified OK" (it did for v0.74.0).
+#
 # `python` is a minor, which `actions/setup-python` resolves to its newest patch.
 #
 # `prettier-ignore` keeps prettier from folding a long line into block style,

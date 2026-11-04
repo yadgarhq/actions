@@ -316,7 +316,7 @@ jobs:
           SHA256="$TRIVY_SHA256"
           [[ "$SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::trivy sha256 from versions.yaml is not 64 lowercase hex: '${SHA256}'"; exit 1; }
           file="$RUNNER_TEMP/trivy.tar.gz"
-          curl -sSfL -o "$file" "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -sSfL --retry 3 --retry-all-errors -o "$file" "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
           echo "${SHA256}  ${file}" | sha256sum -c -
           sudo tar -xzf "$file" -C /usr/local/bin trivy
 

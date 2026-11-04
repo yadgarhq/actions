@@ -1208,3 +1208,17 @@ def test_the_hook_pass_prints_its_own_count(tmp_path, monkeypatch, capsys):
     )
     trivy_gate.run_trivy(chart_dir)
     assert "estate-values.yaml, helm.sh/hook objects: 1 file(s)" in capsys.readouterr().out
+
+
+def test_require_trivy_version_points_at_the_install_step_not_the_action_input():
+    """yaadgaar 569: since yaadgaar 565 the action's `version:` input does nothing.
+
+    The refusal must send the reader to `versions.yaml` and the `install trivy`
+    step, which are what decide the binary on PATH now.
+    """
+    with pytest.raises(trivy_gate.Refused) as exc:
+        trivy_gate.require_trivy_version("0.75.0")
+    message = str(exc.value)
+    assert "versions.yaml" in message
+    assert "install trivy" in message
+    assert "pin `version:`" not in message
