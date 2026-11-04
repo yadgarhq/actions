@@ -735,6 +735,126 @@ def test_tpl_of_a_values_string_is_judged_against_values_yaml(tmp_path, values, 
         assert "UNRESOLVED_REQUIRED" in result.stdout and "`t`" in result.stdout
 
 
+# ------------------ yaadgaar 575: tpl inside a define, tpl templates, honest names
+
+
+TPL_DEFINE = '{{- define "d" -}}{{ tpl .Values.s . }}{{- end -}}\n'
+
+
+def test_a_tpl_inside_a_define_makes_the_define_reaching(tmp_path):
+    # Called with `.Values.sub`, the define's `.Values.s` is `sub.Values.s`, not the
+    # key the gate would judge.
+    chart(tmp_path, "s: hello\n", templates={"_h.tpl": TPL_DEFINE, "t.yaml": '{{ include "d" .Values.sub }}\n'})
+    result = run(tmp_path)
+    assert result.returncode == 1 and "UNRESOLVED_REQUIRED" in result.stdout and '"d"' in result.stdout, result.stdout
+    assert "`tpl`" in result.stdout
+
+
+def test_a_tpl_inside_a_define_called_from_the_root_is_judged(tmp_path):
+    chart(tmp_path, "s: hello\n", templates={"_h.tpl": TPL_DEFINE, "t.yaml": '{{ include "d" . }}\n'})
+    result = run(tmp_path)
+    assert result.returncode == 0, result.stdout
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        '{{ tpl "{{ include \\"x\\" .Values.sub }}" . }}',
+        '{{ tpl "{{ template \\"x\\" . }}" . }}',
+        "{{ tpl `{{ include \"x\" .Values.sub }}` . }}",
+        '{{ tpl "{{ tpl .Values.a . }}" . }}',
+        '{{ tpl "{{ .x " . }}',
+        '{{ tpl "{{ define \\"y\\" }}{{ required \\"m\\" .Values.a }}{{ end }}" . }}',
+        '{{ tpl "a \\q b {{ .x }}" . }}',
+    ],
+)
+def test_a_tpl_literal_is_parsed_as_a_template(source):
+    found, refused = paths(source)
+    assert found == [] and len(refused) == 1, refused
+    assert "tpl" in refused[0].split(" in `")[0]
+
+
+@pytest.mark.parametrize(
+    "source",
+    ['{{ tpl "hello {{ .Values.x }}" . }}', "{{ tpl `plain {{ .Values.x | quote }}` . }}", '{{ tpl "no actions" . }}'],
+)
+def test_a_tpl_literal_with_no_call_is_accepted(source):
+    assert paths(source) == ([], [])
+
+
+@pytest.mark.parametrize(
+    "values, red",
+    [
+        ('t: "{{ include \\"x\\" .Values.sub }}"\n', True),
+        ("t: '{{ include \"x\" . }}'\n", True),
+        ('t: "{{ template \\"x\\" . }}"\n', True),
+        ('t: "{{ .x "\n', True),
+        ("t: hello {{ .Values.x }}\n", False),
+        ('t: "hello {{ .Values.x }}"\n', False),
+    ],
+)
+def test_a_tpl_values_string_is_parsed_as_a_template(tmp_path, values, red):
+    chart(tmp_path, values, templates={"t.yaml": "{{ tpl .Values.t . }}\n"})
+    result = run(tmp_path)
+    assert (result.returncode == 1) is red, result.stdout
+    if red:
+        assert "UNRESOLVED_REQUIRED" in result.stdout and "`t`" in result.stdout
+
+
+DYNAMIC_ONLY = '{{- define "d" -}}{{ include (printf "%s" "n") . }}{{- end -}}{{- define "n" -}}{{ .x }}{{- end -}}\n'
+
+
+def test_a_dynamic_include_with_no_required_in_the_chart_has_its_own_name(tmp_path):
+    chart(tmp_path, "b: 1\n", templates={"_h.tpl": DYNAMIC_ONLY, "t.yaml": '{{ include "d" (dict "x" 1) }}\n'})
+    result = run(tmp_path)
+    assert result.returncode == 1, result.stdout
+    assert "UNRESOLVED_INCLUDE" in result.stdout and '"d"' in result.stdout, result.stdout
+    assert "UNRESOLVED_REQUIRED" not in result.stdout and "reaches `required`" not in result.stdout, result.stdout
+
+
+def test_a_dynamic_include_with_no_required_is_green_from_the_root(tmp_path):
+    chart(tmp_path, "b: 1\n", templates={"_h.tpl": DYNAMIC_ONLY, "t.yaml": '{{ include "d" . }}\n'})
+    assert run(tmp_path).returncode == 0
+
+
+def test_a_tpl_of_a_computed_template_says_so():
+    found, refused = paths("{{ tpl (toYaml .Values.x) . }}")
+    assert found == [] and len(refused) == 1 and "computed" in refused[0].split(" in `")[0], refused
+
+
+def test_the_raw_literal_is_still_checked_for_required_before_unescaping():
+    # `\required` decodes to CR + "equired"; the shipped gate refused the raw text,
+    # and this one still does (non-weakening, yaadgaar 575).
+    found, refused = paths('{{ tpl "\\required" . }}')
+    assert found == [] and len(refused) == 1 and "required" in refused[0].split(" in `")[0], refused
+
+
+def test_the_raw_values_string_is_still_checked_for_required_before_unescaping(tmp_path):
+    # YAML reads `\r` as CR, so the decoded string holds no `required`; the raw
+    # text does, and the shipped gate refused it. The raw check is load-bearing.
+    chart(tmp_path, 's: "\\required"\n', templates={"t.yaml": "{{ tpl .Values.s . }}\n"})
+    result = run(tmp_path)
+    assert result.returncode == 1 and "UNRESOLVED_REQUIRED" in result.stdout and "`s`" in result.stdout, result.stdout
+
+
+def test_a_unicode_escape_in_a_tpl_literal_is_decoded_before_it_is_parsed():
+    # Go reads `{` as `{`, so this literal renders an `include`.
+    found, refused = paths('{{ tpl "\\u007b\\u007b include \\"x\\" .Values.sub }}" . }}')
+    assert found == [] and len(refused) == 1, refused
+
+
+def test_a_unicode_escape_in_a_tpl_values_string_is_decoded_before_it_is_parsed(tmp_path):
+    chart(tmp_path, 't: "\\u007b\\u007b include \\"x\\" .Values.sub }}"\n', templates={"t.yaml": "{{ tpl .Values.t . }}\n"})
+    result = run(tmp_path)
+    assert result.returncode == 1 and "`t`" in result.stdout, result.stdout
+
+
+def test_a_helper_that_reaches_nothing_takes_any_context_beside_one_that_does(tmp_path):
+    helper = '{{- define "n" -}}{{ .x }}{{- end -}}\n'
+    chart(tmp_path, "b: 1\n", templates={"_h.tpl": X_HELPER + helper, "t.yaml": '{{ include "n" (dict "x" 1) }}\n'})
+    assert run(tmp_path).returncode == 0, run(tmp_path).stdout
+
+
 # ------------------------- ADR-1143 (yaadgaar 571): arm (a) reads the REQUIRED list
 #
 # Arm (a) refuses a default only when the key is on the ADR-0705 REQUIRED list in
