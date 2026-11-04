@@ -937,6 +937,9 @@ GRACE_GUARD_CAUSES = [
     ("", "sets no `terminationGracePeriodSeconds` at all"),
     ("terminationGracePeriodSeconds: 0", "a value Go reads as false"),
     ("terminationGracePeriodSeconds: false", "a value Go reads as false"),
+    # YAML 1.1 zero spellings (yaadgaar 611): Helm reads each as float64 0.
+    ("terminationGracePeriodSeconds: 0_0", "a value Go reads as false"),
+    ("terminationGracePeriodSeconds: 0x0", "a value Go reads as false"),
 ]
 
 
@@ -2178,3 +2181,137 @@ def test_the_spellings_that_render_a_million_whole_still_pass(tmp_path):
         write_chart(root, **replace)
         result = run(root)
         assert result.returncode == 0, (name, result.stdout)
+
+
+# ------------------------------------------- a guard's truth (yaadgaar 611)
+#
+# A GUARD IS TRUE OR FALSE IN HELM'S READING, NOT IN THE TEXT'S. MEASURED 2026-11-04
+# on helm v4.3.0 and v3.18.4, identical on every row: a values file `x: <value>`
+# rendered through `{{ if .Values.x }}yes{{ else }}no{{ end }}` and through
+# `{{ with .Values.x }}yes{{ else }}no{{ end }}`, which agreed on every row too.
+# Four rows are left out because Helm refuses the values file outright
+# (`.inf`, `-.inf`, `.nan`, and a bare `-`).
+#
+# Two defects hid here. A QUOTED `"0"`, `'0'` or `"00"` is a non-empty string, and
+# Helm renders the if branch; the gate stripped the quotes, read the digits and
+# judged the else branch — a FAIL-OPEN. And the YAML 1.1 zero spellings `0_0`,
+# `0b0`, `0x0` (and `0o0`, `0.0`, `0e0`, `1e-400` ...) are float64 0 to Helm,
+# which the gate read as truthy strings. The table also caught a third: the gate
+# lower-cased a word before matching it, so `oFF`, `fAlse`, `nO` and `nUll` read
+# as false, while YAML 1.1 matches its words in three exact spellings only and
+# Helm renders all four as truthy strings. `n` and `N` are YAML 1.1 false, and the
+# gate read them as truthy strings.
+
+HELM_TRUTH = [
+    ('"0"', True), ("'0'", True), ('"00"', True), ('""', False), ("''", False),
+    ("0", False), ("00", False), ("0_0", False), ("0b0", False), ("0x0", False),
+    ("0o0", False), ("0.0", False), ("-0", False), ("false", False), ('"false"', True),
+    ("null", False), ("~", False), ("+0", False), ("-0.0", False), (".0", False),
+    ("0.", False), ("0e0", False), ("0.0e0", False), ("-0_0", False), ("0x00", False),
+    ("0b00", False), ("000", False), ("08", True), ("0_", False), ("0:0", True),
+    ("0:00", True), ('"0.0"', True), ('" "', True), ("Off", False), ("OFF", False),
+    ("oFF", True), ("No", False), ("NO", False), ("n", False), ("N", False),
+    ("y", True), ("False", False), ("FALSE", False), ("fAlse", True), ("Null", False),
+    ("NULL", False), ("nUll", True), ("True", True), ("on", True), ("0.e0", False),
+    ("0e", True), ('"-0"', True), ("1", True), ("0x", True), ("0b", True),
+    ("-0x0", False), ("+0x0", False), ("-0b0", False), ("00_0", False), (".0e0", False),
+    ("-.0", False), ("0_0.0", False), ("0.0_0", False), ("Y", True), ("YES", True),
+    ("Yes", True), ("yES", True), ("On", True), ("ON", True), ("oN", True),
+    ("tRUE", True), ("nO", True), ("NUll", True), ("0X0", False), ("0B0", False),
+    ("0O0", False), ("0_x0", False), ("0x_0", False), ("0_b0", False), ("1_000", True),
+    ("+", True), (".", True), ("0x0g", True), ("0b2", True), ("0o8", True),
+    ("09", True), ("0.0.0", True), ("1e-400", False), ("0e-400", False),
+    ("0e99999", False), ("-0e0", False), ("+.0", False), ("+0.0e+0", False),
+    ("0E0", False), (".e0", True), ("0__0", False), ("_0", True), ("-_0", False),
+    ("0x0_", False), ("00x0", True), ("0.0e", True), ('" 0"', True), ('"0 "', True),
+    ("'00'", True), ('"\\x30"', True), ("'false'", True), ('"null"', True),
+    ('"~"', True), ("false # c", False), ("0 # c", False), ('"0" # c', True),
+    ("0o", True), ("0x0.0", True), ("0x0p0", True), (".0_0", False), ("._0", True),
+    (".0e0_0", False), (".0_1", True), ("-.0_0", False), (".00", False),
+    (".0E0", False), (".0e", True), (".0.", True),
+    ("-1", True), ("-0.5", True), ("-0x1", True), ("0x1", True), ("0.5", True),
+    ("1e-5", True), ("-1e-400", False), ("0b1", True), ("0o1", True), (".5", True),
+    ("-.5", True), ("01", True), ("no", False), ("off", False),
+]
+
+
+def gate_module():
+    sys.path.insert(0, str(GATE.parent))
+    try:
+        import chart_baseline
+    finally:
+        sys.path.pop(0)
+    return chart_baseline
+
+
+def test_a_guard_reads_every_measured_value_the_way_helm_does():
+    """The unit view: every row of the measured table, through the values scan."""
+    gate = gate_module()
+    wrong = []
+    for raw, helm in HELM_TRUTH:
+        state = gate.scan_values(f"x: {raw}\n").truth("x")
+        expected = gate.GUARD_ON if helm else gate.GUARD_OFF
+        if state != expected:
+            wrong.append((raw, helm, state))
+    assert not wrong, wrong
+    # Non-vacuous: the table holds both readings of the same digits.
+    assert ('"0"', True) in HELM_TRUTH and ("0", False) in HELM_TRUTH
+
+
+def toggle_if_else(toggle, if_branch, else_branch):
+    """The grace period behind `{{- if .Values.toggle }}`/`{{- else }}`."""
+    deployment = swap(
+        grace_if_else(if_branch, else_branch),
+        "{{- if .Values.topologySpread.absent }}",
+        "{{- if .Values.toggle }}",
+    )
+    values = swap(VALUES, "replicaCount: 2", f"toggle: {toggle}\nreplicaCount: 2")
+    return dict(templates__deployment_yaml=deployment, values_yaml=values)
+
+
+def test_a_quoted_zero_guard_judges_the_if_branch(tmp_path):
+    """RED on the shipped gate (yaadgaar 611): Helm renders the if branch for a
+    quoted "0", '0' and "00", and the gate judged the else branch. A bad if branch
+    behind a good else branch passed — the fail-open."""
+    for index, toggle in enumerate(('"0"', "'0'", '"00"', '"-0"', "oFF", "fAlse", "nO")):
+        for if_branch, else_branch, expected in ((29, 35, 1), (35, 29, 0)):
+            root = tmp_path / f"t{index}-{if_branch}"
+            root.mkdir()
+            write_chart(root, **toggle_if_else(toggle, if_branch, else_branch))
+            result = run(root)
+            assert result.returncode == expected, (toggle, if_branch, result.stdout)
+            if expected:
+                assert "below the floor of 35s" in findings_of(result), (toggle, result.stdout)
+
+
+def test_a_yaml_zero_or_false_guard_judges_the_else_branch(tmp_path):
+    """The other direction: Helm reads each of these as 0 or false, and renders the
+    else branch. RED on the shipped gate for every spelling but `0` and `false`."""
+    for index, toggle in enumerate(("0", "false", "0_0", "0b0", "0x0", "0o0", "0.0", "n", "N")):
+        for if_branch, else_branch, expected in ((35, 29, 1), (29, 35, 0)):
+            root = tmp_path / f"f{index}-{if_branch}"
+            root.mkdir()
+            write_chart(root, **toggle_if_else(toggle, if_branch, else_branch))
+            result = run(root)
+            assert result.returncode == expected, (toggle, if_branch, result.stdout)
+            if expected:
+                assert "below the floor of 35s" in findings_of(result), (toggle, result.stdout)
+
+
+def test_a_with_over_a_yaml_zero_spelling_renders_nothing(tmp_path):
+    """`{{- with .Values.preStopSleepSeconds }}` over `0_0` renders no handler in
+    Helm, so the floor is 30 and 30 passes. The shipped gate bound `.` to the text
+    `0_0`, could not read it as a number, and refused."""
+    for index, spelling in enumerate(("0_0", "0b0", "0x0", "0o0", "0.0", "0e0")):
+        root = tmp_path / f"w{index}"
+        root.mkdir()
+        write_chart(
+            root,
+            values_yaml=swap(
+                swap(VALUES, "preStopSleepSeconds: 5", f"preStopSleepSeconds: {spelling}"),
+                "terminationGracePeriodSeconds: 35",
+                "terminationGracePeriodSeconds: 30",
+            ),
+        )
+        result = run(root)
+        assert result.returncode == 0, (spelling, result.stdout)

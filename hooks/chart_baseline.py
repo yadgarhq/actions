@@ -271,6 +271,16 @@ GUARD_UNMODELLED = "unmodelled"
 
 TRUE_WORDS = frozenset({"true", "yes", "on"})
 FALSE_WORDS = frozenset({"false", "no", "off", "null", "~", "0", '""', "''"})
+# A guard's truth (yaadgaar 611): YAML 1.1 words in their exact spellings only, the
+# integer zero in each base, and the float form, as the resolver Helm uses reads
+# them. `is_truthy` is the only reader.
+YAML_FALSE_WORDS = frozenset(
+    {"n", "N", "no", "No", "NO", "false", "False", "FALSE", "off", "Off", "OFF"}
+)
+YAML_NULL_WORDS = frozenset({"~", "null", "Null", "NULL"})
+YAML_INTEGER_ZERO = re.compile(r"[-+]?0(?:[xXoObB]0+|0*)")
+YAML_FLOAT = re.compile(r"[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?")
+GO_FLOAT_UNDERSCORE = re.compile(r"(?<![0-9])_|_(?![0-9])")
 
 KEY_LINE = re.compile(r"^(?P<indent>[ ]*)(?P<key>[A-Za-z0-9_.\-]+):(?P<rest>.*)$")
 # `certificate_usages.py`'s `CERTIFICATE_KIND` carries the comment recording what
@@ -545,9 +555,8 @@ def ancestors(path: str):
 def digits(raw):
     """`raw` as an int if it is a run of digits, leading zeros read as decimal.
 
-    For a guard's truth only, which is zero-or-not: `00` is zero in YAML 1.1 octal
-    and in decimal alike, so the base cannot change a guard. A NUMBER is read with
-    `as_integer`, never with this.
+    `as_integer`'s first step only. A guard's truth is `is_truthy`, which never
+    reads the digits of a quoted scalar (yaadgaar 611).
     """
     if raw is None:
         return None
@@ -588,17 +597,49 @@ def as_boolean(raw):
     return None
 
 
+def is_yaml_zero(text: str) -> bool:
+    """Whether a PLAIN scalar is a YAML 1.1 number Helm reads as float64 0.
+
+    The resolver Helm uses: a scalar starting with a digit or a sign drops every
+    `_`, then reads as a Go integer (`0x`, `0o`, `0b`, a leading-zero octal) or a
+    float; one starting with `.` reads as a Go float, which takes a `_` only
+    between two digits. Anything else is a string. `1e-400` underflows to 0.
+    """
+    if text[0] in "+-0123456789":
+        plain = text.replace("_", "")
+    elif text[0] == "." and GO_FLOAT_UNDERSCORE.search(text) is None:
+        plain = text.replace("_", "")
+    else:
+        return False
+    if YAML_INTEGER_ZERO.fullmatch(plain):
+        return True
+    return YAML_FLOAT.fullmatch(plain) is not None and float(plain) == 0.0
+
+
 def is_truthy(raw) -> bool:
-    """Go template truth for a values scalar: absent, empty, `0` and false are off."""
+    """Go template truth for a values scalar, as Helm reads it (yaadgaar 611).
+
+    A QUOTED scalar is a string, so it is truthy exactly when it is non-empty: a
+    quoted "0", '0' or "00" renders the if branch, and its digits are never read.
+    A plain scalar is null, a YAML 1.1 bool in its exact spellings, a number, or a
+    string. The words are matched CASE-EXACT: `oFF` and `fAlse` are strings to
+    Helm, so truthy. Measured on helm v4.3.0 and v3.18.4; the table is
+    `HELM_TRUTH` in `scripts/tests/test_chart_baseline.py`. A shape not in that
+    table reads as a non-empty string, which is on. NEITHER DEFAULT IS SAFE: a
+    wrong "on" fails open under `not`, in an if/else pair and in a toggle, and a
+    wrong "off" drops the preStop sleep from the floor. The safety comes from
+    agreeing with Helm, so a new shape is measured and added to the table.
+    """
     if raw is None:
         return False
-    decided = as_boolean(raw)
-    if decided is not None:
-        return decided
-    number = digits(raw)
-    if number is not None:
-        return number != 0
-    return raw.strip() not in ("", "''", '""')
+    text = raw.strip()
+    if text in ("", "''", '""'):
+        return False
+    if text[0] in "\"'":
+        return True
+    if text in YAML_NULL_WORDS or text in YAML_FALSE_WORDS:
+        return False
+    return not is_yaml_zero(text)
 
 
 # -------------------------------------------------------- deployment template
