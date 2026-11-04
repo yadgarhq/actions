@@ -633,10 +633,11 @@ def test_a_parent_with_no_scripts_tests_fails_closed(tmp_path):
 
 
 def test_a_suite_that_collects_nothing_fails_closed(tmp_path):
-    """pytest exits 5 for no tests; a green exit over nothing is no evidence."""
+    """pytest exits 5 for no tests; a green exit over nothing is no evidence.
+    The identities move, so every listed test is deselected and nothing runs."""
     root = repository(tmp_path)
-    onboarded_with(root, "VALUE = 1\n")
-    result, _ = run(root)
+    onboarded_with_example(root, "VALUE = 1\n", listed_tests())
+    result, _ = run(root, **renders(ESTATE, ONE_MORE_CONFIGMAP))
     assert result.returncode != 0
     assert "::error::" in result.stdout
 
@@ -711,25 +712,172 @@ def test_the_no_op_paths_do_not_run_the_parent_suite(tmp_path):
 # --------------------------------------------- the deselect list (Max's ruling 2026-11-03, option (a))
 
 
-def test_a_red_literal_count_test_does_not_block_the_pin(tmp_path):
-    """GREEN HALF: every listed test fails (a module that adds one object), the
-    rest of the parent passes -> the gate passes."""
+def objects(*identities: tuple[str, str, str]) -> str:
+    """A `helm template` stdout holding one document per `(apiVersion, kind, name)`."""
+    return "".join(
+        f"---\n# Source: x/templates/{kind.lower()}.yaml\napiVersion: {api}\nkind: {kind}\nmetadata:\n  name: {name}\n"
+        for api, kind, name in identities
+    )
+
+
+ESTATE = (("v1", "Service", "gateway"), ("apps/v1", "Deployment", "gateway"))
+ONE_MORE_CONFIGMAP = ESTATE + (("v1", "ConfigMap", "widget-extra"),)
+
+# Red only with the candidate vendored, so parent main's own run never excuses it.
+LISTED_RED_WHEN_VENDORED = VENDORED + listed_tests("    assert not vendored(), 'count moved'\n")
+
+
+def renders(baseline_ci, vendored_ci, baseline_example=None, vendored_example=None) -> dict[str, str]:
+    """Stub stdout for the four renders the gate compares (the example
+    defaults to the ci render on each side)."""
+    return {
+        "STUB_BASELINE_TEMPLATE_STDOUT": objects(*baseline_ci),
+        "STUB_TEMPLATE_STDOUT": objects(*vendored_ci),
+        "STUB_BASELINE_EXAMPLE_TEMPLATE_STDOUT": objects(*(baseline_example or baseline_ci)),
+        "STUB_EXAMPLE_TEMPLATE_STDOUT": objects(*(vendored_example or vendored_ci)),
+    }
+
+
+def onboarded_with_example(root: Path, tests: str, listed: str) -> Path:
+    directory = onboarded_with(root, tests, listed=listed)
+    with_example(directory)
+    return directory
+
+
+def test_a_candidate_that_adds_a_configmap_deselects_the_literal_tests_and_passes(tmp_path):
+    """GREEN HALF (yaadgaar 563): the object identities move, so the literal
+    counts are the parent's to move after the pin, and they do not block."""
     root = repository(tmp_path)
-    onboarded_with(root, PASSING_PARENT_TEST, listed=listed_tests("    assert False, 'count moved'\n"))
-    result, _ = run(root)
+    onboarded_with_example(root, PASSING_PARENT_TEST, LISTED_RED_WHEN_VENDORED)
+    result, _ = run(root, **renders(ESTATE, ONE_MORE_CONFIGMAP))
     assert result.returncode == 0, result.stdout
     assert "::error::" not in result.stdout
+    assert "the object identities moved" in result.stdout
+    assert "+ ('v1', 'ConfigMap', 'widget-extra')" in result.stdout
+
+
+def test_a_label_change_that_moves_no_identity_runs_the_literal_tests_and_blocks(tmp_path):
+    """RED HALF (yaadgaar 563): the same identities on both sides, so the
+    literal-count tests run, and their non-count assertions block."""
+    root = repository(tmp_path)
+    labels = pre_pin_parent.PARENT_TEST_FILE + "::test_global_image_and_labels_still_render"
+    body = VENDORED + listed_tests().replace(
+        "def test_global_image_and_labels_still_render():\n    pass\n",
+        "def test_global_image_and_labels_still_render():\n    assert not vendored(), 'label lost'\n",
+    )
+    assert "label lost" in body
+    onboarded_with_example(root, PASSING_PARENT_TEST, body)
+    result, _ = run(root, **renders(ESTATE, ESTATE))
+    assert result.returncode == 1, result.stdout
+    assert f"Failing tests:\n  {labels}\n" in result.stdout
+    assert "the object identities did not move" in result.stdout
+
+
+def test_a_same_count_rename_still_deselects(tmp_path):
+    """Counts alone are not the identity set: a renamed object moves it."""
+    root = repository(tmp_path)
+    onboarded_with_example(root, PASSING_PARENT_TEST, LISTED_RED_WHEN_VENDORED)
+    renamed = (("v1", "Service", "gateway-renamed"), ESTATE[1])
+    result, _ = run(root, **renders(ESTATE, renamed))
+    assert result.returncode == 0, result.stdout
+
+
+def test_a_duplicated_identity_still_deselects(tmp_path):
+    """A multiset, not a set: a second object of one identity moves `len(documents)`."""
+    root = repository(tmp_path)
+    onboarded_with_example(root, PASSING_PARENT_TEST, LISTED_RED_WHEN_VENDORED)
+    result, _ = run(root, **renders(ESTATE, ESTATE + (ESTATE[0],)))
+    assert result.returncode == 0, result.stdout
+
+
+def test_a_move_in_the_example_render_alone_still_deselects(tmp_path):
+    """The adopter render counts too: an object only the example values reach."""
+    root = repository(tmp_path)
+    onboarded_with_example(root, PASSING_PARENT_TEST, LISTED_RED_WHEN_VENDORED)
+    result, _ = run(root, **renders(ESTATE, ESTATE, ESTATE, ONE_MORE_CONFIGMAP))
+    assert result.returncode == 0, result.stdout
+
+
+def test_no_example_values_means_unsure_and_the_literal_tests_run(tmp_path):
+    """FAIL CLOSED: no adopter render to compare, so nothing is deselected for counts."""
+    root = repository(tmp_path)
+    onboarded_with(root, PASSING_PARENT_TEST, listed=LISTED_RED_WHEN_VENDORED)
+    result, _ = run(root, **renders(ESTATE, ONE_MORE_CONFIGMAP))
+    assert result.returncode == 1, result.stdout
+    assert "cannot compare the object identities" in result.stdout
+
+
+def test_a_red_baseline_means_unsure_and_the_literal_tests_run(tmp_path):
+    """FAIL CLOSED: a parent main that does not render has no identity set."""
+    root = repository(tmp_path)
+    onboarded_with_example(root, PASSING_PARENT_TEST, LISTED_RED_WHEN_VENDORED)
+    result, _ = run(root, STUB_BASELINE_LINT_EXIT="1", **renders(ESTATE, ONE_MORE_CONFIGMAP))
+    assert result.returncode == 1, result.stdout
+    assert "cannot compare the object identities" in result.stdout
+
+
+def test_an_unparsable_render_means_unsure_and_the_literal_tests_run(tmp_path):
+    root = repository(tmp_path)
+    onboarded_with_example(root, PASSING_PARENT_TEST, LISTED_RED_WHEN_VENDORED)
+    stub = renders(ESTATE, ONE_MORE_CONFIGMAP)
+    stub["STUB_TEMPLATE_STDOUT"] += "---\nkind: [unclosed\n"
+    result, _ = run(root, **stub)
+    assert result.returncode == 1, result.stdout
+    assert "cannot compare the object identities" in result.stdout
+
+
+def test_an_empty_render_means_unsure_and_the_literal_tests_run(tmp_path):
+    """Nothing rendered on both sides is equal, and proves nothing."""
+    root = repository(tmp_path)
+    onboarded_with_example(root, PASSING_PARENT_TEST, LISTED_RED_WHEN_VENDORED)
+    result, _ = run(root)
+    assert result.returncode == 1, result.stdout
+    assert "cannot compare the object identities" in result.stdout
+
+
+def test_a_literal_test_parent_main_also_fails_is_excused_by_the_same_selection(tmp_path):
+    """Attribution reruns parent main with the vendored run's OWN selection:
+    a literal test red on both sides is main's, not this pull request's."""
+    root = repository(tmp_path)
+    labels = pre_pin_parent.PARENT_TEST_FILE + "::test_global_image_and_labels_still_render"
+    body = listed_tests().replace(
+        "def test_global_image_and_labels_still_render():\n    pass\n",
+        "def test_global_image_and_labels_still_render():\n    assert False, 'red on main too'\n",
+    )
+    onboarded_with_example(root, PASSING_PARENT_TEST, body)
+    result, _ = run(root, PARENT_SHA="abc1234", **renders(ESTATE, ESTATE))
+    assert result.returncode == 0, result.stdout
+    assert f"already fail at abc1234 with nothing of this pull request vendored; not this PR's failures:\n  {labels}" in result.stdout
 
 
 def test_a_red_unlisted_test_beside_red_listed_ones_still_blocks_and_is_named(tmp_path):
-    """RED HALF: the same red listed tests, plus one real parent failure."""
+    """RED HALF: the same red listed tests with the identities moved, plus one
+    real parent failure."""
     root = repository(tmp_path)
-    onboarded_with(root, FAILING_PARENT_TEST, listed=listed_tests("    assert False, 'count moved'\n"))
-    result, _ = run(root)
+    onboarded_with_example(root, FAILING_PARENT_TEST, LISTED_RED_WHEN_VENDORED)
+    result, _ = run(root, **renders(ESTATE, ONE_MORE_CONFIGMAP))
     assert result.returncode == 1
     assert "Failing tests:\n  scripts/tests/test_parent.py::test_the_gateway_route_still_renders\n\n" in result.stdout
     for nodeid in pre_pin_parent.DESELECTED:
         assert f"\n  {nodeid}\n" not in result.stdout
+
+
+def test_a_stale_literal_test_refuses_even_when_the_identities_did_not_move(tmp_path):
+    """The stale-list check covers the whole list, not only what is deselected."""
+    gone = sorted(pre_pin_parent.LITERAL_COUNT_TESTS)[0]
+    root = repository(tmp_path)
+    onboarded_with_example(root, PASSING_PARENT_TEST, listed_tests(skip=(gone,)))
+    result, _ = run(root, **renders(ESTATE, ESTATE))
+    assert result.returncode == 1
+    assert "no longer collects" in result.stdout
+    assert f"\n  {gone}" in result.stdout
+
+
+def test_identity_census_is_pure_and_counts_duplicates():
+    census = pre_pin_parent.identity_census(objects(*ESTATE, ESTATE[0]) + "---\n# empty\n---\nfoo: bar\n")
+    assert census == {("v1", "Service", "gateway"): 2, ("apps/v1", "Deployment", "gateway"): 1}
+    assert pre_pin_parent.identity_census("") is None
+    assert pre_pin_parent.identity_census("kind: [unclosed\n") is None
 
 
 def test_a_listed_test_the_parent_no_longer_collects_refuses_by_name(tmp_path):
@@ -747,8 +895,8 @@ def test_a_deselect_that_would_also_drop_an_unlisted_test_refuses(tmp_path):
     """pytest's `--deselect` is a prefix match; `test_x` would swallow `test_x_y`."""
     swallowed = sorted(pre_pin_parent.DESELECTED)[0].split("::", 1)[1] + "_too"
     root = repository(tmp_path)
-    onboarded_with(root, PASSING_PARENT_TEST, listed=listed_tests() + f"def {swallowed}():\n    assert False\n")
-    result, _ = run(root)
+    onboarded_with_example(root, PASSING_PARENT_TEST, listed_tests() + f"def {swallowed}():\n    assert False\n")
+    result, _ = run(root, **renders(ESTATE, ONE_MORE_CONFIGMAP))
     assert result.returncode == 1
     assert "would also drop" in result.stdout and swallowed in result.stdout
 

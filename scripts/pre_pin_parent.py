@@ -40,7 +40,14 @@ checkout's root, the command `yadgarhq/chart`'s own CI runs, with four changes:
   * MINUS A NAMED DESELECT LIST (Max's ruling, 2026-11-03, option (a)):
     `LITERAL_COUNT_TESTS` pin object counts and sets as literals that the
     parent moves AFTER a pin (its `ci.yaml`), so a module PR that adds one
-    object could never land if they blocked. `PUBLISHED_PIN_TESTS` render the
+    object could never land if they blocked. They are deselected ONLY when
+    the object identities move (yaadgaar 563): the `ci-render` and
+    `ci-render-example` outputs, as `(apiVersion, kind, name)` multisets,
+    differ between parent main and the vendored candidate. Same identities on
+    both sides, they run and block, because they also assert labels, RBAC,
+    hooks and k1 agreement. Anything that cannot be compared -- a red
+    baseline, no example, an unparsable or empty render -- runs them (fail
+    closed). `PUBLISHED_PIN_TESTS` render the
     `packaged` fixture, whose `helm package -u` re-pulls every dependency from
     GHCR and so tests the published pin, not the vendored candidate. Each id is
     matched EXACTLY (or with its `[params]`); a listed id the parent no longer
@@ -83,6 +90,7 @@ Tests: `python3 -m pytest scripts/tests/ -q`.
 
 from __future__ import annotations
 
+import collections
 import os
 import re
 import shutil
@@ -179,11 +187,13 @@ PLACEHOLDER_ADMINISTRATOR = "REPLACE-WITH-A-UUIDV7-YOU-MINT"
 CI_ADMINISTRATOR = "01900000-0000-7000-8000-000000000001"
 
 
-def render_parent(values_flags: list[str], template_flags: list[str]):
+def render_parent(values_flags: list[str], template_flags: list[str], outputs: dict[str, str] | None = None):
     """Lint, template with the CI values, then template with the example values.
 
     Returns None when all pass, else `(verb, label, result)` of the first
     refusal, `label` naming the example file when that is what refused.
+    `outputs`, when given, receives each passing render's stdout under
+    `"ci"` and `"example"` (the identity comparison, yaadgaar 563).
 
     The example is rendered from a TEMP COPY with chart's adopter placeholder
     replaced by a fixed uuidv7 (chart's own `_adopter_values_as_replaced`): the
@@ -196,6 +206,8 @@ def render_parent(values_flags: list[str], template_flags: list[str]):
     template = helm("template", "ci-render", str(PARENT), *template_flags, *values_flags)
     if template.returncode != 0:
         return ("template", "", template)
+    if outputs is not None:
+        outputs["ci"] = template.stdout
     example = example_values(PARENT)
     if example is not None:
         with tempfile.TemporaryDirectory() as scratch:
@@ -205,7 +217,81 @@ def render_parent(values_flags: list[str], template_flags: list[str]):
             rendered = helm("template", "ci-render-example", str(PARENT), *template_flags, "-f", str(copy))
         if rendered.returncode != 0:
             return ("template", str(example), rendered)
+        if outputs is not None:
+            outputs["example"] = rendered.stdout
     return None
+
+
+CENSUS_RENDERS = ("ci", "example")
+"""The two parent renders whose object identities decide whether
+`LITERAL_COUNT_TESTS` are deselected: `ci` is chart's defaults render
+(`EXPLICIT_TLS`, which k1 and the refusals test count), `example` its adopter
+render (`ADOPTER_VALUES`, `ADOPTER_OBJECTS` / `ADOPTER_EXPECTED`)."""
+
+
+def identity_census(stdout: str) -> collections.Counter | None:
+    """PURE: `(apiVersion, kind, metadata.name)` -> count over one render.
+
+    The tuple is chart's own `identities()`; a Counter, not a set, so a second
+    object of one identity still moves `len(documents)`. None when the render
+    does not parse or holds no object: nothing to compare is not "unchanged".
+    """
+    try:
+        documents = list(yaml.safe_load_all(stdout))
+    except yaml.YAMLError:
+        return None
+    census = collections.Counter(
+        (
+            str(document.get("apiVersion")),
+            str(document.get("kind")),
+            str((document.get("metadata") or {}).get("name")),
+        )
+        for document in documents
+        if isinstance(document, dict) and document.get("apiVersion")
+    )
+    return census or None
+
+
+def identities_moved(before: dict[str, str] | None, after: dict[str, str]) -> tuple[bool | None, str]:
+    """PURE: `(moved, sentence)` comparing the `CENSUS_RENDERS` of parent main
+    (`before`, None when it did not render) and of the vendored candidate.
+
+    `moved` is None when any side cannot be compared -- the caller then runs
+    the literal-count tests (fail closed).
+    """
+    if before is None:
+        return None, "parent main did not render, so it has no object identities"
+    lines = []
+    for render in CENSUS_RENDERS:
+        if render not in before or render not in after:
+            return None, f"there is no {render!r} render on both sides"
+        old, new = identity_census(before[render]), identity_census(after[render])
+        if old is None or new is None:
+            return None, f"the {render!r} render holds no parsable object on one side"
+        for identity in sorted((new - old).elements()):
+            lines.append(f"\n  {render}: + {identity}")
+        for identity in sorted((old - new).elements()):
+            lines.append(f"\n  {render}: - {identity}")
+    return bool(lines), "".join(lines)
+
+
+def deselection(moved: bool | None, reason: str) -> tuple[dict[str, str], str]:
+    """PURE: what to deselect for `identities_moved`'s verdict, and the line to print."""
+    count = len(LITERAL_COUNT_TESTS)
+    if moved is None:
+        return PUBLISHED_PIN_TESTS, (
+            f"::warning::pre-pin-parent cannot compare the object identities ({reason}), "
+            f"so the {count} literal-count tests run and can block."
+        )
+    if moved:
+        return DESELECTED, (
+            f"pre-pin-parent: the object identities moved, so the {count} literal-count "
+            f"tests are deselected (yadgarhq/chart moves those literals after the pin):{reason}"
+        )
+    return PUBLISHED_PIN_TESTS, (
+        f"pre-pin-parent: the object identities did not move, so the {count} "
+        f"literal-count tests run and can block."
+    )
 
 
 def parent_sha() -> str:
@@ -422,8 +508,12 @@ class Unusable(Exception):
     """A parent pytest run that proves nothing; carries the refusal text."""
 
 
-def run_selection(budget: Budget, listed) -> tuple[subprocess.CompletedProcess, list[str]]:
+def run_selection(budget: Budget, listed, known=None) -> tuple[subprocess.CompletedProcess, list[str]]:
     """Collect, check the deselect list against what is collected, then run.
+
+    `listed` is what this run deselects; `known` (default `listed`) is the
+    whole list checked for stale ids, so a renamed literal-count test refuses
+    even on a run that keeps it.
 
     Returns `(result, failing)` for a run that exited 0 or 1 and, on 1, named
     at least one failing test. Everything else raises `Unusable`.
@@ -435,7 +525,8 @@ def run_selection(budget: Budget, listed) -> tuple[subprocess.CompletedProcess, 
             f"{collect.stdout}{collect.stderr}"
         )
     collected = [line.strip() for line in collect.stdout.splitlines() if "::" in line]
-    deselect, stale, overreach = selection(collected, listed)
+    deselect, _, overreach = selection(collected, listed)
+    _, stale, _ = selection(collected, listed if known is None else known)
     if stale:
         raise Unusable(
             "the deselect list in yadgarhq/actions `scripts/pre_pin_parent.py` names tests "
@@ -506,7 +597,8 @@ def main() -> int:
     # BASELINE FIRST (yaadgaar 342): the parent exactly as checked out. If main
     # is already red (a bad pin written by `parent_bump.py` with no PR CI), say
     # so rather than blame this pull request's K-8 order.
-    baseline_red = render_parent(values_flags, template_flags)
+    baseline_outputs: dict[str, str] = {}
+    baseline_red = render_parent(values_flags, template_flags, baseline_outputs)
 
     # A red baseline does NOT stop here: a chart PR that repairs a red parent
     # main would deadlock otherwise. Vendor and render again.
@@ -518,7 +610,8 @@ def main() -> int:
         tarball = package_candidate(CANDIDATE, pin, Path(workspace))
         vendored = vendor(PARENT, name, pin, tarball)
 
-    red = render_parent(values_flags, template_flags)
+    vendored_outputs: dict[str, str] = {}
+    red = render_parent(values_flags, template_flags, vendored_outputs)
     if red is not None:
         verb, label, result = red
         if baseline_red is not None:
@@ -538,9 +631,13 @@ def main() -> int:
             f"tests cannot run, and a pin nothing tested is not a pin that passed."
         )
         return 1
+    deselected, narration = deselection(
+        *identities_moved(None if baseline_red is not None else baseline_outputs, vendored_outputs)
+    )
+    print(narration)
     budget = Budget()
     try:
-        tests, failing = run_selection(budget, DESELECTED)
+        tests, failing = run_selection(budget, deselected, DESELECTED)
     except Unusable as error:
         print(f"::error::{error}")
         return 1
@@ -560,7 +657,7 @@ def main() -> int:
         else:
             vendored.write_bytes(published)
             try:
-                _, main_failing = run_selection(budget, DESELECTED)
+                _, main_failing = run_selection(budget, deselected, DESELECTED)
             except Unusable as error:
                 # Parent main proves nothing, so nothing is subtracted: every
                 # vendored failure stays this pull request's (fail closed).
@@ -585,7 +682,7 @@ def main() -> int:
     print(
         f"pre-pin-parent: yadgarhq/chart main renders and lints with {name!r} "
         f"vendored at {pin}, the pin it already carries, and yadgarhq/chart's own tests "
-        f"(minus {len(DESELECTED)} named literal-count and published-pin tests) add no failure."
+        f"(minus {len(deselected)} named literal-count and published-pin tests) add no failure."
     )
     return 0
 
