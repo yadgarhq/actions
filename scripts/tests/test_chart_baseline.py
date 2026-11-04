@@ -1990,10 +1990,191 @@ def test_nothing_the_plain_spelling_refuses_is_accepted_through_the_cast(tmp_pat
                 root.mkdir()
                 cast_chart(root, knob, f"{key}: {value}",
                            template_new=template_old.split(": ", 1)[0] + ": " + spelling)
-                verdicts.append(run(root).returncode)
+                verdicts.append(run(root))
             plain, cast = verdicts
-            assert not (plain != 0 and cast == 0), (label, value)
-            if cast == 0:
+            if value in EXPONENT_FORM:
+                # THE ONE DELIBERATE ASYMMETRY (yaadgaar 602): the plain spelling
+                # renders these as `1e+06`, the cast renders the integer. So the
+                # plain spelling is refused BY NAME, and the cast is not weaker for
+                # accepting what it renders whole.
+                assert plain.returncode == 1, (label, value, plain.stdout)
+                assert "exponent form" in findings_of(plain), (label, value, plain.stdout)
+            else:
+                assert not (plain.returncode != 0 and cast.returncode == 0), (label, value)
+            if cast.returncode == 0:
                 accepted.append((label, value))
     # Non-vacuous: the cast does accept the whole numbers the bounds allow.
     assert ("grace", "35") in accepted and ("maxSkew", "1") in accepted and ("preStop sleep", "5") in accepted
+    # And the asymmetry is real: the cast renders these whole, and accepts them.
+    assert ("grace", "1000000") in accepted and ("maxSkew", "9007199254740992") in accepted
+
+
+# ------------------------------------------------- a leading zero (yaadgaar 602)
+#
+# YAML 1.1 READS AN UNQUOTED LEADING ZERO AS OCTAL, and Helm reads values files and
+# its own rendered manifests as YAML 1.1. MEASURED 2026-11-04 on helm v4.3.0 and
+# v3.18.4 (identical), a values file rendered through the plain `{{ . }}`:
+#
+#     035 -> 29     -035 -> -29    +035 -> 29     0035 -> 29     010 -> 8
+#     00 -> 0       08 -> 8        09 -> 9        0o43 -> 35     "035" -> `035`
+#
+# and the TEXT `035` — what a quoted "035" or a literal in the template renders — is
+# read back by Helm's YAML reader (`fromYaml`) as 29. The gate read every one of
+# them as decimal, so `terminationGracePeriodSeconds: 035` passed the 35s floor and
+# rendered 29. The decimal reading is now taken only where it is the value Helm
+# renders: a whole number with no leading zero, the rule `WHOLE_NUMBER` gives the
+# cast. `08`, `09` and `00` render the number they look like, and are refused all
+# the same: fail-closed, and the rule a reader can state in one line.
+
+LEADING_ZERO = ["035", '"035"', "'035'", "-035", "+035", "0035", "010", "08", "09", "01"]
+
+# (label, values key, a value that passes, the knob's template spelling)
+PLAIN_KNOBS = [
+    ("grace", "terminationGracePeriodSeconds", "35"),
+    ("preStop sleep", "preStopSleepSeconds", "5"),
+    ("maxSkew", "  maxSkew", "1"),
+]
+
+
+def test_a_leading_zero_is_refused_on_every_integer_knob(tmp_path):
+    """RED on the shipped gate: `035` on the grace knob passed and rendered 29.
+
+    Every knob the gate reads as an integer, every leading-zero spelling, each
+    refused BY NAME — not by a floor that happens to sit above the octal reading.
+    """
+    for label, key, good in PLAIN_KNOBS:
+        for index, value in enumerate([good] + LEADING_ZERO):
+            root = tmp_path / f"{label}-{index}".replace(" ", "-")
+            root.mkdir()
+            line = f"{key}: {value}"
+            write_chart(root, values_yaml=swap(VALUES, f"{key}: {good}", line))
+            result = run(root)
+            if value == good:
+                assert result.returncode == 0, (label, value, result.stdout)
+                continue
+            assert result.returncode == 1, (label, value, result.stdout)
+            assert "leading zero" in findings_of(result), (label, value, result.stdout)
+
+
+def test_a_leading_zero_literal_in_the_template_is_refused_too(tmp_path):
+    """The literal path: the template text `035` is what Helm's YAML reader reads as
+    29, so the rule is the same whether the number comes from values or not."""
+    for grace, expected in (("35", 0), ("035", 1), ("00", 1), ("0", 1)):
+        literal = swap(
+            DEPLOYMENT,
+            "{{- with .Values.terminationGracePeriodSeconds }}",
+            "{{- if true }}",
+        )
+        literal = swap(
+            literal,
+            "terminationGracePeriodSeconds: {{ . }}",
+            f"terminationGracePeriodSeconds: {grace}",
+        )
+        root = tmp_path / f"literal-{grace}"
+        root.mkdir()
+        write_chart(root, templates__deployment_yaml=literal)
+        result = run(root)
+        assert result.returncode == expected, (grace, result.stdout)
+        if grace.startswith("0") and len(grace) > 1:
+            assert "leading zero" in findings_of(result), (grace, result.stdout)
+
+
+def test_a_zero_with_a_leading_zero_still_switches_a_guard_off(tmp_path):
+    """NOT WEAKENED, NOT STRENGTHENED: a guard's truth is zero-or-not, and `00` is
+    zero in YAML 1.1 octal as in decimal. `{{- with .Values.preStopSleepSeconds }}`
+    over `00` renders no handler (Helm: 0, falsy), so the floor is 30 and 30 passes;
+    over the grace period it renders no field, which stays refused."""
+    root = tmp_path / "sleep"
+    root.mkdir()
+    write_chart(
+        root,
+        values_yaml=swap(
+            swap(VALUES, "preStopSleepSeconds: 5", "preStopSleepSeconds: 00"),
+            "terminationGracePeriodSeconds: 35",
+            "terminationGracePeriodSeconds: 30",
+        ),
+    )
+    result = run(root)
+    assert result.returncode == 0, result.stdout
+
+    root = tmp_path / "grace"
+    root.mkdir()
+    write_chart(
+        root,
+        values_yaml=swap(
+            VALUES, "terminationGracePeriodSeconds: 35", "terminationGracePeriodSeconds: 00"
+        ),
+    )
+    result = run(root)
+    assert result.returncode == 1, result.stdout
+    assert "renders `terminationGracePeriodSeconds` only when" in result.stdout
+
+
+def test_as_integer_takes_the_decimal_reading_only_where_helm_renders_it():
+    """The unit view of the rule: no leading zero, a sign allowed, quotes stripped."""
+    sys.path.insert(0, str(GATE.parent))
+    try:
+        import chart_baseline
+    finally:
+        sys.path.pop(0)
+    for raw, expected in (
+        ("35", 35), ("0", 0), ("-0", 0), ("+35", 35), ("-5", -5), ('"35"', 35),
+        ("1000000", 1000000),
+        ("035", None), ('"035"', None), ("00", None), ("08", None), ("-035", None),
+        ("+035", None), ("0o43", None), ("35.0", None), ("soon", None), (None, None),
+    ):
+        assert chart_baseline.as_integer(raw) == expected, raw
+
+
+# ------------------------------------------- a million or more (yaadgaar 602)
+#
+# A VALUES-FILE NUMBER REACHES THE TEMPLATE AS float64, and the plain `{{ . }}`
+# prints a float64 of a million or more in exponent form. MEASURED 2026-11-04,
+# helm v4.3.0 and v3.18.4 identical: 999999 -> `999999`, 1000000 -> `1e+06`,
+# -1000000 -> `-1e+06`, 1234567 -> `1.234567e+06`; a quoted "1000000" (a string)
+# -> `1000000`; through `| int64` -> 1000000. The gate read the decimal and judged
+# a number the chart does not render as written. Whether an API server takes
+# `1e+06` for an int64 field is not measured here (it needs a cluster), so the
+# plain spelling is refused BY NAME and `| int64` is the spelling that renders it.
+
+EXPONENT_FORM = ["1000000", "9007199254740992"]
+
+
+def test_a_number_the_plain_spelling_renders_in_exponent_form_is_refused(tmp_path):
+    """RED on the shipped gate: grace 1000000 passed and rendered `1e+06`."""
+    for label, key, good in PLAIN_KNOBS:
+        for index, (value, expected) in enumerate((
+            ("999999", None), ("1000000", 1), ("-1000000", 1), ("1234567", 1),
+            ("9007199254740992", 1),
+        )):
+            root = tmp_path / f"{label}-{index}".replace(" ", "-")
+            root.mkdir()
+            write_chart(root, values_yaml=swap(VALUES, f"{key}: {good}", f"{key}: {value}"))
+            result = run(root)
+            if expected is None:
+                assert "exponent form" not in result.stdout, (label, value, result.stdout)
+                continue
+            assert result.returncode == 1, (label, value, result.stdout)
+            assert "exponent form" in findings_of(result), (label, value, result.stdout)
+
+
+def test_the_spellings_that_render_a_million_whole_still_pass(tmp_path):
+    """NOT A FALSE REFUSAL: a quoted string, a template literal and the cast each
+    render `1000000` as written, so each passes the grace floor."""
+    cases = {
+        "quoted": dict(values_yaml=swap(
+            VALUES, "terminationGracePeriodSeconds: 35", 'terminationGracePeriodSeconds: "1000000"')),
+        "literal": dict(templates__deployment_yaml=swap(
+            swap(DEPLOYMENT, "{{- with .Values.terminationGracePeriodSeconds }}", "{{- if true }}"),
+            "terminationGracePeriodSeconds: {{ . }}", "terminationGracePeriodSeconds: 1000000")),
+        "cast": dict(
+            values_yaml=swap(VALUES, "terminationGracePeriodSeconds: 35", "terminationGracePeriodSeconds: 1000000"),
+            templates__deployment_yaml=swap(
+                DEPLOYMENT, "terminationGracePeriodSeconds: {{ . }}", "terminationGracePeriodSeconds: {{ . | int64 }}")),
+    }
+    for name, replace in cases.items():
+        root = tmp_path / name
+        root.mkdir()
+        write_chart(root, **replace)
+        result = run(root)
+        assert result.returncode == 0, (name, result.stdout)
