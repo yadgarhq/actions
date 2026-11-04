@@ -321,6 +321,23 @@ BLOCK_OPENERS = frozenset({"if", "with", "range", "define", "block"})
 QUOTE_PIPE = re.compile(r"\|\s*quote\s*$")
 REQUIRED_CALL = re.compile(r"^required\s+(?=[\"'])")
 
+# `| int64` (yaadgaar 550), the cast the estate writes on every numeric env value
+# and wants on the grace period, the preStop sleep and `maxSkew`: a values-file
+# number reaches the template as float64, and `{{ . }}` renders 1000000 as
+# `1e+06`, so those three were bounded to 1..999999 instead of cast. Helm's
+# `int64` is `cast.ToInt64`, which BENDS rather than refuses. Measured 2026-11-04,
+# helm v4.3.0 and v3.18.4 identical: 35.7 -> 35, "35.5" -> 0, "035" and 035 -> 29,
+# "0x23" -> 35, "3_5" -> 35, "abc" -> 0, true -> 1, 9300000000000000000 ->
+# -9223372036854775808, 9007199254740993 -> 9007199254740992. So the cast is
+# modelled as the identity over `WHOLE_NUMBER` within `EXACT_INTEGER`, and every
+# other value is refused BEFORE the cast: the whole-number check `{{ . }}` gets,
+# never weaker. ONE `| int64`, directly on the operand and before any `| quote`;
+# `| int` (which bends the same way), a call form and a cast after `| quote`
+# (which casts the quote characters, to 0) stay unmodelled and red.
+INT64_PIPE = re.compile(r"\|\s*int64\s*$")
+WHOLE_NUMBER = re.compile(r"-?(?:0|[1-9][0-9]*)")
+EXACT_INTEGER = 2**53
+
 
 # ---------------------------------------------------------------- values.yaml
 
@@ -758,12 +775,13 @@ def scan_template(text: str) -> Template:
 
 
 def unwrap_action(text: str):
-    """The operand inside a `{{ … }}`, wrappers removed, or None when unmodelled.
+    """`(operand, cast)` inside a `{{ … }}`, wrappers removed, or None when unmodelled.
 
     Only the wrappers the seven module charts actually write — see the counts beside
     `QUOTE_PIPE` above. `required "…" X` and a trailing `| quote` both render X
-    itself, so the value a chart ships is legible through them; anything else returns
-    None and the caller refuses.
+    itself, so the value a chart ships is legible through them; `cast` is True when
+    one `| int64` sits under them (`INT64_PIPE`), and the caller applies
+    `cast_int64`. Anything else returns None and the caller refuses.
     """
     action = TEMPLATE_ACTION_BODY.match(text)
     if action is None:
@@ -774,6 +792,9 @@ def unwrap_action(text: str):
         if stripped == body:
             break
         body = stripped
+    cast = INT64_PIPE.search(body) is not None
+    if cast:
+        body = INT64_PIPE.sub("", body).strip()
     if REQUIRED_CALL.match(body):
         argument = body[len(REQUIRED_CALL.match(body).group(0)):]
         # Skip the message. It is prose holding dots, semicolons and the word
@@ -786,7 +807,28 @@ def unwrap_action(text: str):
     if not body or "|" in body or "(" in body or " " in body:
         # A pipeline or a call this gate has not been taught. Refused, not guessed.
         return None
-    return body
+    return body, cast
+
+
+def cast_int64(raw: str):
+    """Helm's `| int64` over a values scalar: ('ok', digits) or ('unresolvable', why).
+
+    The identity over a plain whole number the cast keeps exactly, quoted or not;
+    every other spelling is refused, because the cast would render a number the
+    chart never wrote (see `INT64_PIPE`).
+    """
+    text = raw.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+        text = text[1:-1]
+    if WHOLE_NUMBER.fullmatch(text) is None or abs(int(text)) > EXACT_INTEGER:
+        return (
+            "unresolvable",
+            f"`{raw}` is not a whole number `| int64` keeps exactly. Helm's cast "
+            f"truncates a fraction, reads a word as 0, `true` as 1 and a leading "
+            f"zero as octal, so the value is refused before the cast, as `{{{{ . }}}}` "
+            f"refuses it",
+        )
+    return "ok", str(int(text))
 
 
 def resolve(occurrence: KeyOccurrence, values: Values):
@@ -802,9 +844,10 @@ def resolve(occurrence: KeyOccurrence, values: Values):
         return "unresolvable", "the key carries no value"
     if "{{" not in text:
         return "ok", text
-    operand = unwrap_action(text)
-    if operand is None:
+    unwrapped = unwrap_action(text)
+    if unwrapped is None:
         return "unresolvable", f"an expression this gate does not model: {text}"
+    operand, cast = unwrapped
 
     if operand == ".":
         if not occurrence.dot:
@@ -844,6 +887,8 @@ def resolve(occurrence: KeyOccurrence, values: Values):
     raw = values.raw(path)
     if raw is None:
         return "unresolvable", f"values.yaml sets no plain scalar at `{path}`"
+    if cast:
+        return cast_int64(raw)
     return "ok", raw
 
 
