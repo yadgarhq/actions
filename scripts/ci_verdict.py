@@ -449,7 +449,7 @@ def fetch_check_runs(url, token, permission="checks"):
     return payload
 
 
-def standing_verdict(payload, run_id, check_name):
+def standing_verdict(payload, run_id, check_name, admitted=None, text_only=frozenset()):
     """The most recent COMPLETED `check_name` on this commit, THIS RUN'S OWN EXCLUDED.
 
     THE SELF-EXCLUSION IS THE SUBTLE PART, and without it the assertion is not
@@ -471,6 +471,12 @@ def standing_verdict(payload, run_id, check_name):
     now finds, a test that is not deterministic — be waved through by a body
     edit, because an older green would still be sitting there. A text-only edit
     may CARRY FORWARD the verdict that stands, never improve on it.
+
+    YAADGAAR 535: `admitted`, when given, is the set of run ids that are shown
+    to have EXECUTED the checks, and `text_only` the set PROVEN text-only
+    (`sibling_runs`). An admitted run's entry stands. A proven text-only run's
+    entry never stands, red or green. Any other run's entry stands only when it
+    is not `success`: a green needs positive proof, a red needs none.
     """
     runs = payload.get("check_runs")
     if not isinstance(runs, list):
@@ -494,10 +500,22 @@ def standing_verdict(payload, run_id, check_name):
         if mine not in str(r.get("details_url") or "")
         and r.get("status") == "completed"
     ]
+    qualifier = ""
+    if admitted is not None:
+        prior = [
+            r
+            for r in prior
+            if run_of(r) in admitted
+            or (run_of(r) not in text_only and r.get("conclusion") != "success")
+        ]
+        qualifier = (
+            " from a run that executed the checks (a text-only run's verdict "
+            "carries nothing forward)"
+        )
     if not prior:
         raise NoStandingVerdict(
-            f"no COMPLETED `{check_name}` on this commit other than this run's "
-            f"own, so "
+            f"no COMPLETED `{check_name}` on this commit{qualifier} other than "
+            f"this run's own, so "
             f"there is no standing verdict for a text-only edit to carry "
             f"forward. Absence is not success."
         )
@@ -523,11 +541,12 @@ def standing_verdict(payload, run_id, check_name):
 # prior verdict, refused, and that red check run kept the commit rollup at
 # FAILURE after the full run went green.
 #
-# THE FIX WAITS, BOUNDED, AND DECIDES BY THE SAME RULE. On the absence
-# refusal ONLY, the gate looks for a SIBLING run on this commit that is still
-# checking it: another run of the same caller job (`ci / *`), on the same
-# `head_sha`, that has no completed `ci / passed` and is not a text-only run
-# itself. If one exists, it sleeps and asks `standing_verdict` again. Each
+# THE FIX WAITS, BOUNDED, AND DECIDES BY THE SAME RULE. The gate looks for a
+# SIBLING run on this commit that is still checking it: another run of the
+# same caller job (`ci / *`), on the same `head_sha`, that has no completed
+# `ci / passed` and is not a text-only run itself. If one exists, it sleeps
+# and asks `standing_verdict` again (yaadgaar 535: even when a verdict already
+# stands, because the newer run may overturn it). Each
 # answer it acts on is `standing_verdict`'s, unchanged, over the response as
 # it stood at that poll — so for any one response the gate passes only where
 # the shipped gate passes. What changes is WHEN it reads, which is what the
@@ -553,6 +572,23 @@ def standing_verdict(payload, run_id, check_name):
 # completed-`skipped` the moment `detect` finishes, about a second before
 # `precommit` is listed. A poll inside that second sees only skipped sentinels,
 # reads the sibling as text-only, and refuses at once — the shipped behaviour.
+#
+# ONLY A RUN THAT EXECUTED THE CHECKS SUPPLIES THE VERDICT (yaadgaar 535).
+# On yadgarhq/platform#74 a body edit's text-only run waited the bound for a
+# 12.5-minute full run and refused. The next body edit then read THAT refusal
+# as the standing `ci / passed` and refused at once, without waiting for the
+# full run, which went green. A text-only run checked nothing, so its
+# `ci / passed`, red or green, is never the verdict: `sibling_runs` admits a
+# run only when one of its sentinels completed with a conclusion other than
+# `skipped`. That proof is POSITIVE. A completed GREEN `ci / passed` whose run
+# lists no executed sentinel carries nothing. A RED one is dropped only on
+# positive text-only proof (`detect` concluded `success` and every sentinel
+# `skipped`); a run whose `detect` failed skips every sentinel too, and its red
+# stands. The verdict and the runs still checking come from ONE full listing
+# per poll, and a re-run attempt still checking is waited for. A race that
+# outlasts the bound still refuses; a red `passed` cannot be turned into a
+# pending or neutral one,
+# because GitHub accepts `neutral` as passing.
 #
 # THE PRODUCER EDITS FIRST (ADR-1033). `fan_out.py` now updates the pull
 # request's title and body BEFORE it moves the branch, so the `edited` run
@@ -630,63 +666,130 @@ def fetch_all_check_runs(fetch, repo, sha):
     )
 
 
-def pending_siblings(runs, run_id, sha, check_name, sentinels):
-    """Other runs of this caller job on `sha` that may yet bring a verdict."""
+def run_of(entry):
+    """The workflow run id in a check run's `details_url`, or None."""
+    m = _RUN_ID.search(str(entry.get("details_url") or ""))
+    return m.group(1) if m else None
+
+
+def sibling_runs(runs, run_id, sha, check_name, sentinels):
+    """Other runs of this caller job: (executed the checks, proven text-only, still checking `sha`).
+
+    YAADGAAR 535. A run is ADMITTED as a verdict source only on POSITIVE proof:
+    its `check_name` is completed AND at least one sentinel completed with a
+    conclusion other than `skipped`. A full run executes at least `precommit`.
+
+    A run is PROVEN TEXT-ONLY when its `detect` completed `success` and every
+    listed sentinel (at least one) completed `skipped`. Skipped sentinels alone
+    are no proof: a run whose `detect` FAILED skips every sentinel too, and its
+    red `check_name` must stand. Only a proven text-only run's red is dropped.
+
+    A run is PENDING when it has entries on `sha`, is not proven text-only, and
+    either has no completed `check_name` or still has an entry that is not
+    completed. The second case is a re-run attempt: it keeps the run id, and its
+    first attempt's `check_name` stays completed while the new attempt checks.
+    A run still in `detect` lists no sentinel yet and is pending.
+    """
     prefix = check_name.rpartition(" / ")[0] + " / "
+    detect = prefix + "detect"
     by_run = {}
     for r in runs:
         if not str(r.get("name") or "").startswith(prefix):
             continue
-        if r.get("head_sha") != sha:
+        rid = run_of(r)
+        if not rid or rid == str(run_id):
             continue
-        m = _RUN_ID.search(str(r.get("details_url") or ""))
-        if not m or m.group(1) == str(run_id):
-            continue
-        by_run.setdefault(m.group(1), []).append(r)
-    pending = []
-    # A sibling with a COMPLETED `check_name` needs no test here: the
-    # `standing_verdict` call that precedes this one would have returned it.
+        by_run.setdefault(rid, []).append(r)
+    admitted, text_only, pending = set(), set(), []
     for rid, entries in sorted(by_run.items()):
         marks = [r for r in entries if r.get("name") in sentinels]
-        text_only = marks and all(
+        done = any(
+            r.get("name") == check_name and r.get("status") == "completed" for r in entries
+        )
+        skipped_all = bool(marks) and all(
             r.get("status") == "completed" and r.get("conclusion") == "skipped"
             for r in marks
         )
-        if not text_only:
+        detected = any(
+            r.get("name") == detect
+            and r.get("status") == "completed"
+            and r.get("conclusion") == "success"
+            for r in entries
+        )
+        if skipped_all and detected:
+            text_only.add(rid)
+            continue
+        if done and any(
+            r.get("status") == "completed" and r.get("conclusion") != "skipped"
+            for r in marks
+        ):
+            admitted.add(rid)
+        on_sha = [r for r in entries if r.get("head_sha") == sha]
+        if not on_sha:
+            continue
+        if not done or any(r.get("status") != "completed" for r in on_sha):
             pending.append(rid)
-    return pending
+    return admitted, text_only, pending
 
 
 def await_standing_verdict(fetch, repo, sha, run_id, check_name, sentinels, budget, sleep, clock, log):
-    """`standing_verdict`, asked again while a sibling run is still checking `sha`."""
+    """`standing_verdict` over one snapshot of the commit, once no sibling is still checking `sha`.
+
+    YAADGAAR 535. Each poll reads the named listing, for its structural
+    refusals only, and then the full listing. The verdict, the admitted and
+    text-only runs and the pending runs all come from that ONE full listing, so
+    a sibling that finishes between two reads cannot be seen as finished in one
+    and unfinished in the other. While any sibling is still checking, the gate
+    waits, even over a verdict that already stands, because the newer run may
+    overturn it. At the bound it refuses. It never passes on a timeout.
+    """
+    if not sentinels:
+        raise Refused(
+            f"no sentinel job is known, so a run that executed the checks cannot "
+            f"be told from a text-only one and no `{check_name}` on {sha} can be "
+            f"carried forward."
+        )
     deadline = clock() + budget
     while True:
+        named = fetch(check_runs_url(repo, sha, check_name))
         try:
-            return standing_verdict(
-                fetch(check_runs_url(repo, sha, check_name)), run_id, check_name
+            # Structural refusals (no run id, a truncated response) first, and
+            # never waited on.
+            standing_verdict(named, run_id, check_name)
+        except NoStandingVerdict:
+            pass
+        listing = fetch_all_check_runs(fetch, repo, sha)
+        admitted, text_only, pending = sibling_runs(listing, run_id, sha, check_name, sentinels)
+        snapshot = [r for r in listing if r.get("name") == check_name]
+        absent = None
+        try:
+            latest = standing_verdict(
+                {"total_count": len(snapshot), "check_runs": snapshot},
+                run_id,
+                check_name,
+                admitted,
+                text_only,
             )
-        except NoStandingVerdict as absent:
-            if not sentinels:
-                raise
-            pending = pending_siblings(
-                fetch_all_check_runs(fetch, repo, sha), run_id, sha, check_name, sentinels
-            )
-            if not pending:
+        except NoStandingVerdict as exc:
+            absent = exc
+        if not pending:
+            if absent is not None:
                 raise Refused(
                     f"{absent} No other run on {sha} is still checking it either."
                 ) from None
-            remaining = deadline - clock()
-            if remaining <= 0:
-                raise Refused(
-                    f"{absent} Waited {budget}s for run(s) {', '.join(pending)} "
-                    f"on {sha}, and none concluded `{check_name}` inside the bound."
-                ) from None
-            log(
-                f"no standing `{check_name}` on {sha} yet; run(s) "
-                f"{', '.join(pending)} still checking it. Waiting "
-                f"{min(POLL_SECONDS, remaining):.0f}s ({remaining:.0f}s of the bound left)."
-            )
-            sleep(min(POLL_SECONDS, remaining))
+            return latest
+        remaining = deadline - clock()
+        if remaining <= 0:
+            lead = f"{absent} " if absent is not None else ""
+            raise Refused(
+                f"{lead}Waited {budget}s for run(s) {', '.join(pending)} on {sha}, "
+                f"and they are still checking it, so no verdict is carried forward."
+            ) from None
+        log(
+            f"run(s) {', '.join(pending)} still checking {sha}. Waiting "
+            f"{min(POLL_SECONDS, remaining):.0f}s ({remaining:.0f}s of the bound left)."
+        )
+        sleep(min(POLL_SECONDS, remaining))
 
 
 def make_text_edit_resolver(

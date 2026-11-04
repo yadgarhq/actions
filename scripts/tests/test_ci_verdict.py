@@ -945,11 +945,14 @@ def test_a_text_only_edit_carries_a_standing_green_verdict_forward():
     matrix for every body edit, which is the cost ledger 685 exists to avoid.
     """
     ctx = edited_needs()
-    ok, rows, urls = gate(ctx, payload(check_run("34007298356", "success")))
+    ok, rows, urls = gate(ctx, by_name(lambda: full_run("34007298356", "success")))
     assert ok, [r for r in rows if not r[4]]
     skipped = {r[0] for r in rows if not r[1]}
     assert skipped == set(SHORT_CIRCUITED)
-    assert len(urls) == 1, "the standing verdict is read once, not once per job"
+    # Yaadgaar 535: one named read and one full listing, which names the runs
+    # that executed the checks. Read once, not once per job.
+    assert len(urls) == 2, "the standing verdict is read once, not once per job"
+    assert len([u for u in urls if check_name_of(u) == "ci / passed"]) == 1
 
 
 def test_a_text_only_edit_cannot_turn_a_red_run_green():
@@ -962,7 +965,7 @@ def test_a_text_only_edit_cannot_turn_a_red_run_green():
     """
     ctx = edited_needs()
     with pytest.raises(ci_verdict.Refused) as exc:
-        gate(ctx, payload(check_run("34007298356", "failure")))
+        gate(ctx, by_name(lambda: full_run("34007298356", "failure")))
     assert "text-only edit" in str(exc.value)
     assert "'failure'" in str(exc.value)
     assert "editing the description cannot make a red run green" in str(exc.value)
@@ -979,7 +982,7 @@ def test_only_success_carries_forward(conclusion):
     """
     ctx = edited_needs()
     with pytest.raises(ci_verdict.Refused):
-        gate(ctx, payload(check_run("34007298356", conclusion)))
+        gate(ctx, by_name(lambda: full_run("34007298356", conclusion)))
 
 
 def test_absence_is_not_success():
@@ -1008,9 +1011,9 @@ def test_the_most_recent_verdict_decides_rather_than_the_best_one():
     with pytest.raises(ci_verdict.Refused) as exc:
         gate(
             ctx,
-            payload(
-                check_run("34007298356", "success", at="2026-09-06T02:46:12Z"),
-                check_run("34007360583", "failure", at="2026-09-06T02:47:18Z"),
+            by_name(
+                lambda: full_run("34007298356", "success", at="2026-09-06T02:46:12Z")
+                + full_run("34007360583", "failure", at="2026-09-06T02:47:18Z")
             ),
         )
     assert "'failure'" in str(exc.value)
@@ -1195,7 +1198,7 @@ def test_the_685_bypass_against_the_predicate_it_replaced(capsys):
     assert legacy_predicate(ctx, "pull_request") is True
 
     with pytest.raises(ci_verdict.Refused) as exc:
-        gate(ctx, payload(check_run("34007298356", "failure")))
+        gate(ctx, by_name(lambda: full_run("34007298356", "failure")))
 
     print("the matrix both predicates were given:")
     for job in GATED:
@@ -1677,7 +1680,7 @@ def test_a_full_sibling_that_finishes_red_is_refused():
     def runs():
         if clock.now < 60:
             return full_run_in_progress("34009444444")
-        return [check_run("34009444444", "failure")]
+        return full_run("34009444444", "failure")
 
     with pytest.raises(ci_verdict.Refused) as exc:
         gate(edited_needs(), by_name(runs), budget=1800, sleep=clock.sleep, clock=clock)
@@ -1699,7 +1702,7 @@ def test_a_sibling_still_in_detect_is_waited_for():
             return [job_run("34009555555", "detect", status="in_progress", conclusion=None)]
         if clock.now < 90:
             return full_run_in_progress("34009555555")
-        return [check_run("34009555555", "success")]
+        return full_run("34009555555", "success")
 
     ok, rows, _ = gate(edited_needs(), by_name(runs), budget=1800, sleep=clock.sleep, clock=clock)
     assert ok, [r for r in rows if not r[4]]
@@ -1723,10 +1726,9 @@ def test_a_run_on_another_commit_is_not_waited_for():
 
 def test_a_verdict_from_another_commit_is_never_carried():
     """A green `ci / passed` whose `head_sha` is not this commit carries nothing."""
-    foreign = check_run("34007298356", "success")
-    foreign["head_sha"] = "0" * 40
+    foreign = full_run("34007298356", "success", sha="0" * 40)
     with pytest.raises(ci_verdict.Refused) as exc:
-        gate(edited_needs(), payload(foreign))
+        gate(edited_needs(), by_name(lambda: foreign))
     assert "another commit" in str(exc.value)
 
 
@@ -1831,7 +1833,7 @@ def test_a_sentinel_not_completed_does_not_read_as_skipped():
                 job_run("34009131313", job, status="queued", conclusion="skipped")
                 for job in SHORT_CIRCUITED
             ]
-        return [check_run("34009131313", "success")]
+        return full_run("34009131313", "success")
 
     ok, rows, _ = gate(edited_needs(), by_name(runs), budget=600, sleep=clock.sleep, clock=clock)
     assert ok, [r for r in rows if not r[4]]
@@ -1867,7 +1869,7 @@ def test_a_full_sibling_between_its_last_job_and_its_passed_is_waited_for():
             return [job_run("34009121212", "detect")] + [
                 job_run("34009121212", job) for job in SHORT_CIRCUITED
             ]
-        return [check_run("34009121212", "success")]
+        return full_run("34009121212", "success")
 
     ok, rows, _ = gate(edited_needs(), by_name(runs), budget=1800, sleep=clock.sleep, clock=clock)
     assert ok, [r for r in rows if not r[4]]
@@ -1957,3 +1959,265 @@ def test_check_runs_token_is_not_forwarded_on_redirect(monkeypatch):
         req, None, 302, "Found", {}, "https://elsewhere.example/x")
     assert hop is not None
     assert hop.get_header("Authorization") is None
+
+
+# ---------------------------------------------------------------------------
+# Yaadgaar 535: only a run that executed the checks supplies the verdict
+# ---------------------------------------------------------------------------
+#
+# Seen on yadgarhq/platform#74 (head `c33996e`, 2026-11-02). The full run
+# 41487317873 took about 12.5 minutes to its `ci / passed`. A body edit's
+# text-only run 41487318626 waited the 600 s bound and refused. A second body
+# edit's text-only run 41488858433 then read THAT refusal as the standing
+# verdict and refused at once, without waiting for the full run, which later
+# concluded success. A text-only run checked nothing, so its `ci / passed`
+# carries nothing: the verdict that stands is the newest one from a run whose
+# sentinels show it executed the checks.
+
+FULL = "41487317873"
+EDIT_1 = "41487318626"
+
+
+def full_run(run_id, conclusion="success", at="2026-09-06T02:46:12Z", sha=SHA):
+    """A finished full run: its sentinels executed, its `ci / passed` concluded.
+
+    `test` and `proto` are `skipped`, as in any repository with no Rust and no
+    vendored contract, so "any sentinel skipped" cannot pass for "text-only".
+    """
+    runs = [job_run(run_id, "detect", sha=sha)]
+    for job in SHORT_CIRCUITED:
+        runs.append(
+            job_run(run_id, job, conclusion="skipped" if job in ("test", "proto") else "success", sha=sha)
+        )
+    passed = check_run(run_id, conclusion, at=at)
+    passed["head_sha"] = sha
+    return runs + [passed]
+
+
+def text_only_done(run_id, conclusion, at="2026-09-06T02:50:00Z", sha=SHA):
+    """A finished text-only run: every sentinel skipped, its `ci / passed` concluded."""
+    runs = text_only_run(run_id, sha=sha)[:-1]
+    passed = check_run(run_id, conclusion, at=at)
+    passed["head_sha"] = sha
+    return runs + [passed]
+
+
+def test_535_a_text_only_failure_does_not_stand_while_a_full_run_is_checking():
+    """(a) The platform#74 poisoning: the earlier edit's red is not the verdict.
+
+    Only another text-only run's FAILURE is completed, and the full run is
+    still checking. The gate waits for the full run and carries its green.
+    """
+    clock = Clock()
+
+    def runs():
+        mine = [check_run(OWN_RUN, None, status="in_progress")]
+        edit = text_only_done(EDIT_1, "failure")
+        if clock.now < 120:
+            return mine + edit + full_run_in_progress(FULL)
+        return mine + edit + full_run(FULL, "success", at="2026-09-06T03:00:00Z")
+
+    ok, rows, _ = gate(edited_needs(), by_name(runs), budget=600, sleep=clock.sleep, clock=clock)
+    assert ok, [r for r in rows if not r[4]]
+    assert clock.now >= 120, "the gate must have waited for the full run"
+
+
+def test_535_the_bound_reached_with_a_full_run_still_checking_refuses():
+    """(b) At the bound the gate refuses. It never passes, and never cites the edit's red."""
+    clock = Clock()
+
+    def runs():
+        return text_only_done(EDIT_1, "failure") + full_run_in_progress(FULL)
+
+    with pytest.raises(ci_verdict.Refused) as exc:
+        gate(edited_needs(), by_name(runs), budget=600, sleep=clock.sleep, clock=clock)
+    assert FULL in str(exc.value)
+    assert f"Waited 600s" in str(exc.value)
+    assert EDIT_1 not in str(exc.value)
+    assert clock.now == 600
+
+
+def test_535_a_full_run_failure_still_reddens_a_text_only_edit():
+    """(c) A full run's red stands, whatever text-only verdict is newer.
+
+    The laundering case: an earlier text-only run carried a green forward,
+    then a newer full run went red. The text-only green is newer than the red
+    and must not be read over it.
+    """
+    runs = (
+        full_run("34007298356", "success", at="2026-09-06T02:46:12Z")
+        + full_run("34007360583", "failure", at="2026-09-06T02:47:18Z")
+        + text_only_done(EDIT_1, "success", at="2026-09-06T02:49:00Z")
+    )
+    with pytest.raises(ci_verdict.Refused) as exc:
+        gate(edited_needs(), by_name(lambda: runs))
+    assert "'failure'" in str(exc.value)
+    assert "34007360583" in str(exc.value)
+
+
+def test_535_a_text_only_green_alone_carries_nothing():
+    """A text-only run's green with no full run behind it is no verdict."""
+    with pytest.raises(ci_verdict.Refused) as exc:
+        gate(edited_needs(), by_name(lambda: text_only_done(EDIT_1, "success")))
+    assert "Absence is not success" in str(exc.value)
+
+
+def test_535_a_verdict_with_no_executed_sentinel_carries_nothing():
+    """POSITIVE PROOF, not the absence of a text-only mark.
+
+    A completed green `ci / passed` whose run lists no sentinel check run at
+    all cannot be shown to have run the checks, so it supplies no verdict.
+    """
+    with pytest.raises(ci_verdict.Refused) as exc:
+        gate(edited_needs(), by_name(lambda: [check_run("34007298356", "success")]))
+    assert "Absence is not success" in str(exc.value)
+
+
+def test_535_a_newer_full_run_still_checking_is_waited_for_over_a_standing_green():
+    """A pending full run may overturn the green that stands, so it is waited for."""
+    clock = Clock()
+
+    def runs():
+        older = full_run("34007298356", "success", at="2026-09-06T02:46:12Z")
+        if clock.now < 60:
+            return older + full_run_in_progress("34009444444")
+        return older + full_run("34009444444", "failure", at="2026-09-06T03:00:00Z")
+
+    with pytest.raises(ci_verdict.Refused) as exc:
+        gate(edited_needs(), by_name(runs), budget=600, sleep=clock.sleep, clock=clock)
+    assert "'failure'" in str(exc.value)
+    assert clock.sleeps
+
+
+def test_535_no_sentinels_refuses_even_over_a_green_verdict():
+    """A gate that cannot tell a full run from a text-only one carries nothing."""
+    resolve = ci_verdict.make_text_edit_resolver(
+        needs=edited_needs(),
+        repo="yadgarhq/actions",
+        sha=SHA,
+        run_id=OWN_RUN,
+        check_name="ci / passed",
+        token="t",
+        fetch=by_name(lambda: full_run("34007298356", "success")),
+        sentinels=(),
+    )
+    with pytest.raises(ci_verdict.Refused):
+        resolve("x")
+
+
+def test_535_the_wait_bound_is_unchanged():
+    """ADR-1033's 600 s stays. A full run longer than it still reddens the racing edit.
+
+    This fix ends the poisoning of the NEXT edit; it does not lengthen the wait.
+    """
+    assert ci_verdict.DEFAULT_WAIT_SECONDS == 600
+
+
+# Review of actions#184: a red is dropped only on POSITIVE text-only proof, the
+# full listing is read before the named one, and a re-run is waited for.
+
+
+def detect_failed_run(run_id, at="2026-09-06T02:50:00Z", passed=True, sha=SHA):
+    """A run whose `detect` failed: every sentinel skipped, and its `passed` red.
+
+    It looks like a text-only run in its sentinels, but it checked nothing
+    because it broke, not because it was told to skip. Its red must stand.
+    """
+    runs = [job_run(run_id, "detect", conclusion="failure", sha=sha)]
+    runs += [job_run(run_id, job, conclusion="skipped", sha=sha) for job in SHORT_CIRCUITED]
+    if passed:
+        p = check_run(run_id, "failure", at=at)
+        p["head_sha"] = sha
+        runs.append(p)
+    return runs
+
+
+def test_535_a_detect_failure_red_is_not_dropped():
+    """A newer run whose `detect` failed decides, over an older full green.
+
+    Every sentinel skipped is NOT text-only proof on its own: a text-only run
+    also has `detect` concluded `success`. Without that, the red is unproven
+    and stands, as it did before yaadgaar 535.
+    """
+    runs = full_run("34007298356", "success", at="2026-09-06T02:46:12Z") + detect_failed_run(
+        "34009515151"
+    )
+    with pytest.raises(ci_verdict.Refused) as exc:
+        gate(edited_needs(), by_name(lambda: runs))
+    assert "'failure'" in str(exc.value)
+    assert "34009515151" in str(exc.value)
+
+
+def test_535_a_detect_failure_sibling_before_its_passed_is_waited_for():
+    """The same run, before its `passed` exists, is pending, not text-only."""
+    clock = Clock()
+
+    def runs():
+        older = full_run("34007298356", "success", at="2026-09-06T02:46:12Z")
+        return older + detect_failed_run("34009515151", passed=clock.now >= 30)
+
+    with pytest.raises(ci_verdict.Refused) as exc:
+        gate(edited_needs(), by_name(runs), budget=600, sleep=clock.sleep, clock=clock)
+    assert "'failure'" in str(exc.value)
+    assert clock.sleeps == [30]
+
+
+def test_535_the_bound_refuses_over_a_standing_green_while_a_newer_full_run_checks():
+    """At the bound the gate refuses even though an older green stands."""
+    clock = Clock()
+
+    def runs():
+        return full_run("34007298356", "success", at="2026-09-06T02:46:12Z") + full_run_in_progress(
+            "34009616161"
+        )
+
+    with pytest.raises(ci_verdict.Refused) as exc:
+        gate(edited_needs(), by_name(runs), budget=90, sleep=clock.sleep, clock=clock)
+    assert "34009616161" in str(exc.value)
+    assert "Waited 90s" in str(exc.value)
+    assert clock.now == 90
+
+
+def test_toctou_named_before_full():
+    """A sibling that finishes red between the two reads of one poll is not missed.
+
+    The world moves after the poll's FIRST read. If the named listing were read
+    first, it would show the sibling unfinished and the full listing would then
+    show it finished and admitted, so neither read would hold it back and the
+    older green would be returned. Reading the full listing first sees it
+    pending, and the next poll reads its red.
+    """
+    clock = Clock()
+    reads = []
+    older = full_run("34007298356", "success", at="2026-09-06T02:46:12Z")
+
+    def respond(url):
+        reads.append(url)
+        later = len(reads) > 1
+        runs = older + (
+            full_run("34009717171", "failure", at="2026-09-06T03:00:00Z")
+            if later
+            else full_run_in_progress("34009717171")
+        )
+        return by_name(lambda: runs)(url)
+
+    with pytest.raises(ci_verdict.Refused) as exc:
+        gate(edited_needs(), respond, budget=600, sleep=clock.sleep, clock=clock)
+    assert "'failure'" in str(exc.value)
+
+
+def test_535_a_rerun_attempt_of_an_admitted_run_is_waited_for():
+    """A re-run keeps its run id. Its new attempt still checking is pending."""
+    clock = Clock()
+
+    def runs():
+        first = full_run("34009818181", "success", at="2026-09-06T02:46:12Z")
+        if clock.now < 60:
+            again = job_run("34009818181", "precommit", status="in_progress", conclusion=None)
+            return first + [again]
+        return first + [check_run("34009818181", "failure", at="2026-09-06T03:00:00Z")]
+
+    with pytest.raises(ci_verdict.Refused) as exc:
+        gate(edited_needs(), by_name(runs), budget=600, sleep=clock.sleep, clock=clock)
+    assert "'failure'" in str(exc.value)
+    assert clock.sleeps
