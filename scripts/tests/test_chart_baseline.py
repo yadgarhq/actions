@@ -2289,6 +2289,114 @@ SINGLE_QUOTED_OVER_TWO_LINES = [
     "cfg: 'it''s\ntoggle: 1'\n", "cfg: '''a\ntoggle: 1'\n", "cfg: 'a\\''\ntoggle: 1'\n",
 ]
 
+# A flow `[` or `{` that does not close on its key's line (yaadgaar 638). Helm reads
+# the next line as part of the collection, AT ANY INDENT, so there is no top-level
+# `toggle`: cfg = ["a", {"toggle": 1}], {"a": 1, "toggle": 1} and ["a toggle: 1"],
+# measured 2026-11-04 on helm v4.3.0 and v3.18.4, identical. The shipped gate marked
+# `cfg` unmodelled, suppressed only the lines indented deeper than it, read `toggle:
+# 1]` as a key that is on, and judged the if branch: a FAIL-OPEN of the ADR-0601
+# grace floor.
+FLOW_OVER_TWO_LINES = ["cfg: [a,\ntoggle: 1]\n", "cfg: {a: 1,\ntoggle: 1}\n", "cfg: ['a\ntoggle: 1']\n"]
+
+# The same class, beyond the task's three shapes, each measured the same way: a
+# nested collection, a key under a parent, a continuation that IS indented (the
+# shipped gate exited 1 there, but for a reason unrelated to this one), the two
+# quote-end rules inside a flow, and a flow behind an anchor or a tag.
+FLOW_OVER_TWO_LINES_VARIANTS = [
+    "cfg: [a, [b,\ntoggle: 1]]\n",
+    "cfg: {a: [b,\ntoggle: 1]}\n",
+    "p:\n  cfg: [a,\ntoggle: 1]\n",
+    "cfg: [a,\n  toggle: 1]\n",
+    'cfg: ["a\ntoggle: 1"]\n',
+    "cfg: ['a\\', [b,\ntoggle: 1]]\n",
+    "cfg: ['it''s', [b,\ntoggle: 1]]\n",
+    'cfg: ["a\\\\", [b,\ntoggle: 1]]\n',
+    'cfg: ["a\\"", [b,\ntoggle: 1]]\n',
+    "cfg: &x [a,\ntoggle: 1]\n",
+    "cfg: !!seq [a,\ntoggle: 1]\n",
+]
+
+# A SEQUENCE ITEM that leaves a flow or a quoted scalar open onto a line indented
+# less than the item. The sequence branch suppressed only lines at the item's
+# indent or deeper, so `toggle: 1]` at indent 0 was read as a top-level key. Helm
+# reads it inside the item (measured, both helms): the same fail-open, closed here
+# by the same check.
+SEQUENCE_ITEM_OVER_TWO_LINES = [
+    "l:\n  - [a,\ntoggle: 1]\n",
+    "l:\n  - k: [a,\ntoggle: 1]\n",
+    "l:\n  - - [a,\ntoggle: 1]\n",
+    "l:\n  - 'a\ntoggle: 1'\n",
+    'l:\n  - "a\ntoggle: 1"\n',
+    "l:\n  - k: 'a\ntoggle: 1'\n",
+]
+
+# The same, where the open line sits INSIDE a suppressed region: a later item, a key
+# under an item, a key under an anchored mapping, or a sibling after a block scalar.
+# A check on the region's first line alone never saw these (measured, both helms).
+SUPPRESSED_OVER_TWO_LINES = [
+    "l:\n  - a\n  - [b,\ntoggle: 1]\n",
+    "l:\n  - name: x\n    args: [a,\ntoggle: 1]\n",
+    "l:\n  - name: x\n    v: 'a\ntoggle: 1'\n",
+    "cfg: &a\n  x: [a,\ntoggle: 1]\n",
+    "l:\n  - |\n    x\n  - [a,\ntoggle: 1]\n",
+    "cfg: &a\n  x: |\n    a [\n  y: [b,\ntoggle: 1]\n",
+]
+
+# Helm reads `  toggle: 1]` inside `j`, so there is no `a.toggle` (measured). The
+# chart tests guard on a top-level key, so this shape is in the unit view only.
+NESTED_SUPPRESSED_OVER_TWO_LINES = "a:\n  l:\n    - k: v\n      j: [b,\n  toggle: 1]\n"
+
+# Every shape above that the 35/29 toggle chart can carry.
+OPEN_OVER_TWO_LINES = (
+    FLOW_OVER_TWO_LINES + FLOW_OVER_TWO_LINES_VARIANTS + SEQUENCE_ITEM_OVER_TWO_LINES + SUPPRESSED_OVER_TWO_LINES
+)
+
+# Each of these closes on its own line, so the `toggle: 1` after it IS a top-level
+# key: Helm renders the if branch (measured, both helms). A bracket inside quotes
+# does not count, a `#` after a blank starts a comment, and the quote ends are
+# YAML's: `'a\\'` is "a\\", `"a\\\\"` is "a\\" and `"a\\"["` is 'a"['.
+CLOSED_ON_ITS_LINE = [
+    "cfg: [a, b]\n",
+    "cfg: {a: 1, b: [c, {d: e}]}\n",
+    "cfg: ['[', b]\n",
+    'cfg: ["{", b]\n',
+    "cfg: ['a\\', b]\n",
+    "cfg: ['it''s[', b]\n",
+    'cfg: ["a\\\\", b]\n',
+    'cfg: ["a\\"[", b]\n',
+    "cfg: [a, b] # [\n",
+    "cfg: [a#b]\n",
+    "cfg: [a: b]\n",
+    "cfg: []\n",
+    "cfg: &x [a]\n",
+    "cfg: !!seq [a]\n",
+    "l:\n  - [a, b]\n",
+    "l:\n  - 'a'\n",
+    "l:\n  - a [b\n",
+    "l:\n  - it's\n",
+    "l:\n  - k: [a]\n",
+    "l:\n  - k: 'it''s'\n",
+    'l:\n  - "a\\\\"\n',
+    "l:\n  - a\n  - [b, c]\n",
+    "l:\n  - name: x\n    args: [a, b]\n    v: 'it''s'\n",
+    "cfg: &a\n  x: [a]\n",
+    # A block scalar's content is text: an open bracket or a lone quote in it is not
+    # a flow or a quote.
+    "cfg: |\n  a [\n",
+    "cfg: >-\n  a {\n  it's\n",
+    "cfg: &a |\n  a [\n",
+    "l:\n  - |\n    echo [\n",
+    "l:\n  - k: |\n      a [\n",
+    "cfg: |\n  [a\n",
+    "cfg: &a |\n  'a\n",
+    "l:\n  - |\n    'echo\n",
+    "l:\n  - k: >\n      {a\n",
+]
+
+# Helm ACCEPTS these and they close on their line, but a quote that does not start
+# a node inside a flow is not modelled, so the gate refuses the file: fail-closed.
+FLOW_QUOTE_NOT_MODELLED = ["cfg: [it's, b]\ntoggle: 1\n", "cfg: [a:'b, c]\ntoggle: 1\n"]
+
 # Whole values files Helm refuses, which the gate must refuse too. Text after a
 # closing quote is a Helm error ("did not find expected key"), and so is a quote
 # that never closes.
@@ -2304,7 +2412,9 @@ HELM_REFUSED_FILES = [row for c in UNICODE_SPACES for row in (
 # `toggle: 1"` is cfg = "a toggle: 1", and no `toggle` key at all (measured).
 HELM_ACCEPTS_UNMODELLED_FILES = [f"{c}x: 0\n" for c in UNICODE_SPACES] + [
     'cfg: "a\ntoggle: 1"\n', "cfg: 'a\ntoggle: 1'\n", 'p:\n  cfg: "a\n  toggle: 1"\n',
-] + SINGLE_QUOTED_OVER_TWO_LINES + ["p:\n  cfg: 'it''s\n  toggle: 1'\n"]
+] + SINGLE_QUOTED_OVER_TWO_LINES + ["p:\n  cfg: 'it''s\n  toggle: 1'\n"] + (
+    OPEN_OVER_TWO_LINES
+) + FLOW_QUOTE_NOT_MODELLED + [NESTED_SUPPRESSED_OVER_TWO_LINES]
 
 # Helm refuses each of these files ("did not find expected ',' or ']'" and kin). The
 # gate reads the key as unmodelled and must SUPPRESS the lines under it, or the
@@ -2509,6 +2619,57 @@ def test_a_quoted_scalar_over_two_lines_refuses_the_file(tmp_path):
         result = run(root)
         assert result.returncode == 1, (repr(lines), result.stdout)
         assert "continues onto the next line" in result.stdout, result.stdout
+
+
+def test_a_flow_over_two_lines_refuses_the_file(tmp_path):
+    """RED on 4e746aa, a FAIL-OPEN (yaadgaar 638): Helm reads `cfg: [a,` + `toggle:
+    1]` as one collection and renders the 29s else branch; the gate read `toggle: 1]`
+    as a key that is on and judged the 35s if branch. The indented variant exited 1
+    on 4e746aa for an unrelated reason, so the reason is asserted too."""
+    shapes = OPEN_OVER_TWO_LINES
+    for index, lines in enumerate(shapes):
+        root = tmp_path / f"f{index}"
+        root.mkdir()
+        write_chart(root, **no_toggle_but(lines, 35, 29))
+        result = run(root)
+        assert result.returncode == 1, (repr(lines), result.stdout)
+        assert "continues onto the next line" in result.stdout, (repr(lines), result.stdout)
+
+
+def test_a_flow_over_two_lines_names_its_reason():
+    """The unit view: the whole file is refused, with a reason that names the shape."""
+    gate = gate_module()
+    for text in OPEN_OVER_TWO_LINES:
+        values = gate.scan_values(text)
+        assert not values.modelled, (text, values.scalars)
+        assert "continues onto the next line" in values.reason, (text, values.reason)
+    reason = gate.scan_values("cfg: [a,\ntoggle: 1]\n").reason
+    assert "a flow collection that continues onto the next line" in reason, reason
+    reason = gate.scan_values("cfg: {a: 1,\ntoggle: 1}\n").reason
+    assert "a flow collection that continues onto the next line" in reason, reason
+    reason = gate.scan_values("cfg: ['a\ntoggle: 1']\n").reason
+    assert "a quoted scalar that continues onto the next line" in reason, reason
+    for text in FLOW_QUOTE_NOT_MODELLED:
+        reason = gate.scan_values(text).reason
+        assert "a quote inside a flow collection" in reason, (text, reason)
+
+
+def test_a_flow_closed_on_its_line_does_not_hide_the_next_key(tmp_path):
+    """A CHARACTERIZATION test: it passes on 4e746aa. It pins that the fix refuses
+    only an open line. Each line closes, so `toggle: 1` IS a key, and the gate must
+    judge the if branch: a 29s if branch is refused and a 35s one passes."""
+    gate = gate_module()
+    for lines in CLOSED_ON_ITS_LINE:
+        values = gate.scan_values(f"{lines}toggle: 1\n")
+        assert values.modelled, (lines, values.reason)
+        assert values.truth("toggle") == gate.GUARD_ON, (lines, values.scalars)
+    for index, lines in enumerate(CLOSED_ON_ITS_LINE):
+        for if_branch, else_branch, code in ((29, 35, 1), (35, 29, 0)):
+            root = tmp_path / f"c{index}-{if_branch}"
+            root.mkdir()
+            write_chart(root, **no_toggle_but(f"{lines}toggle: 1\n", if_branch, else_branch))
+            result = run(root)
+            assert result.returncode == code, (repr(lines), if_branch, result.stdout)
 
 
 def test_a_single_quoted_scalar_ends_where_yaml_ends_it():

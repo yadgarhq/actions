@@ -408,6 +408,161 @@ def end_of_single_quoted_scalar(text: str) -> int:
         index = end + 2
 
 
+def end_of_double_quoted_scalar(text: str) -> int:
+    """The index of the quote closing the double-quoted scalar at `text[0]`, or -1.
+
+    YAML's rule (yaadgaar 638): a backslash escapes the ONE character after it, so
+    `"a\\\\"` is closed, by its last quote. `end_of_quoted_scalar` is the canonical
+    form for a Go template string and for the double-quoted values this file already
+    reads (ADR-0679), and it is not copied here: it takes the closing quote of
+    `"a\\\\"` for an escaped one. That reading only over-refuses a one-line value,
+    but inside a flow collection it would hide every bracket after the quote, and a
+    hidden `[` is a collection read as closed.
+    """
+    index = 1
+    while index < len(text):
+        if text[index] == "\\":
+            index += 2
+            continue
+        if text[index] == '"':
+            return index
+        index += 1
+    return -1
+
+
+FLOW_LEFT_OPEN = "a flow collection that continues onto the next line"
+QUOTE_LEFT_OPEN = "a quoted scalar that continues onto the next line"
+FLOW_QUOTE_UNMODELLED = "a quote inside a flow collection that does not start a value"
+FLOW_UNMODELLED = "a flow collection this scanner does not model"
+
+
+def plain_end(text: str, index: int, flow: bool) -> int:
+    """Where the plain scalar starting at `text[index]` ends: at `: `, a `:` at the
+    end of the line, ` #`, and inside a flow also at `,[]{}` and a `:` before one."""
+    while index < len(text):
+        char = text[index]
+        after = text[index + 1 : index + 2]
+        if char == ":" and (after == "" or after in YAML_BLANKS or (flow and after in ",[]{}")):
+            return index
+        if char in YAML_BLANKS and after == "#":
+            return index
+        if flow and char in ",[]{}":
+            return index
+        index += 1
+    return index
+
+
+def scan_line(text: str) -> tuple:
+    """(why the node in `text` continues past its line or "", whether it opens a block scalar).
+
+    `text` is a key's value, a whole sequence item from its `-`, or a whole line
+    inside a region the scan suppresses. Helm reads a flow collection that does not
+    close on its line ON INTO THE NEXT ONE, at any indent, so `cfg: [a,` + `toggle:
+    1]` has no top-level `toggle` (measured, yaadgaar 638). The line scan cannot
+    follow it there, so the caller refuses the whole file. The second answer is True
+    when the line ends in a block scalar header, `|` or `>`, so the caller can skip
+    its content, which is text.
+
+    The brackets are counted outside quotes, by YAML's quote ends. A quote opens a
+    scalar only where a value starts: at the start, after `[`, `{`, `,`, after a `:`
+    that is an indicator, or after an anchor or a tag. ANY OTHER QUOTE INSIDE A FLOW
+    is refused rather than read, and so is any other construct this does not model
+    inside one (an alias, a property, `?`, `-`): each is a place where a wrong guess
+    would hide a bracket, and a hidden `[` is a collection read as closed. Outside a
+    flow a plain scalar may hold brackets and quotes; YAML reads them as text.
+    """
+    depth = 0
+    at_value = True
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char in YAML_BLANKS:
+            index += 1
+            continue
+        if char == "#" and (index == 0 or text[index - 1] in YAML_BLANKS or text[index - 1] in "'\""):
+            # A `#` after a blank starts a comment, and so does one directly after a
+            # CLOSING quote: Helm reads `'a'#c` as `a` (measured, yaadgaar 634). A
+            # quote before `#` here always closes a scalar, since an opening one is
+            # consumed with its scalar below.
+            break
+        if not at_value:
+            if char == ":" and depth == 0:
+                if text[index + 1 : index + 2] not in ("", " ", "\t"):
+                    return FLOW_UNMODELLED, False
+                at_value = True
+            elif depth == 0:
+                return FLOW_UNMODELLED, False
+            elif char == ",":
+                at_value = True
+            elif char in "]}":
+                depth -= 1
+            elif char == ":":
+                if text[index + 1 : index + 2] not in ("", " ", "\t", ",", "]", "}", "[", "{"):
+                    return FLOW_UNMODELLED, False
+                at_value = True
+            else:
+                return FLOW_UNMODELLED, False
+            index += 1
+            continue
+        if char in "'\"":
+            ends = end_of_single_quoted_scalar if char == "'" else end_of_double_quoted_scalar
+            end = ends(text[index:])
+            if end == -1:
+                return QUOTE_LEFT_OPEN, False
+            index += end + 1
+            at_value = False
+            continue
+        if char in "[{":
+            depth += 1
+            index += 1
+            continue
+        if depth == 0:
+            if char == "-" and text[index + 1 : index + 2] in ("", " ", "\t"):
+                # A sequence item, which opens a value of its own.
+                index += 1
+                continue
+            if char in "&!":
+                # An anchor or a tag: the value follows it after a blank.
+                end = index
+                while end < len(text) and text[end] not in YAML_BLANKS:
+                    end += 1
+                if any(c in ",[]{}'\"" for c in text[index:end]):
+                    return FLOW_UNMODELLED, False
+                index = end
+                continue
+            if char in "|>":
+                # A block scalar header. Its content is the lines indented deeper
+                # than this one, and they are text, never a flow or a quote.
+                return "", True
+            if char == "*":
+                # An alias: nothing on this line opens.
+                break
+            if char in ",]}?%@`":
+                return FLOW_UNMODELLED, False
+            end = plain_end(text, index, flow=False)
+            if end < len(text) and text[end] == ":":
+                index = end + 1
+                continue
+            break
+        if char in "]}":
+            # `[]` and a trailing comma close with nothing in them.
+            depth -= 1
+            at_value = False
+            index += 1
+            continue
+        if char in ",&!*?%@`|>" or (char == "-" and text[index + 1 : index + 2] in ("", " ", "\t")):
+            return FLOW_UNMODELLED, False
+        end = plain_end(text, index, flow=True)
+        if end == index:
+            # `[: a]`: an empty key, which this does not model.
+            return FLOW_UNMODELLED, False
+        if any(c in "'\"" for c in text[index:end]):
+            return FLOW_QUOTE_UNMODELLED, False
+        index = end
+        at_value = False
+    return (FLOW_LEFT_OPEN if depth > 0 else ""), False
+
+
 def unicode_space(char: str) -> bool:
     """Whether `str.isspace()` calls `char` whitespace and YAML keeps it in a scalar.
 
@@ -512,6 +667,9 @@ def scan_values(text: str) -> Values:
     scalars: dict = {}
     stack: list = []
     suppress_from = None
+    # The indent of the line whose block scalar header (`|`, `>`) opened the content
+    # below it. Lines indented deeper than it are text and are not checked.
+    block_from = None
     seen_content = False
     # Every path written with a colon and no value on the line, and every path some
     # deeper entry proved to be a parent. A key in both is a non-empty mapping; a key
@@ -541,13 +699,30 @@ def scan_values(text: str) -> Values:
             return Values({}, False, "a YAML directive")
         if suppress_from is not None:
             if indent >= suppress_from:
+                # NOT READ, BUT STILL CHECKED (yaadgaar 638). A later item, or a key
+                # under an item, that leaves a flow or a quote open is read by Helm on
+                # into a line this region does not cover: `  - a` + `  - [b,` +
+                # `toggle: 1]` has no top-level `toggle`.
+                if block_from is not None and indent > block_from:
+                    continue
+                open_reason, block = scan_line(body)
+                if open_reason:
+                    return Values({}, False, f"{open_reason}: {line!r}")
+                block_from = indent if block else None
                 continue
             suppress_from = None
+        block_from = None
         seen_content = True
 
         if body.startswith("-"):
             # A sequence item. Its parent is a sequence rather than a scalar, and
             # this scanner does not descend into one.
+            open_reason, block = scan_line(body)
+            if open_reason:
+                # `  - [a,` + `toggle: 1]`: Helm reads the less-indented line inside
+                # the item, and the suppression below would not cover it (yaadgaar 638).
+                return Values({}, False, f"{open_reason}: {line!r}")
+            block_from = indent if block else None
             while stack and stack[-1][0] >= indent:
                 stack.pop()
             if stack:
@@ -613,12 +788,23 @@ def scan_values(text: str) -> Values:
             # `''` escape, `'it''s'`, which this scan does not model. SUPPRESSED like
             # the indicator branch below: `cfg: [<NBSP>` opens a flow collection whose
             # next line must not be read as a key.
+            # Both suppressing branches cover only the lines indented deeper than
+            # the key, and Helm reads a flow that does not close here on into the
+            # next line at ANY indent (yaadgaar 638): refuse the file instead.
+            open_reason, block = scan_line(rest.strip(YAML_BLANKS))
+            if open_reason:
+                return Values({}, False, f"{open_reason}: {line!r}")
+            block_from = indent if block else None
             scalars[path] = NOT_MODELLED
             parents.update(ancestors(path))
             suppress_from = indent + 1
             continue
         if value[0] in "{[|>&*!":
             # A flow collection, a block scalar, an anchor, an alias or a tag.
+            open_reason, block = scan_line(rest.strip(YAML_BLANKS))
+            if open_reason:
+                return Values({}, False, f"{open_reason}: {line!r}")
+            block_from = indent if block else None
             scalars[path] = NOT_MODELLED
             parents.update(ancestors(path))
             suppress_from = indent + 1
