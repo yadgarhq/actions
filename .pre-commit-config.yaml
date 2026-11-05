@@ -8,7 +8,9 @@ repos:
       - id: mixed-line-ending
         args: [--fix=lf]
       - id: check-merge-conflict
+        args: [--assume-in-merge]
       - id: check-added-large-files
+        args: [--enforce-all]
       - id: check-yaml
         args: [--allow-multiple-documents]
   # LEDGER 647. This repository ships shell to every other one — hooks/*.sh runs
