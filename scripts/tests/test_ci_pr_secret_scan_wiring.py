@@ -38,7 +38,7 @@ if [ "$UNDER_REVIEW" != "yadgarhq/actions" ]; then
 fi
 cp "$src" "$RUNNER_TEMP/secret_scan.py"
 rm -rf .ci-actions
-python3 "$RUNNER_TEMP/secret_scan.py"
+python3 -E -s "$RUNNER_TEMP/secret_scan.py"
 """
 
 
@@ -63,7 +63,7 @@ def test_the_precommit_job_runs_the_secret_scan():
     run = step["run"]
     assert f"src={SCRIPT}" in run
     assert f"src=.ci-actions/{SCRIPT}" in run
-    assert 'python3 "$RUNNER_TEMP/secret_scan.py"' in run
+    assert 'python3 -E -s "$RUNNER_TEMP/secret_scan.py"' in run
 
 
 def test_the_scan_run_is_exactly_the_reviewed_script():
@@ -96,9 +96,10 @@ def test_base_and_head_arrive_through_env_and_are_not_swapped():
 
 
 def test_nothing_else_reaches_the_scan_environment():
-    """`BASH_ENV` runs a file before the script, and `PYTHONPATH` can shadow a
-    module the scan imports (it runs without `-I`, #653). The step's env holds
-    exactly the three inputs, and no job or workflow `env` exists to add more."""
+    """`BASH_ENV` runs a file before the script. The scan runs with `-E -s`
+    (#653), so `PYTHONPATH` cannot shadow a module it imports. The step's env
+    still holds exactly the three inputs, and no job or workflow `env` exists to
+    add more."""
     assert set(scan_step()["env"]) == {"BASE_SHA", "HEAD_SHA", "UNDER_REVIEW"}
     assert "env" not in job()
     assert "env" not in yaml.safe_load(WORKFLOW.read_text())
