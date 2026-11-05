@@ -477,8 +477,9 @@ def pytest_in_parent(budget: Budget, *arguments: str) -> subprocess.CompletedPro
     """`python3 -m pytest <PYTEST_ISOLATION> scripts/tests/ <arguments>` in the
     parent checkout's root, the command yadgarhq/chart's own CI runs (`ci.yaml`).
 
-    `PYTHONPATH` is dropped (the workflow points it at the staged gate, whose
-    module names must not shadow the parent's own), and so is every `PYTEST_*`
+    `PYTHONPATH` is dropped (the workflow sets none since yaadgaar 655, but one
+    pointing at the staged gate would let its module names shadow the
+    parent's own; the child runs without `-E`), and so is every `PYTEST_*`
     variable (`PYTEST_ADDOPTS`, `PYTEST_PLUGINS`). Any failure to RUN -- no
     interpreter, no pytest, the budget spent -- comes back as a non-zero
     result, never an exception: nothing run is never a pass.

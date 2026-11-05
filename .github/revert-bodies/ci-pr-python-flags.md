@@ -20,8 +20,12 @@
 
   TESTS THE REVERT EDITS. A plain `git revert` already carries these. If
   `ci-pr.yaml` moved and you revert BY HAND, edit each one as well:
-    - delete `scripts/tests/test_ci_pr_python_flags.py`, which asserts the
-      flags on every call;
+    - `scripts/tests/test_ci_pr_python_flags.py`, which asserts the flags on
+      every call: since yaadgaar 655 it also reads `ci-release.yaml` and
+      `sweep.yaml`, so do not delete it. Drop `ci-pr.yaml` from `MIN_SITES`
+      and delete the mutant tests that load `ci-pr.yaml`. Delete the whole
+      file only if `.github/revert-bodies/ci-python-flags-655.md` is applied
+      too;
     - `scripts/tests/test_ci_pr_secret_scan_wiring.py`: `EXPECTED_RUN` and the
       substring in `test_the_precommit_job_runs_the_secret_scan` return to
       `python3 "$RUNNER_TEMP/secret_scan.py"`;

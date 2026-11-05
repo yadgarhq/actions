@@ -119,7 +119,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$UNDER_REVIEW" = "yadgarhq/actions" ]; then dir=.; else dir=.ci-versions; fi
-          python3 "$dir/scripts/tool_versions.py" "$dir/versions.yaml" > "$RUNNER_TEMP/versions.txt"
+          python3 -E -s "$dir/scripts/tool_versions.py" "$dir/versions.yaml" > "$RUNNER_TEMP/versions.txt"
           cat "$RUNNER_TEMP/versions.txt" >> "$GITHUB_OUTPUT"
           {
             echo "## Tool versions (versions.yaml)"
@@ -725,7 +725,7 @@ jobs:
           # The same shape `ci-pr.yaml`'s merge-gate step uses, for the same
           # reason.
           rc=0
-          python3 "$RUNNER_TEMP/chart_publicly_pullable.py" \
+          python3 -E -s "$RUNNER_TEMP/chart_publicly_pullable.py" \
             >"$RUNNER_TEMP/chart-pull.txt" 2>"$RUNNER_TEMP/chart-pull.err" || rc=$?
           cat "$RUNNER_TEMP/chart-pull.txt"
           cat "$RUNNER_TEMP/chart-pull.err" >&2
@@ -983,7 +983,7 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          python3 scripts/parent_bump.py
+          python3 -E -s scripts/parent_bump.py
 
   # ADR-0820'S OTHER HALF: THE EXAMPLES THIS TAG SHIPS PIN SOMETHING PULLABLE.
   # The commit tagged `vN` has examples pinning `vN` (`scripts/example_pins.py`,
@@ -1045,7 +1045,7 @@ jobs:
           else
             dir=.ci-actions/scripts
           fi
-          python3 "$dir/example_published.py"
+          python3 -E -s "$dir/example_published.py"
 
   # C7 OF plans/auto-deploy-parent-chart.md: THE NUDGE (ADR-0946, ADR-0948 R3-a,
   # ADR-1004). When the PARENT chart publishes, tell `yadgarhq/argocd` so its

@@ -681,9 +681,10 @@ def test_the_parent_suite_is_not_run_when_a_render_already_refused(tmp_path):
 
 
 def test_the_parent_suite_does_not_inherit_the_gates_pythonpath(tmp_path):
-    """The workflow sets PYTHONPATH to the directory holding the staged gate
-    (`pre_pin_parent.py`, `repin.py`, ...); a parent test module of the same
-    name must not be shadowed by it."""
+    """A PYTHONPATH in the gate's environment (the workflow set one to the
+    directory holding the staged gate, `pre_pin_parent.py`, `repin.py`, ...,
+    until yaadgaar 655) must not reach the parent suite, where a parent test
+    module of the same name would be shadowed by it."""
     root = repository(tmp_path)
     onboarded_with(root, "import os\n\ndef test_no_pythonpath():\n    assert not os.environ.get('PYTHONPATH')\n")
     result, _ = run(root)
