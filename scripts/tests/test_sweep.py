@@ -1393,7 +1393,7 @@ def test_the_workflow_takes_a_wait_input_and_waits_before_it_evaluates():
     names = [s.get("id") for s in steps("wait")]
     step = steps("wait")[names.index("wait")]
     assert step["env"]["WAIT_MINUTES"] == "${{ inputs.wait_minutes }}"
-    assert step["run"].strip() == 'python3 scripts/sweep.py wait --owner "$OWNER"'
+    assert step["run"].strip() == 'python3 -E -s scripts/sweep.py wait --owner "$OWNER"'
     assert "wait" not in [s.get("id") for s in steps("evaluate")]
     # The input reaches the shell through env only, never templated into a run block.
     for job in wf["jobs"].values():
@@ -2640,7 +2640,7 @@ def test_the_follow_up_job_only_dispatches_this_workflow_live_after_act():
                              "FOLLOW_UP": "${{ needs.evaluate.outputs.follow_up }}",
                              "RERUNS": "${{ needs.evaluate.outputs.reruns }}",
                              "NEXT_HOP": "${{ needs.evaluate.outputs.next_hop }}"}
-    assert decide["run"] == 'python3 scripts/sweep.py follow-up --owner "$OWNER"'
+    assert decide["run"] == 'python3 -E -s scripts/sweep.py follow-up --owner "$OWNER"'
     assert "uses" not in step
     assert step["if"] == "steps.decide.outputs.minutes != ''"
     assert step["env"] == {"GH_TOKEN": "${{ github.token }}", "REPO": "${{ github.repository }}",

@@ -2357,8 +2357,6 @@ jobs:
           echo "pre-pin-parent gate staged from \`$src\`." >> "$GITHUB_STEP_SUMMARY"
 
       - name: this chart would still render and lint in yadgarhq/chart main, pinned at its own version
-        env:
-          PYTHONPATH: ${{ runner.temp }}
         run: |
           set -euo pipefail
           PARENT_SHA="$(git -C .pre-pin-parent rev-parse HEAD)"
