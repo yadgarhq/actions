@@ -204,7 +204,7 @@ jobs:
           # The repository NAME decides, never the presence of the file, so no
           # repository under review can supply its own versions.
           if [ "$UNDER_REVIEW" = "yadgarhq/actions" ]; then dir=.; else dir=.ci-versions; fi
-          python3 "$dir/scripts/tool_versions.py" "$dir/versions.yaml" > "$RUNNER_TEMP/versions.txt"
+          python3 -E -s "$dir/scripts/tool_versions.py" "$dir/versions.yaml" > "$RUNNER_TEMP/versions.txt"
           cat "$RUNNER_TEMP/versions.txt" >> "$GITHUB_OUTPUT"
           {
             echo "## Tool versions (versions.yaml)"
@@ -225,7 +225,7 @@ jobs:
         run: |
           set -uo pipefail
           if [ "$UNDER_REVIEW" = "yadgarhq/actions" ]; then dir=.; else dir=.ci-versions; fi
-          if python3 "$dir/scripts/config_only.py" >"$RUNNER_TEMP/config_only.txt" 2>"$RUNNER_TEMP/config_only.why"; then
+          if python3 -E -s "$dir/scripts/config_only.py" >"$RUNNER_TEMP/config_only.txt" 2>"$RUNNER_TEMP/config_only.why"; then
             cat "$RUNNER_TEMP/config_only.txt" >> "$GITHUB_OUTPUT"
           else
             echo "config_only=false" >> "$GITHUB_OUTPUT"
@@ -402,7 +402,7 @@ jobs:
           fi
           cp "$src" "$RUNNER_TEMP/secret_scan.py"
           rm -rf .ci-actions
-          python3 "$RUNNER_TEMP/secret_scan.py"
+          python3 -E -s "$RUNNER_TEMP/secret_scan.py"
 
       - name: install hadolint
         env:
@@ -750,7 +750,7 @@ jobs:
       # so nothing here needs to ask `needs.detect.outputs.chart` a second
       # time.
       - name: trivy renders what it scans (ledger 1150)
-        run: python3 "$RUNNER_TEMP/trivy_gate.py"
+        run: python3 -E -s "$RUNNER_TEMP/trivy_gate.py"
 
   # The template is checked, not suggested. A template nobody fills in is a
   # template that does not exist, and nothing else would notice.
@@ -859,7 +859,7 @@ jobs:
             echo "::error::the body gate is missing at $dir/pr_body.py"
             exit 1
           fi
-          python3 "$dir/pr_body.py"
+          python3 -E -s "$dir/pr_body.py"
 
   # YAADGAAR 324 / ADR-1076: RELEASE READINESS, BEFORE THE MERGE. The `version`
   # job runs only after a merge, so a baseline it cannot count from is found
@@ -943,7 +943,7 @@ jobs:
             echo "::error::the readiness check is missing at $dir/next_version.py"
             exit 1
           fi
-          python3 "$dir/next_version.py" --pr
+          python3 -E -s "$dir/next_version.py" --pr
 
   # YAADGAAR 231 / ADR-0983 STEP 2: A HOOK-ASSERTED TOOL MOVES ONLY AFTER EVERY
   # CONSUMER ACCEPTS IT. `hooks/tool_version.py` checks the binary against
@@ -980,7 +980,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           OWNER: ${{ github.repository_owner }}
-        run: python3 scripts/hook_tools_adopted.py --owner "$OWNER"
+        run: python3 -E -s scripts/hook_tools_adopted.py --owner "$OWNER"
 
   # YAADGAAR 260. REPORT ONLY, and deliberately NOT in `passed.needs`: the
   # `complexity` hook is the gate and already runs in `precommit`. This job
@@ -1071,7 +1071,7 @@ jobs:
           fi
           # The exit status is the gate's own; it is printed, never acted on.
           set +e
-          out=$(python3 "$RUNNER_TEMP/complexity.py" --report "${files[@]}")
+          out=$(python3 -E -s "$RUNNER_TEMP/complexity.py" --report "${files[@]}")
           rc=$?
           set -e
           {
@@ -1164,7 +1164,7 @@ jobs:
           if [ -n "$PREVIOUS" ] && [ "${#parents[@]}" -eq 3 ] && [ "${parents[2]}" = "$HEAD_SHA" ]; then
             base="${parents[1]}"
           fi
-          python3 "$RUNNER_TEMP/rust_version.py" check --version "$RUST" --mode fail \
+          python3 -E -s "$RUNNER_TEMP/rust_version.py" check --version "$RUST" --mode fail \
             --previous "$PREVIOUS" --base "$base"
 
   # A REAL ENGINE, not a mock. D69's capability probe establishes what an engine
@@ -1397,7 +1397,7 @@ jobs:
           # stdout alone removes the interleave surface entirely; stderr still
           # reaches the job log, and `pipefail` still carries cargo's status.
           cargo test --all-features | tee "$RUNNER_TEMP/all-features.txt"
-          python3 "$RUNNER_TEMP/no_test_skips.py" \
+          python3 -E -s "$RUNNER_TEMP/no_test_skips.py" \
             --audit-cargo "$RUNNER_TEMP/all-features.txt" 2>&1 \
             | tee -a "$GITHUB_STEP_SUMMARY"
 
@@ -1462,7 +1462,7 @@ jobs:
           # Audited too, and only inside this arm: the skip arm above exits 0
           # before any test runs, where an audit demanding a `test result:` line
           # would refuse a repository that correctly has nothing to measure.
-          python3 "$RUNNER_TEMP/no_test_skips.py" \
+          python3 -E -s "$RUNNER_TEMP/no_test_skips.py" \
             --audit-cargo "$RUNNER_TEMP/feature-off.txt" 2>&1 \
             | tee -a "$GITHUB_STEP_SUMMARY"
 
@@ -1847,7 +1847,7 @@ jobs:
             echo "::error::the proto pin report is missing at $dir/proto_pin_report.py"
             exit 1
           fi
-          python3 "$dir/proto_pin_report.py"
+          python3 -E -s "$dir/proto_pin_report.py"
 
   # D80 IS AN INVARIANT, and until now it was held by review — the weak form,
   # which the decision record says out loud rather than claiming a gate it did
@@ -2020,7 +2020,7 @@ jobs:
           # Through the environment, never `${{ }}` inside the script — the
           # habit zizmor audits for, kept even where the value is trustworthy.
           D80_REPO: ${{ github.repository }}
-        run: python3 "$RUNNER_TEMP/d80_portability.py"
+        run: python3 -E -s "$RUNNER_TEMP/d80_portability.py"
 
   # A CHART CHANGE ARGO CD CANNOT APPLY TO A LIVE Service IS NAMED BEFORE THE
   # MERGE (ledger 735). `scripts/service_immutable.py` carries the whole
@@ -2175,7 +2175,7 @@ jobs:
           # is the procedure in its refusal, so that text has to reach the place
           # a reviewer looks.
           rc=0
-          python3 "$RUNNER_TEMP/service_immutable.py" >"$RUNNER_TEMP/svc.txt" 2>&1 || rc=$?
+          python3 -E -s "$RUNNER_TEMP/service_immutable.py" >"$RUNNER_TEMP/svc.txt" 2>&1 || rc=$?
           cat "$RUNNER_TEMP/svc.txt"
           {
             echo "## Service fields the apiserver refuses to update"
@@ -2368,7 +2368,7 @@ jobs:
           # K-8 order explanation in its refusal, so that text has to reach
           # the place a reviewer looks.
           rc=0
-          python3 "$RUNNER_TEMP/pre_pin_parent.py" >"$RUNNER_TEMP/pre_pin_parent.txt" 2>&1 || rc=$?
+          python3 -E -s "$RUNNER_TEMP/pre_pin_parent.py" >"$RUNNER_TEMP/pre_pin_parent.txt" 2>&1 || rc=$?
           cat "$RUNNER_TEMP/pre_pin_parent.txt"
           {
             echo "## Pre-pin parent gate (C-A3)"
@@ -2535,7 +2535,7 @@ jobs:
           AUTHOR=$(git log -1 --format='%an <%ae>')
           SHA=$(git rev-parse HEAD)
           export BODY AUTHOR SHA
-          python3 "$dir/pr_body.py"
+          python3 -E -s "$dir/pr_body.py"
 
       # THE DERIVATION, and it is a CHECKED-IN SCRIPT rather than the heredoc it
       # used to be. `hooks/run_block_size.py` states the reason as a rule of this
@@ -2579,7 +2579,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          python3 "$GATE_DIR/next_version.py"
+          python3 -E -s "$GATE_DIR/next_version.py"
 
       # BELT AND BRACES rather than the primary defence. A HEAD that already
       # carries a tag also has an empty `last..HEAD`, so the step above would
@@ -2705,7 +2705,7 @@ jobs:
           GATE_DIR: ${{ steps.gate.outputs.dir }}
         run: |
           set -euo pipefail
-          python3 "$GATE_DIR/example_pins.py"
+          python3 -E -s "$GATE_DIR/example_pins.py"
 
       # TWO CALLS, NOT ONE. `POST /git/refs` on its own makes a LIGHTWEIGHT tag:
       # a name pointing at a commit, with no message, no tagger and no date of
@@ -2875,7 +2875,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$UNDER_REVIEW" = "yadgarhq/actions" ]; then dir=.; else dir=.ci-actions; fi
-          python3 "$dir/scripts/tool_versions.py" "$dir/versions.yaml" >> "$GITHUB_OUTPUT"
+          python3 -E -s "$dir/scripts/tool_versions.py" "$dir/versions.yaml" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ steps.versions.outputs.python }}
@@ -2942,7 +2942,7 @@ jobs:
           # summary, leaving the one required check in the estate reporting red
           # with its reasoning in a log nobody opens.
           rc=0
-          python3 "$dir/scripts/ci_verdict.py" \
+          python3 -E -s "$dir/scripts/ci_verdict.py" \
             >"$RUNNER_TEMP/verdict.txt" 2>"$RUNNER_TEMP/verdict.err" || rc=$?
           cat "$RUNNER_TEMP/verdict.txt"
           cat "$RUNNER_TEMP/verdict.err" >&2

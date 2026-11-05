@@ -939,7 +939,7 @@ def test_both_readers_reach_the_gate_by_name():
     it through the same staged path.
     """
     text = (REPO / ".github" / "workflows" / "ci-pr.yaml").read_text()
-    assert text.count('python3 "$dir/pr_body.py"') == 2
+    assert text.count('python3 -E -s "$dir/pr_body.py"') == 2
 
 
 # ---------------------------------------------------------------------------
