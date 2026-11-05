@@ -810,6 +810,31 @@
   pass_filenames: false
   verbose: true
 
+# YAADGAAR 557 (ADR-1136, ratifying ADR-1129). A chart prints no values-derived
+# scalar raw into YAML: a raw `{{ .Values.x }}` lets a value inject keys, whole
+# documents (`---`) or a type change. Every output action whose operands reach a
+# values-derived scalar ends in `quote`, `toJson`, `int64`, `int`, or `toYaml`
+# followed by `nindent` (inline `toYaml` is raw, ADR-1129), or is listed in the
+# chart's `chart/ci/raw-prints-allowlist.txt` as
+# `<template path>: <expression>  # ADR-1136: <reason>`. A form the gate cannot
+# parse is NOT_MODELLED and red; it cannot be allowlisted. A stale entry is red.
+# The hook's docstring carries the provenance model (what counts as values-derived).
+#
+# NOT IN ANY CLASS IN `classes.json`, ON PURPOSE, as `chart-required-defaults`
+# above: each chart repository's sweep (encode, or allowlist with a reason) lands
+# first, then one change adds the id to the class.
+# `scripts/tests/test_chart_raw_prints.py` pins that no class names it yet.
+#
+# `always_run` with `pass_filenames: false`: the subject is every template of
+# every chart in the tree, not the touched file.
+- id: chart-raw-prints
+  name: ADR-1136 — a chart prints no values-derived scalar raw into YAML
+  language: script
+  entry: hooks/chart_raw_prints.py
+  always_run: true
+  pass_filenames: false
+  verbose: true
+
 # ADR-0705 — THE TWO HALVES OF MERGE-TIME FEEDBACK ON AN ORGANISATION'S OWN SEED
 # DECLARATION. These are the only entries in this manifest whose intended consumer is
 # NOT a repository in this organisation. An adopting organisation's GitOps repository
