@@ -2766,3 +2766,79 @@ def test_a_resolved_value_carrying_a_unicode_space_is_refused(tmp_path):
         result = run(root)
         assert result.returncode == 1, (name, result.stdout)
         assert "U+" in findings_of(result), (name, result.stdout)
+
+
+# A COLON IN A PLAIN SCALAR (yaadgaar 622). Measured 2026-11-06 on helm v4.3.0 and
+# v3.18.4, identical: in a plain scalar, a colon followed by a space, a tab or the end
+# of the line is a mapping indicator, and Helm refuses `a: 1 x: 0` ("mapping values
+# are not allowed in this context"). A colon followed by NBSP or IDEO is not: YAML's
+# blanks are the space and the tab only. Built with `chr()`, never a raw character.
+NBSP = chr(0xA0)
+IDEO = chr(0x3000)
+TAB = chr(9)
+NL = chr(10)
+
+# Helm refuses each of these as the value of `a`.
+COLON_INDICATOR_VALUES = [
+    "1 x: 0",
+    "1" + NBSP + "x: 0",
+    "1 x:" + TAB + "0",
+    "x:",
+    "x: # c",
+    ":",
+    "1::",
+    "1#x: 0",
+    "x:" + TAB + "# c",
+    "b:c: d",
+]
+
+# Helm reads each of these as a string; the scan keeps the raw value it read before.
+COLON_LEGAL_VALUES = {
+    "1 x:0": "1 x:0",
+    "http://h:80/p": "http://h:80/p",
+    "1 x:" + NBSP + "0": "1 x:" + NBSP + "0",
+    "1 x:" + IDEO + "0": "1 x:" + IDEO + "0",
+    '"x: 0"': '"x: 0"',
+    "'x: 0'": "'x: 0'",
+    "1 # c: d": "1",
+    "1 :x": "1 :x",
+    "x:# c": "x:# c",
+    "0:0": "0:0",
+}
+
+
+def test_a_plain_scalar_holding_a_mapping_indicator_is_unmodelled():
+    """RED on afc39f8 (yaadgaar 622): the scan read `a: 1 x: 0` as the string
+    "1 x: 0", which is on, where Helm refuses the file. The path is NOT_MODELLED;
+    the keys beside it are still read."""
+    gate = gate_module()
+    values = gate.scan_values("a: 1 x: 0" + NL + "b: 1" + NL)
+    assert values.modelled, values.reason
+    assert values.truth("a") == gate.GUARD_UNMODELLED
+    assert values.scalars["a"] is gate.NOT_MODELLED
+    assert values.raw("a") is None
+    assert values.truth("b") == gate.GUARD_ON
+    assert values.truth("x") == gate.GUARD_ABSENT
+    wrong = []
+    for value in COLON_INDICATOR_VALUES:
+        scanned = gate.scan_values("a: " + value + NL)
+        if not scanned.modelled or scanned.truth("a") != gate.GUARD_UNMODELLED:
+            wrong.append((value, scanned.modelled, scanned.truth("a")))
+    assert not wrong, wrong
+    nested = gate.scan_values("p:" + NL + "  a: 1 x: 0" + NL)
+    assert nested.modelled, nested.reason
+    assert nested.truth("p.a") == gate.GUARD_UNMODELLED
+    assert nested.truth("p") == gate.GUARD_ON
+
+
+def test_a_colon_helm_reads_as_text_keeps_the_scalar():
+    """The boundary: a colon followed by a non-blank, by NBSP or IDEO, inside
+    quotes, or inside a comment is text to Helm, and the scan reads it as before."""
+    gate = gate_module()
+    wrong = []
+    for value, raw in COLON_LEGAL_VALUES.items():
+        scanned = gate.scan_values("a: " + value + NL)
+        state = (scanned.modelled, scanned.raw("a"), scanned.truth("a"))
+        if state != (True, raw, gate.GUARD_ON):
+            wrong.append((value, state))
+    assert not wrong, wrong

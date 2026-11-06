@@ -828,6 +828,18 @@ def scan_values(text: str) -> Values:
             parents.update(ancestors(path))
             suppress_from = indent + 1
             continue
+        if value[0] not in "\"'" and (
+            ": " in value or ":\t" in value or value.endswith(":")
+        ):
+            # A MAPPING INDICATOR IN A PLAIN SCALAR (yaadgaar 622). Measured on helm
+            # v4.3.0 and v3.18.4: a colon followed by a YAML blank or the end of the
+            # line makes `a: 1 x: 0` a Helm error, "mapping values are not allowed".
+            # A colon followed by NBSP or IDEO is text. Checked after the comment is
+            # stripped (`a: 1 # c: d` is "1") and never on a quoted value
+            # (`a: "x: 0"` is a string). Not suppressed: Helm refuses the file anyway.
+            scalars[path] = NOT_MODELLED
+            parents.update(ancestors(path))
+            continue
         scalars[path] = value
         parents.update(ancestors(path))
 
@@ -1284,8 +1296,9 @@ def resolve_scalar(occurrence: KeyOccurrence, values: Values):
             "unresolvable",
             f"values.yaml sets `{path}` to a construct this gate does not model — an "
             f"anchor, an alias, a sequence, a flow collection, a template "
-            f"expression, a Unicode space at the value's edge or text after its "
-            f"closing quote. This is NOT a claim that `{path}` is unset",
+            f"expression, a Unicode space at the value's edge, text after its "
+            f"closing quote, or a plain value holding a colon followed by a space, a "
+            f"tab or the end of the line. This is NOT a claim that `{path}` is unset",
         )
     raw = values.raw(path)
     if raw is None:
@@ -1405,8 +1418,9 @@ def guard_message(blocking, field: str, where: str, tail: str = "") -> str:
         return (
             f"{prefix}{named} is on, and values.yaml sets {named} to a construct this "
             f"gate does not model — an anchor, an alias, a sequence, a flow "
-            f"collection, a template expression, a Unicode space at the value's edge "
-            f"or text after its closing quote. The chart is refused because this "
+            f"collection, a template expression, a Unicode space at the value's edge, "
+            f"text after its closing quote, or a plain value holding a colon followed "
+            f"by a space, a tab or the end of the line. The chart is refused because this "
             f"gate cannot tell whether the field renders. It is NOT a claim that "
             f"{named} is unset.{tail}"
         )
