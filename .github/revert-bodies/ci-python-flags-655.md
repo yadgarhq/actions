@@ -22,9 +22,25 @@
 
   TESTS THE REVERT EDITS. A plain `git revert` already carries these. If the
   workflows moved and you revert BY HAND, edit each one as well:
-    - `scripts/tests/test_ci_pr_python_flags.py` returns to its yaadgaar 653
-      form: `ci-pr.yaml` only, the command word `python3` only, no `env:`
-      check;
+    - `scripts/tests/test_ci_pr_python_flags.py`: since yaadgaar 656 it also
+      reads `seed-declaration.yaml`, so never delete it and do not return it
+      to its yaadgaar 653 form. Move `ci-release.yaml` and `sweep.yaml` from
+      `MIN_SITES` to `NOT_YET` (with this revert's number as the reason), and
+      delete their six rows in
+      `test_dropping_the_flags_in_another_workflow_is_caught`; keep its three
+      `seed-declaration.yaml` rows. This revert puts `PYTHONPATH` back on the
+      `pre_pin_parent` step, which reds
+      `test_no_env_sets_a_python_variable[ci-pr.yaml]`. If yaadgaar 653 is
+      still applied (`ci-pr.yaml` is in `MIN_SITES`), make three edits:
+      delete `test_a_pythonpath_back_on_the_pre_pin_parent_gate_is_caught`;
+      in `test_a_variable_merely_named_after_python_is_not_caught`, change
+      `assert python_env(w) == []` to `assert python_env(w) ==
+      python_env(load())`, because that test reads the whole of `ci-pr.yaml`
+      and the restored `PYTHONPATH` is now in it; and parametrize
+      `test_no_env_sets_a_python_variable` over
+      `sorted(set(MIN_SITES) - {"ci-pr.yaml"})` (an exclusion, never a skip:
+      ADR-0650). If 653 was already reverted by hand, `ci-pr.yaml` is out of
+      `MIN_SITES` and those two tests are gone, so this step does not apply;
     - `scripts/tests/test_sweep.py`: the two `run` pins in
       `test_the_workflow_takes_a_wait_input_and_waits_before_it_evaluates` and
       `test_the_follow_up_job_only_dispatches_this_workflow_live_after_act`

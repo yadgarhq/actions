@@ -129,7 +129,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$UNDER_REVIEW" = "yadgarhq/actions" ]; then dir=.; else dir=.ci-actions; fi
-          python3 "$dir/scripts/tool_versions.py" "$dir/versions.yaml" >> "$GITHUB_OUTPUT"
+          python3 -E -s "$dir/scripts/tool_versions.py" "$dir/versions.yaml" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ steps.versions.outputs.python }}
@@ -184,7 +184,7 @@ jobs:
           # swallows every section after it — exactly when an operator most
           # needs to read them. Measured by rendering this block.
           status=0
-          python3 "$RUNNER_TEMP/seed_repository.py" \
+          python3 -E -s "$RUNNER_TEMP/seed_repository.py" \
             --part seed-no-ask-prompt --root "$CONTENT_ROOT" \
             | tee -a "$GITHUB_STEP_SUMMARY" || status=$?
           printf '```\n\n' >> "$GITHUB_STEP_SUMMARY"
@@ -221,7 +221,7 @@ jobs:
           # swallows every section after it — exactly when an operator most
           # needs to read them. Measured by rendering this block.
           status=0
-          python3 "$RUNNER_TEMP/seed_repository.py" \
+          python3 -E -s "$RUNNER_TEMP/seed_repository.py" \
             --part seed-front-matter --root "$CONTENT_ROOT" --report \
             | tee -a "$GITHUB_STEP_SUMMARY" || status=$?
           printf '```\n\n' >> "$GITHUB_STEP_SUMMARY"
