@@ -21,11 +21,18 @@
   TESTS THE REVERT EDITS. A plain `git revert` already carries these. If
   `ci-pr.yaml` moved and you revert BY HAND, edit each one as well:
     - `scripts/tests/test_ci_pr_python_flags.py`, which asserts the flags on
-      every call: since yaadgaar 655 it also reads `ci-release.yaml` and
-      `sweep.yaml`, so do not delete it. Drop `ci-pr.yaml` from `MIN_SITES`
-      and delete the mutant tests that load `ci-pr.yaml`. Delete the whole
-      file only if `.github/revert-bodies/ci-python-flags-655.md` is applied
-      too;
+      every call: since yaadgaar 655 and 656 it also reads `ci-release.yaml`,
+      `seed-declaration.yaml` and `sweep.yaml`, so never delete it. Move
+      `ci-pr.yaml` from `MIN_SITES` to `NOT_YET` (with this revert's number
+      as the reason), and delete these six tests, which load `ci-pr.yaml`:
+      `test_dropping_the_flags_at_one_site_is_caught`,
+      `test_keeping_only_one_flag_is_caught`,
+      `test_a_python3_after_a_pipe_or_subshell_is_still_checked`,
+      `test_another_interpreter_spelling_is_caught`,
+      `test_a_pythonpath_back_on_the_pre_pin_parent_gate_is_caught` and
+      `test_a_variable_merely_named_after_python_is_not_caught`. The tests
+      yaadgaar 656 added run on a one-step workflow built in the test, load
+      no workflow file, and stay;
     - `scripts/tests/test_ci_pr_secret_scan_wiring.py`: `EXPECTED_RUN` and the
       substring in `test_the_precommit_job_runs_the_secret_scan` return to
       `python3 "$RUNNER_TEMP/secret_scan.py"`;
