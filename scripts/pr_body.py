@@ -73,7 +73,13 @@ STARTS_ENTRY = re.compile(r"^\s*[-*][ \t]")
 # one. Every wrap in it is greedy and breaks on a word boundary.
 WRAP = 72
 
-REQUIRED = ("What", "Why", "Changelog", "Verification", "Risk")
+REQUIRED = ("What", "Why", "Changelog", "Breaking?", "Verification", "Risk")
+
+# ADR-1258 (yaadgaar 199 step 3): the only answers `## Breaking?` accepts, on its
+# first non-comment, non-blank line, compared case-insensitively. Anything after
+# that line is the author's free-text reason.
+BREAKING = "Breaking?"
+ANSWERS = ("yes", "no")
 
 
 def looks_wrapped(lines, width=WRAP):
@@ -411,6 +417,39 @@ def changelog_entries(lines, wrapped, absorb=False):
     return bad, matches
 
 
+def breaking_problem(lines, strict):
+    """The refusal for a `## Breaking?` answer, or None when it agrees.
+
+    ADR-1258. The answer must agree with the Changelog: `yes` needs at least
+    one `!` bullet and `no` forbids one, read from the STRICT reading of the
+    bullets (a wrapped reading that disagrees is already the ambiguity
+    refusal). A missing or empty section is the REQUIRED loop's to report, so
+    this says nothing about one: one cause, one line.
+    """
+    first = next((line.strip() for line in lines if line.strip()), None)
+    if first is None:
+        return None
+    answer = first.lower()
+    if answer not in ANSWERS:
+        return (
+            f"`## {BREAKING}` must open with `yes` or `no` alone on its first "
+            f"line; found `{first[:60]}`. Put any reason on the lines after it."
+        )
+    bangs = [m.group(0).strip() for m in strict if m.group("bang")]
+    if answer == "yes" and not bangs:
+        return (
+            f"`## {BREAKING}` answers `yes`, but no Changelog bullet carries `!`. "
+            "Mark the breaking bullet (e.g. `feat!:`), or answer `no`."
+        )
+    if answer == "no" and bangs:
+        return (
+            f"`## {BREAKING}` answers `no`, but a Changelog bullet carries `!`: "
+            + "; ".join(f"`{b[:60]}`" for b in bangs[:4])
+            + ". Answer `yes`, or drop the `!`."
+        )
+    return None
+
+
 def ambiguity(strict, lenient):
     """The refusal, naming both readings and the line they part company on.
 
@@ -465,7 +504,7 @@ def review(text, wrapped):
             "request body — check `squash_merge_commit_message`",
         )
 
-    bump, count = None, 0
+    bump, count, strict = None, 0, []
     lines = found.get("Changelog", [])
     if any(l.strip() for l in lines):
         # BOTH READINGS OF THE SAME TEXT, because in wrapped mode they can
@@ -490,6 +529,10 @@ def review(text, wrapped):
             problems.append(ambiguity(strict, lenient))
         else:
             bump, count = bump_for(strict), len(strict)
+
+    breaking = breaking_problem(found.get(BREAKING, []), strict)
+    if breaking:
+        problems.append(breaking)
     return problems, bump, count
 
 

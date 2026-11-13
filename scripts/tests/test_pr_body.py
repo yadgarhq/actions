@@ -20,6 +20,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pr_body  # noqa: E402
@@ -29,10 +31,15 @@ REPO = Path(__file__).resolve().parents[2]
 
 
 def body(what="a thing", why="a reason", changelog="- fix: a thing",
-         verification="ran it", risk="none"):
-    """A body with all five sections, so a test can break exactly one of them."""
+         verification="ran it", risk="none", breaking="no"):
+    """A body with all six sections, so a test can break exactly one of them.
+
+    `breaking` is the `## Breaking?` answer (ADR-1258). It must agree with the
+    Changelog, so a test whose Changelog carries a `!` bullet passes `yes`.
+    """
     return (
         f"## What\n\n{what}\n\n## Why\n\n{why}\n\n## Changelog\n\n{changelog}\n\n"
+        f"## Breaking?\n\n{breaking}\n\n"
         f"## Verification\n\n{verification}\n\n## Risk\n\n{risk}\n"
     )
 
@@ -97,7 +104,7 @@ def test_feat_implies_minor():
 
 
 def test_a_bang_implies_major():
-    _, bump, _ = pr_body.review(body(changelog="- fix!: a thing"), wrapped=False)
+    _, bump, _ = pr_body.review(body(changelog="- fix!: a thing", breaking="yes"), wrapped=False)
     assert bump == "major"
 
 
@@ -130,7 +137,7 @@ reached verification, on `ssl_ca`, in the `connect_options` block"""
 
 
 def test_a_real_wrapped_commit_message_passes_in_wrapped_mode():
-    problems, bump, count = pr_body.review(body(changelog=WRAPPED_CHANGELOG), wrapped=True)
+    problems, bump, count = pr_body.review(body(changelog=WRAPPED_CHANGELOG, breaking="yes"), wrapped=True)
     assert problems == []
     assert (bump, count) == ("major", 4)
 
@@ -161,8 +168,8 @@ def test_a_long_squash_subject_does_not_defeat_the_template_gates_wrap_reading()
     filler = "x" * 71
     changelog = f"- fix: a thing\n{filler}\n- feat!: absorbed\n"
 
-    short = pr_body.review(short_subject + "\n\n" + body(changelog=changelog), wrapped=True)
-    long_ = pr_body.review(long_subject + "\n\n" + body(changelog=changelog), wrapped=True)
+    short = pr_body.review(short_subject + "\n\n" + body(changelog=changelog, breaking="yes"), wrapped=True)
+    long_ = pr_body.review(long_subject + "\n\n" + body(changelog=changelog, breaking="yes"), wrapped=True)
 
     # THE CORRECT ANSWER, pinned first so the defect's own answer is visibly
     # wrong beside it: the wrap makes this Changelog ambiguous, so neither
@@ -174,7 +181,7 @@ def test_a_long_squash_subject_does_not_defeat_the_template_gates_wrap_reading()
 
 def test_the_same_wrapped_message_is_refused_in_unwrapped_mode():
     """The two modes must actually differ, or one of them is decoration."""
-    problems, _, _ = pr_body.review(body(changelog=WRAPPED_CHANGELOG), wrapped=False)
+    problems, _, _ = pr_body.review(body(changelog=WRAPPED_CHANGELOG, breaking="yes"), wrapped=False)
     assert any("Conventional Commits" in p for p in problems)
 
 
@@ -511,7 +518,7 @@ def test_the_gate_does_not_exempt_a_person_with_the_same_body():
 
 
 def test_the_gate_reads_the_wrapped_flag():
-    text = body(changelog=WRAPPED_CHANGELOG)
+    text = body(changelog=WRAPPED_CHANGELOG, breaking="yes")
     assert run(text, wrapped="false").returncode == 1
     assert run(text, wrapped="true").returncode == 0
 
@@ -568,7 +575,7 @@ def test_a_bullet_the_wrap_could_have_produced_is_ambiguous():
     cannot tell, and this one is the last thing between a reviewed patch and
     an immutable major nobody can withdraw.
     """
-    text = body(changelog=FULL + "\n- feat!: and the bump the two readings imply differs")
+    text = body(changelog=FULL + "\n- feat!: and the bump the two readings imply differs", breaking="yes")
     problems, bump, count = pr_body.review(text, wrapped=True)
     assert any("ambiguous" in p for p in problems)
     assert any("major" in p and "patch" in p for p in problems)
@@ -577,7 +584,7 @@ def test_a_bullet_the_wrap_could_have_produced_is_ambiguous():
 
 def test_a_bullet_the_wrap_cannot_explain_is_read_as_an_entry():
     """The other side of it: a real second bullet is still a real second bullet."""
-    text = body(changelog=SHORT + "\n- feat!: a genuine second entry")
+    text = body(changelog=SHORT + "\n- feat!: a genuine second entry", breaking="yes")
     problems, bump, count = pr_body.review(text, wrapped=True)
     assert problems == []
     assert (bump, count) == ("major", 2)
@@ -685,21 +692,21 @@ def test_the_real_wrapped_fixture_holds_no_ambiguity():
     Its three bullet boundaries follow lines of 10, 27 and 69 columns, none of
     which is full, so every one of its four entries survives both readings.
     """
-    problems, bump, count = pr_body.review(body(changelog=WRAPPED_CHANGELOG), wrapped=True)
+    problems, bump, count = pr_body.review(body(changelog=WRAPPED_CHANGELOG, breaking="yes"), wrapped=True)
     assert problems == []
     assert (bump, count) == ("major", 4)
 
 
 def test_an_unwrapped_body_is_read_exactly_as_before():
     """The absorption belongs to wrapped mode. A pull request body is verbatim."""
-    text = body(changelog=FULL + "\n- feat!: and the bump the two readings imply differs")
+    text = body(changelog=FULL + "\n- feat!: and the bump the two readings imply differs", breaking="yes")
     problems, bump, count = pr_body.review(text, wrapped=False)
     assert problems == []
     assert (bump, count) == ("major", 2)
 
 
 def test_the_gate_is_red_on_an_ambiguous_message():
-    text = body(changelog=FULL + "\n- feat!: and the bump the two readings imply differs")
+    text = body(changelog=FULL + "\n- feat!: and the bump the two readings imply differs", breaking="yes")
     result = run(text, wrapped="true")
     assert result.returncode == 1
     assert "ambiguous" in result.stdout + result.stderr
@@ -989,7 +996,7 @@ def test_a_comment_opener_in_a_code_span_does_not_drop_a_later_feat_bang():
     problems, bump, count = pr_body.review(
         "## What\n\nx\n\n## Why\n\nx\n\n## Verification\n\nx\n\n"
         "## Risk\n\nx\n\n## Changelog\n\n"
-        "- fix: strip `<!--` openers\n- feat!: drop v1\n",
+        "- fix: strip `<!--` openers\n- feat!: drop v1\n\n## Breaking?\n\nyes\n",
         False,
     )
     assert (problems, bump, count) == ([], "major", 2)
@@ -1047,3 +1054,107 @@ def test_fetch_commit_token_is_not_forwarded_on_redirect(monkeypatch):
         req, None, 302, "Found", {}, "https://elsewhere.example/x")
     assert hop is not None
     assert hop.get_header("Authorization") is None
+
+
+# ------------------------------------------------------------- Breaking? (ADR-1258)
+#
+# yaadgaar 199 step 3. `## Breaking?` is answered `yes` or `no` on its first
+# non-comment, non-blank line, and the answer must agree with the Changelog: a
+# `!` bullet needs `yes`, and `yes` needs a `!` bullet.
+
+
+def breaking_problems(text, wrapped=False):
+    problems, _, _ = pr_body.review(text, wrapped=wrapped)
+    return [p for p in problems if "Breaking?" in p]
+
+
+def test_breaking_is_required_after_the_changelog():
+    assert pr_body.REQUIRED == (
+        "What", "Why", "Changelog", "Breaking?", "Verification", "Risk")
+
+
+def test_yes_with_a_bang_bullet_passes():
+    problems, bump, _ = pr_body.review(
+        body(changelog="- feat!: drop a thing", breaking="yes"), wrapped=False)
+    assert problems == []
+    assert bump == "major"
+
+
+def test_no_without_a_bang_bullet_passes():
+    problems, bump, _ = pr_body.review(
+        body(changelog="- feat: a thing", breaking="no"), wrapped=False)
+    assert problems == []
+    assert bump == "minor"
+
+
+def test_yes_without_a_bang_bullet_is_refused_and_names_the_missing_bullet():
+    found = breaking_problems(body(changelog="- feat: a thing", breaking="yes"))
+    assert len(found) == 1
+    assert "`yes`" in found[0] and "no Changelog bullet carries `!`" in found[0]
+
+
+def test_no_with_a_bang_bullet_is_refused_and_names_the_bullet():
+    found = breaking_problems(
+        body(changelog="- fix: a thing\n- feat!: drop a thing", breaking="no"))
+    assert len(found) == 1
+    assert "`no`" in found[0] and "feat!: drop a thing" in found[0]
+
+
+def test_an_empty_breaking_section_is_refused_once():
+    found = breaking_problems(body(breaking=""))
+    assert found == ["`## Breaking?` is empty (comments are not an answer)"]
+
+
+def test_a_comment_only_breaking_section_is_refused_once():
+    found = breaking_problems(body(breaking="<!-- yes or no -->"))
+    assert found == ["`## Breaking?` is empty (comments are not an answer)"]
+
+
+def test_a_missing_breaking_heading_is_refused_once():
+    text = body().replace("## Breaking?\n\nno\n\n", "")
+    assert "## Breaking?" not in text
+    assert breaking_problems(text) == ["missing section `## Breaking?`"]
+
+
+@pytest.mark.parametrize("answer", ["maybe", "yes.", "no — a stricter gate", "y", "n", "false"])
+def test_any_other_first_line_is_refused_and_names_the_allowed_answers(answer):
+    found = breaking_problems(body(breaking=answer))
+    assert len(found) == 1
+    assert "`yes` or `no`" in found[0]
+
+
+@pytest.mark.parametrize("answer,changelog", [
+    ("YES", "- feat!: drop a thing"), ("Yes", "- fix(pool)!: refuse a thing"),
+    ("NO", "- fix: a thing"), ("  no  ", "- fix: a thing"),
+])
+def test_the_answer_is_case_insensitive_and_trimmed(answer, changelog):
+    problems, _, _ = pr_body.review(body(changelog=changelog, breaking=answer), wrapped=False)
+    assert problems == []
+
+
+def test_lines_after_the_answer_are_free_text():
+    text = body(breaking="no\nA stricter gate is minor under ADR-1258.\nyes, really")
+    assert pr_body.review(text, wrapped=False)[0] == []
+
+
+def test_a_comment_before_the_answer_is_skipped():
+    text = body(changelog="- feat!: drop a thing",
+                breaking="<!-- yes or no -->\n\nyes\nIt drops a thing.")
+    assert pr_body.review(text, wrapped=False)[0] == []
+
+
+def test_the_answer_is_checked_in_wrapped_mode_too():
+    assert breaking_problems(body(changelog="- feat!: drop", breaking="no"), wrapped=True)
+    assert not breaking_problems(body(changelog="- feat!: drop", breaking="yes"), wrapped=True)
+
+
+def test_the_gate_is_red_when_the_answer_disagrees():
+    result = run(body(changelog="- feat!: drop a thing", breaking="no"))
+    assert result.returncode == 1
+    assert "Breaking?" in result.stdout
+
+
+def test_the_gate_is_green_when_the_answer_agrees():
+    result = run(body(changelog="- feat!: drop a thing", breaking="yes"))
+    assert result.returncode == 0, result.stdout
+    assert "**major**" in result.stdout
