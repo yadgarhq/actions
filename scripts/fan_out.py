@@ -573,6 +573,12 @@ def body(template, repository, cls, current, tag, changes, deployable):
             "body carries no Conventional Commits entry and the `version` job "
             "cuts no tag for it.",
         ],
+        # ADR-1258: no Changelog bullet at all, so no `!` one either.
+        "Breaking?": [
+            "no",
+            "A hook adoption changes developer tooling only, never documented "
+            "behaviour of this repository (ADR-1258).",
+        ],
         "Verification": [
             "`ci / passed` on this pull request runs this repository's pre-commit "
             "at the new rev; that run IS the verification. Nothing was run before "

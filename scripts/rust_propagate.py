@@ -116,6 +116,9 @@ def body(template, version, repository, paths):
                 "automatically (the `rust-bump` workflow in yadgarhq/actions). The sweeper "
                 "merges it once `ci / passed` is green (ADR-1106)."],
         "Changelog": [f"- chore(deps): bump the Rust version to {version} (ADR-1120)"],
+        # ADR-1258: the Changelog bullet is `chore(deps):`, never a `!` one.
+        "Breaking?": ["no", "A Rust version bump re-pins the toolchain and changes no documented "
+                      "behaviour of this repository (ADR-1258)."],
         "Verification": ["`ci / passed` on this pull request is the verification: the build, "
                          "the tests and clippy run on the new toolchain. Nothing was run before "
                          "it was opened."],

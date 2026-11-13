@@ -399,6 +399,10 @@ TEMPLATE = """\
 
 <!-- Conventional Commits bullets. -->
 
+## Breaking?
+
+<!-- yes or no (ADR-1258). -->
+
 ## Verification
 
 <!-- How you know it works. -->

@@ -443,6 +443,8 @@ TEMPLATE = """## What
 
 <!-- bullets -->
 
+## Breaking?
+
 ## Verification
 
 ## Risk
@@ -950,7 +952,7 @@ def generated_body(repo="iam-db", template=TEMPLATE, deployable=True):
 def test_the_body_fills_every_heading_of_the_consumers_template_in_its_order():
     body = generated_body()
     assert [h for h in body.splitlines() if h.startswith("## ")] == [
-        "## What", "## Why", "## Changelog", "## Verification", "## Risk"]
+        "## What", "## Why", "## Changelog", "## Breaking?", "## Verification", "## Risk"]
 
 
 # --------------------------------------------------------------------------

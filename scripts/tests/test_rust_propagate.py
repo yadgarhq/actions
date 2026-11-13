@@ -194,7 +194,7 @@ def test_the_body_carries_every_template_section_and_one_changelog_bullet():
 
 
 def test_the_consumers_own_template_wins():
-    fake = Fake(template="## What\n\n## Why\n\n## Changelog\n\n## Verification\n\n## Risk\n\n## Extra\n")
+    fake = Fake(template="## What\n\n## Why\n\n## Changelog\n\n## Breaking?\n\n## Verification\n\n## Risk\n\n## Extra\n")
     one(fake)
     assert "## Extra" in fake.prs[-1]["body"]
 
