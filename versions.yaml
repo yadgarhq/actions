@@ -77,7 +77,7 @@ tools:
   zizmor: { version: "1.29.0", sites: 1 }
   helm: { version: "3.18.4", sites: 6 }
   trivy: { version: "0.74.0", sites: 6, sha256: "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a" }
-  rust-toolchain: { version: "1.99.1", sites: 5 }
+  rust-toolchain: { version: "1.100.0", sites: 5, previous: "1.99.1" }
   python: { version: "3.14", sites: 12 }
   prettier: { version: "3.9.6", sites: 2 }
   pytest: { version: "9.1.1", sites: 3 }
