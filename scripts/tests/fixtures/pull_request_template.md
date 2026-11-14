@@ -61,6 +61,10 @@
   If that major version is 1 or higher, the classification applies unshifted. A major-classified bullet bumps MAJOR. A minor-classified bullet bumps MINOR. A patch-classified bullet bumps PATCH.
 -->
 
+## Breaking?
+
+<!-- yes or no. Does this change narrow or alter documented behaviour an existing caller or consumer relies on (a new refusal, a narrowed input, a changed default or meaning, a removed or renamed hook, check, input or output)? A stricter gate alone is not breaking (ADR-1258). yes needs a `!` Changelog bullet; no forbids one. -->
+
 ## Verification
 
 <!--

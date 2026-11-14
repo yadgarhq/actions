@@ -355,6 +355,9 @@ def body(template, action, version, old, digest):
         "What": [what],
         "Why": [why],
         "Changelog": [f"- {title(action, version)}"],
+        # ADR-1258: the Changelog bullet is `chore(deps):`, never a `!` one.
+        "Breaking?": ["no", "A Rust release bump re-pins the org toolchain and changes no "
+                      "documented behaviour a consumer relies on (ADR-1258)."],
         "Verification": ["`ci / passed` on this pull request: `versions_parity` holds the three "
                          "sites to one value and the suite runs on it. Nothing was run before it "
                          "was opened."],

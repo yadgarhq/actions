@@ -74,7 +74,7 @@ GIT_URL = re.compile(
 
 HEADING = re.compile(r"^[ \t]*(#{1,6})[ \t]+(.+?)[ \t]*$", re.M)
 
-REQUIRED = ("What", "Why", "Changelog", "Verification", "Risk")
+REQUIRED = ("What", "Why", "Changelog", "Breaking?", "Verification", "Risk")
 
 # WHERE A PULL REQUEST BODY'S TEMPLATE COMES FROM, by GitHub's own rule
 # (yaadgaar 316): the repository's `.github/pull_request_template.md` when it
@@ -411,6 +411,13 @@ def body(template, bumps, repository):
         "Changelog": [
             f"- chore(deps): bump {b.dep.name} from {b.dep.tag} to {b.tag}"
             for b in ordered
+        ],
+        # ADR-1258: the answer agrees with the Changelog above, which carries
+        # `chore(deps):` bullets and never a `!` one.
+        "Breaking?": [
+            "no",
+            "A re-pin adopts already-published tags of in-org crates and "
+            "changes no documented behaviour of this repository (ADR-1258).",
         ],
         "Verification": [
             "`ci / passed` on this pull request IS the verification. It runs "
