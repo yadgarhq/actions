@@ -489,7 +489,7 @@ jobs:
       # charts in the cluster, so packaging with it keeps the producer and the
       # consumer the same program. The full reasoning is above the `precommit`
       # copy in `ci-pr.yaml`; when Argo's bundled helm changes, all three follow.
-      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
         with:
           version: v${{ needs.detect.outputs.helm }}
       # D65: the chart IN GIT points at a moving tag, because our own cluster
