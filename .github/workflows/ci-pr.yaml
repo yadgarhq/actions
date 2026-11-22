@@ -476,7 +476,7 @@ jobs:
       # `detect` and names no version of its own. The explicit version also
       # removes the network from the decision — getLatestHelmVersion() is never
       # called, so neither the fetch nor its hardcoded fallback can apply.
-      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
         with:
           version: v${{ needs.detect.outputs.helm }}
 
@@ -664,7 +664,7 @@ jobs:
       # inline `[ -d chart ]`: most consumers have no `chart/` at all, and a
       # bare `helm dependency update chart` there fails outright rather than
       # no-opping.
-      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
         with:
           version: v${{ needs.detect.outputs.helm }}
       - name: resolve chart dependencies
@@ -1906,7 +1906,7 @@ jobs:
       # This job renders every chart and reads the result, so it is the job the
       # version divergence hit: run 33968099875 gave it v3.18.4 while precommit
       # got v4.2.4. The reasoning for v3.18.4 is above the precommit copy.
-      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
         with:
           version: v${{ needs.detect.outputs.helm }}
       # ADR-0725, same step and same reasoning as the `precommit` copy: this
@@ -2078,7 +2078,7 @@ jobs:
       # step with them. The reasoning for v3.18.4 is above the precommit copy:
       # it is the helm Argo CD v3.1.8 renders with, and a gate that exists to
       # catch what Argo would reject must render the chart the way Argo does.
-      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
         with:
           version: v${{ needs.detect.outputs.helm }}
       # ADR-0725, same step and same reasoning as the `precommit` and
@@ -2245,7 +2245,7 @@ jobs:
       # The same two pins `precommit`, `portability` and `service_immutable`
       # use — the action's SHA and the helm version — rather than a fourth
       # pair to keep in step with them (`test_helm_pin_agrees.py`).
-      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
         with:
           version: v${{ needs.detect.outputs.helm }}
 
